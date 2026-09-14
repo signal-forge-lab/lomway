@@ -2,7 +2,7 @@
 
 Review date: 2026-09-14 (independent re-review; original certification evidence: 2026-09-13)
 
-Verdict: **PASS — public generalization, final review, and local push preparation complete (100%)**
+Verdict: **PASS — public generalization, final review, and initial public push complete (100%)**
 
 ## Public generalization recovery — authoritative current result
 
@@ -27,7 +27,7 @@ Portability is documented in `PORTABILITY.md` / `PORTABILITY.ja.md`: Core has no
 
 The release privacy gate scans tracked plus intended untracked candidate files while excluding build/runtime scratch. The dependency gate compares the exact lockfile package set with `cargo metadata --locked` and fails closed on unresolved OSV records. The Windows clean-machine smoke never overwrites the live workstation artifact: it uses a dedicated temporary `CARGO_TARGET_DIR`.
 
-No publish, push, or tag was performed. After the original certification, an explicit operator-approved operational migration removed the obsolete individual Secure MCP Tunnels and their old local runtime aliases, renamed the retained remote tunnel to **Lomway**, and left one Lomway Secure MCP Tunnel as the only remote ingress. That migration changes workstation runtime state but does not change the public Core contract or release evidence.
+The initial public push is complete at `https://github.com/signal-forge-lab/lomway`, with local `main` tracking `origin/main`. No release tag or release artifact publication was performed. After the original certification, an explicit operator-approved operational migration removed the obsolete individual Secure MCP Tunnels and their old local runtime aliases, renamed the retained remote tunnel to **Lomway**, and left one Lomway Secure MCP Tunnel as the only remote ingress. That migration changes workstation runtime state but does not change the public Core contract or release evidence.
 
 ### Independent re-review corrections — 2026-09-14
 
@@ -44,7 +44,7 @@ The re-review found and fixed documentation/release-record inconsistencies rathe
 
 ### Push readiness — 2026-09-14
 
-Local push preparation is complete. `main` is the only branch intended for publication, its history is privacy-clean, and the release gates are repeatable. The canonical public destination is `https://github.com/signal-forge-lab/lomway`, selected to match the existing `signal-forge-lab` public repository convention. Push **only `main`** with `git push -u origin main`; never use `--all` or `--mirror` because local tooling refs are intentionally non-public.
+The initial public push is complete. `main` is the only published branch, its history is privacy-clean, and local `main` tracks `origin/main` at `https://github.com/signal-forge-lab/lomway`. Future pushes must remain **main-only**; never use `--all` or `--mirror` because local tooling refs are intentionally non-public.
 
 ---
 
@@ -224,7 +224,7 @@ The implementation/re-review cycle found and resolved these material issues rath
 
 Blocking implementation/review work: **none**.
 
-Not performed because it is a separate explicit publication/user-UI action. Local push preparation is complete:
+Not performed because each is a separate explicit migration/release action. The initial public push itself is complete:
 
 - disabling/deleting existing individual ChatGPT connectors;
 - changing Google Drive;
@@ -234,4 +234,4 @@ Those are optional later migration/release actions, not incomplete gateway imple
 
 ## 9. Final verdict
 
-**PASS — 100% complete for the requested design, implementation, tests, operational integration, single-Tunnel migration state, security/hygiene review, final review, and local push-preparation scope.**
+**PASS — 100% complete for the requested design, implementation, tests, operational integration, single-Tunnel migration state, security/hygiene review, final review, and initial public push scope.**

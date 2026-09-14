@@ -612,7 +612,7 @@ tasks:
       docs: "README/Quickstart/Configuration/Testing/Release/Final Review reflect current CLI, public config, integration paths and release gates"
       core_independence: "src/ and Cargo.toml require no OpenAI/Swibo/SOPS/PowerShell integration"
       re_review: "2026-09-14 independent review corrected stale HTTP-surface, release-checklist, public 0..N vs private baseline, test-count, single-Tunnel migration documentation, live-Windows release-build procedure, and push-history privacy before final acceptance"
-      release_tree: "public main reconstructed from the reviewed clean tree so pre-public machine-specific history is not reachable from main; git diff --check PASS; canonical public destination selected as https://github.com/signal-forge-lab/lomway to match existing signal-forge-lab repositories; tag/release publication remains separate"
+      release_tree: "public main reconstructed from the reviewed clean tree so pre-public machine-specific history is not reachable from main; git diff --check PASS; canonical public repository created at https://github.com/signal-forge-lab/lomway and initial main push completed; tag/release publication remains separate"
       completed_at_utc: "2026-09-13"
     acceptance:
       - zero_functional_regression

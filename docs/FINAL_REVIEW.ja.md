@@ -2,7 +2,7 @@
 
 Review date: 2026-09-14（独立再review。元のcertification evidenceは2026-09-13）
 
-Verdict: **PASS — public generalization / Final Review / local push準備 complete (100%)**
+Verdict: **PASS — public generalization / Final Review / 初回public push complete (100%)**
 
 ## Public generalization recovery — 現在の正本結果
 
@@ -40,7 +40,7 @@ orchestratorのcompletion flagをそのまま採用せず再reviewし、以下�
 
 ### Push readiness — 2026-09-14
 
-local push準備は完了です。公開対象branchは`main`のみで、履歴privacyはclean、release gateはrepeatableです。正式な公開先は既存の `signal-forge-lab` 公開repo構成に合わせて `https://github.com/signal-forge-lab/lomway` とします。pushは **`git push -u origin main` のみ**を実行し、local tooling refは非公開のため `--all` / `--mirror` は使用しません。
+初回public pushは完了です。公開branchは`main`のみで、履歴privacyはclean、local `main` は `https://github.com/signal-forge-lab/lomway` の `origin/main` をtrackしています。今後もpush対象は **mainのみ**とし、local tooling refは非公開のため `--all` / `--mirror` は使用しません。
 
 ---
 
@@ -216,7 +216,7 @@ local config / runtime / logs / build outputはignore済み。final scanではre
 
 Blocking implementation/review work: **none**。
 
-別の明示的publish/user-UI actionなので未実施です。local push準備は完了しています:
+それぞれ別の明示的migration/release actionなので未実施です。初回public push自体は完了しています:
 
 - 既存個別ChatGPT connectorのdisable/delete
 - Google Drive変更
@@ -226,4 +226,4 @@ Blocking implementation/review work: **none**。
 
 ## 9. Final verdict
 
-**PASS — requested design / implementation / tests / operational integration / single-Tunnel migration state / security & hygiene review / Final Review / local push準備 scope を100%完了。**
+**PASS — requested design / implementation / tests / operational integration / single-Tunnel migration state / security & hygiene review / Final Review / 初回public push scope を100%完了。**
