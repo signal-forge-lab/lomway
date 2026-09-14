@@ -1,0 +1,636 @@
+schema_version: 1
+project: lomway
+initiative: public-generalization
+status: completed
+design_source: docs/PUBLIC_GENERALIZATION_DESIGN.md
+human_readable_backlog: docs/PUBLIC_GENERALIZATION_TASKS.md
+
+rules:
+  - preserve_current_production_baseline
+  - never_publish_private_identifiers_or_secrets
+  - backend_process_lifecycle_is_not_core_responsibility
+  - openai_swibo_sops_are_optional_integrations
+  - never_automatically_retry_mutations
+  - run_focused_tests_for_each_change
+  - avoid_unrelated_refactors
+  - preserve_current_six_backend_regression
+
+lanes:
+  A: Config/Core model
+  B: Backend registry/namespace
+  C: Host/router/health
+  D: CLI/platform independence
+  E: Optional integrations
+  F: Tests/release/docs
+
+tasks:
+  - id: LMG-G0-01
+    title: Capture baseline evidence
+    lane: F
+    status: done
+    depends_on: []
+    allowed_paths: ["docs/", "tests/"]
+    evidence:
+      captured_at_utc: "2026-09-13"
+      baseline_doc: docs/PUBLIC_GENERALIZATION_BASELINE.md
+      baseline_doc_ja: docs/PUBLIC_GENERALIZATION_BASELINE.ja.md
+      fmt: "cargo fmt --check --all -> exit 0"
+      clippy: "cargo clippy --all-targets --locked -- -D warnings -> exit 0, zero warnings"
+      unit: "cargo test --locked --lib -> 0 tests defined, 0 failed"
+      mock_policy: "cargo test --locked --test policy -> 10 passed, 0 failed"
+      mock_proxy: "cargo test --locked --test proxy -> 5 passed, 0 failed"
+      real_backends: "cargo test --locked --test real_backends -- --ignored -> 1 passed, 0 failed; all 6 backends reachable (tools/list: workbridge 12, memory 32, ufo 19, browser 97, xmind 21, praxiom 2)"
+      prod_config_check: "cargo run --locked -- --config config/proxy.local.toml --check -> exit 0; listen 127.0.0.1:17777; 6 backends"
+      namespaces: [workbridge, memory, ufo, browser, xmind, praxiom]
+      namespace_count: 6
+      totals: "16 test functions passed, 0 failed; zero baseline failures"
+      dirty_state_safety: "git status identical (43 A, 4 AM, 7 untracked, 0 stashes) before and after all runs; no reset, discard, or overwrite performed; source/config/test code untouched"
+      secrets_in_artifacts: "none (namespace names already public in config/proxy.example.toml; machine-local config gitignored and not reproduced)"
+      mutation_manifest: docs/PUBLIC_GENERALIZATION_G0_EVIDENCE.md
+      completed_at_utc: "2026-09-13"
+      verification_rounds: 2
+    acceptance:
+      - fmt_clippy_unit_mock_real_backend_baseline_recorded
+      - namespace_counts_recorded
+      - zero_baseline_failures
+      - no_secret_values_in_artifacts
+
+  - id: LMG-G0-02
+    title: Define branch worktree rollback policy
+    lane: F
+    status: done
+    depends_on: [LMG-G0-01]
+    allowed_paths: ["docs/"]
+    evidence:
+      policy_doc: docs/PUBLIC_GENERALIZATION_ROLLBACK.md
+      policy_doc_ja: docs/PUBLIC_GENERALIZATION_ROLLBACK.ja.md
+      rollback_point: "root commit of main (initial baseline commit); identified via git rev-list --max-parents=0 main printing exactly one hash"
+      current_protection: "main is unborn (0 commits) at capture time; policy forbids all resets/discards/cleans until the baseline commit exists and mandates creating it before LMG-G1-01 starts"
+      binding: "rollback point must reproduce the G0 baseline evidence (fmt/clippy clean; 0+10+5+1 tests; --check reports 6 backends)"
+      mutation_manifest: docs/PUBLIC_GENERALIZATION_G0_EVIDENCE.md
+      completed_at_utc: "2026-09-13"
+      verification_rounds: 2
+    acceptance:
+      - stable_rollback_point_is_unambiguous
+
+  - id: LMG-G1-01
+    title: Implement versioned public config model
+    lane: A
+    status: done
+    handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
+    depends_on: [LMG-G0-01]
+    allowed_paths: ["src/config/", "src/lib.rs", "tests/"]
+    evidence:
+      wiring: "src/lib.rs declares config/backend/cli/gateway/health/namespace; adds DEFAULT_SERVER_NAME; Cargo.toml gains serde/serde_json/toml (regular deps)"
+      zero_one_many: "validate accepts 0/1/N backends (accepts_zero_one_and_many_backends); empty public config loads cleanly (empty_single_and_many_public_configs_load_cleanly)"
+      unknown_keys: "deny_unknown_fields asserted at top, server, and backend level (unknown_keys_are_rejected_strictly)"
+      tests: "cargo test --locked --lib -> 37 passed, 0 failed (was 0 executable before wiring)"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - schema_version_supported
+      - zero_one_many_backends_parse
+      - strict_unknown_key_handling
+      - serde_tests_pass
+
+  - id: LMG-G1-02
+    title: Decompose policy validation
+    lane: A
+    status: done
+    handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
+    depends_on: [LMG-G1-01]
+    allowed_paths: ["src/config/", "src/lib.rs", "tests/policy.rs"]
+    evidence:
+      decomposition: "src/gateway/policy.rs exposes listener/namespace/exposure/northbound/performance/argument/population/transport/endpoint/resilience/surface validators; src/config/validate.rs covers schema/listener/policy-flags/id/prefix/url/timeout/uniqueness"
+      delegation: "wired src/lib.rs validate_policy now delegates to gateway::policy::validate_proxy_policy (single source of truth); tests/policy.rs 11/11 prove identical decisions"
+      population: "public schema permits 0..N backends (generalization); legacy gate keeps at-least-one (legacy_policy_keeps_the_single_backend_population_rule), matching pinned upstream ProxyConfig loader"
+      gates: "cargo fmt --check --all -> exit 0; cargo clippy --all-targets --locked -- -D warnings -> exit 0"
+      tests: "cargo test --locked -> lib 37, policy 11, proxy 9 passed; 0 failed"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - listener_backend_url_id_prefix_size_validators_exist
+      - unsupported_features_fail_closed
+      - current_policy_safety_not_reduced
+
+  - id: LMG-G1-03
+    title: Add legacy configuration migration adapter
+    lane: A
+    status: done
+    handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
+    depends_on: [LMG-G1-01]
+    allowed_paths: ["src/config/", "config/", "docs/"]
+    evidence:
+      adapter: "src/config/migrate.rs to_public/to_legacy compile against mcp_proxy::config::{BackendConfig, ProxySettings} (handoff defect fixed)"
+      round_trip: "current_style_deployment_maps_to_public_schema, public_config_maps_back_to_equivalent_legacy_config, empty_public_configuration_maps_to_a_backend_free_legacy_proxy"
+      privacy: "migration is a pure in-memory transformation; no private values introduced into public files"
+      tests: "cargo test --locked --lib config:: -> 23 passed, 0 failed"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - current_deployment_can_map_to_public_schema
+      - no_private_values_added_to_public_files
+
+  - id: LMG-G2-01
+    title: Add validated backend descriptor
+    lane: B
+    status: done
+    handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
+    depends_on: [LMG-G1-01]
+    allowed_paths: ["src/backend/", "src/lib.rs", "tests/"]
+    evidence:
+      descriptor: "src/backend/descriptor.rs BackendDescriptor::try_from_entry constructs descriptors only from validated config entries; BackendRegistry::from_config validates the whole public config before descriptor construction"
+      integration_free: "rg -i 'openai|swibo|sops' over src/ and Cargo.toml -> 0 matches; descriptors carry no integration-specific types"
+      tests: "cargo test --locked --lib -> 50 passed, 0 failed (descriptors_are_constructed_only_from_validated_config)"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - descriptor_constructed_only_from_validated_config
+      - no_openai_swibo_sops_types
+
+  - id: LMG-G2-02
+    title: Implement arbitrary backend registry
+    lane: B
+    status: done
+    handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
+    depends_on: [LMG-G2-01]
+    allowed_paths: ["src/backend/", "src/lib.rs", "tests/"]
+    evidence:
+      registry: "src/backend/registry.rs BackendRegistry holds 0..N descriptors; iter() is exactly configuration order (deterministic); get(id) is exact-match and ids are never normalized"
+      tests: "supports_zero_one_and_many_backends, lookup_by_id_is_exact, contains_no_hard_coded_private_backend_names all pass in the lib suite (50 passed, 0 failed)"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - zero_one_many_backends_supported
+      - deterministic_ordering
+      - lookup_by_id
+      - no_hard_coded_private_backend_names
+
+  - id: LMG-G2-03
+    title: Implement startup probe semantics
+    lane: B
+    status: done
+    handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
+    depends_on: [LMG-G2-02]
+    allowed_paths: ["src/backend/", "src/health/", "tests/"]
+    evidence:
+      probe: "src/backend/probe.rs probe_registry: required-down fails startup, optional-down degrades and is reported, all-unavailable fails by default; wired into Gateway::finish before serving and exposed by check --probe"
+      tests: "required_backend_down_fails_startup; optional_backend_down_degrades_but_is_reported; degrade-on-outage E2E in tests/fixtures.rs and tests/proxy.rs one_failed_backend_at_startup_is_skipped_when_another_is_healthy"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - required_backend_down_fails_startup
+      - optional_backend_down_degrades_or_skips
+      - all_unavailable_fails_by_default
+
+  - id: LMG-G3-01
+    title: Define namespace prefix policy
+    lane: B
+    status: done
+    handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
+    depends_on: [LMG-G1-02]
+    allowed_paths: ["src/namespace/", "src/config/", "tests/"]
+    evidence:
+      policy: "src/namespace/normalize.rs and src/config/validate.rs: allowed charset is a non-empty lowercase stem plus the '_' separator, unique across backends; reserved prefixes proxy_/lomway_/legacy lmg_ are rejected; ambiguous inputs are rejected, never silently normalized"
+      tests: "rejects_ambiguous_ids_and_prefixes_without_normalization (charset, separator, reserved), ambiguous_prefixes_are_never_silently_normalized, prefix_maps_to_mcp_name_and_back"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - allowed_prefix_charset_documented
+      - reserved_prefixes_rejected
+      - ambiguity_never_silently_normalized
+
+  - id: LMG-G3-02
+    title: Add tool collision preflight
+    lane: B
+    status: done
+    handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
+    depends_on: [LMG-G2-02, LMG-G3-01]
+    allowed_paths: ["src/namespace/", "src/backend/", "tests/"]
+    evidence:
+      preflight: "src/namespace/collision.rs plan_tools precomputes every final <prefix><tool> name before serving and fails fast on collision while naming both sources; wired into Gateway::finish and check --probe"
+      tests: "plans_deterministic_unique_names, collisions_fail_fast_and_identify_both_sources, duplicate_upstream_names_within_one_backend_also_fail; E2E same_named_backend_tools_are_namespaced_without_collision"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - final_tool_names_precomputed_before_serving
+      - collisions_fail_fast
+      - error_identifies_both_sources
+
+  - id: LMG-G3-03
+    title: Add schema preservation regression
+    lane: F
+    status: done
+    depends_on: [LMG-G3-02]
+    allowed_paths: ["tests/"]
+    evidence:
+      regression: "tests/proxy.rs tools_list_preserves_upstream_descriptions_and_input_schemas preserves rich upstream description/inputSchema verbatim and preserves absent descriptions as absent"
+      tests: "cargo test --locked --test proxy -> 13 passed, 0 failed"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - representative_tool_descriptions_preserved
+      - representative_input_schemas_preserved
+
+  - id: LMG-G4-01
+    title: Extract gateway builder
+    lane: C
+    status: done
+    handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
+    depends_on: [LMG-G2-02, LMG-G3-02]
+    allowed_paths: ["src/gateway/", "src/lib.rs", "tests/proxy.rs"]
+    evidence:
+      builder: "src/gateway/build.rs Gateway::build/build_from_legacy/finish converge public and legacy configs on the fail-closed pipeline (registry -> probe -> collision preflight -> health snapshot -> upstream composition); the serve CLI path runs it"
+      control_plane: "crate::build_proxy keeps Proxy::from_config plus require-success removal of the upstream 'proxy' backend; build_removes_upstream_proxy_control_plane_backend passes"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - mcp_proxy_composition_moved_to_gateway_module
+      - upstream_proxy_control_backend_still_removed
+
+  - id: LMG-G4-02
+    title: Restrict router surface
+    lane: C
+    status: done
+    handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
+    depends_on: [LMG-G4-01]
+    allowed_paths: ["src/gateway/", "tests/proxy.rs"]
+    evidence:
+      surface: "external router serves exactly /mcp, /healthz, /readyz on loopback; upstream /admin is blocked at top level and under /mcp; every other unrouted path 404s via the router fallback"
+      tests: "external_http_surface_exposes_mcp_and_health_but_not_admin asserts /healthz 200 and 404 for /admin/health, /mcp/admin/health, /mcp/admin/backends; readiness_tracks_backend_outage_and_recovery exercises /readyz"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - mcp_healthz_readyz_routes_exist
+      - admin_routes_inaccessible
+      - unknown_routes_404
+
+  - id: LMG-G4-03
+    title: Separate liveness readiness state
+    lane: C
+    status: done
+    handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
+    depends_on: [LMG-G2-03, LMG-G4-02]
+    allowed_paths: ["src/health/", "src/gateway/", "tests/"]
+    evidence:
+      model: "src/health/state.rs HealthState/HealthTracker keep liveness and readiness distinct: optional degradation is reported but ready; required failure never reports ready; all-unobserved/unhealthy is never ready"
+      wiring: "Gateway::finish snapshots HealthTracker::from_startup and refuses startup unless ready; /readyz additionally recomputes live from backend health as the stricter serving-time check"
+      tests: "liveness_and_readiness_are_distinct_concepts, optional_degradation_is_reported_but_ready, required_failure_never_reports_ready, all_backends_unobserved_or_unhealthy_is_never_ready; E2E readiness_tracks_backend_outage_and_recovery"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - liveness_and_readiness_are_distinct
+      - optional_degradation_semantics_tested
+      - required_failure_never_reports_ready
+
+  - id: LMG-G5-01
+    title: Implement public CLI
+    lane: D
+    status: done
+    handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
+    depends_on: [LMG-G1-01]
+    allowed_paths: ["src/cli/", "src/main.rs", "Cargo.toml", "tests/"]
+    evidence:
+      cli: "src/cli/args.rs + src/main.rs: clap Cli parsed in the binary and dispatched by cli::run; serve, check (--probe), list-backends, migrate, version; exit codes 0 success / 1 failure / 2 usage; the binary needs no shell or PowerShell on any platform"
+      tests: "parses_every_documented_command, config_is_optional_and_probe_defaults_to_false, migrate_requires_an_output_path, check_without_probe_is_nonblocking_and_reports_format, check_reports_in_memory_legacy_migration, list_backends_reports_the_on_disk_format"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - serve_command
+      - check_command
+      - list_backends_command
+      - version_command
+      - no_powershell_required_for_binary
+
+  - id: LMG-G5-02
+    title: Define configuration path precedence
+    lane: D
+    status: done
+    handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
+    depends_on: [LMG-G5-01]
+    allowed_paths: ["src/config/", "src/cli/", "docs/"]
+    evidence:
+      precedence: "src/config/load.rs resolve_config_path: explicit --config > LOMWAY_CONFIG env > first existing default candidate (config/proxy.local.toml then gateway.toml, working-directory relative); documented in module docs and CONFIGURATION (en+ja)"
+      tests: "config_path_precedence_is_documented_and_tested"
+      privacy: "core defaults contain no private user path; candidates are repository-relative filenames"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - precedence_documented_and_tested
+      - no_private_user_path_in_core_defaults
+
+  - id: LMG-G5-03
+    title: Audit cross platform core behavior
+    lane: D
+    status: done
+    depends_on: [LMG-G5-01]
+    allowed_paths: ["src/", "Cargo.toml", "docs/"]
+    evidence:
+      audit: "docs/PORTABILITY.md + PORTABILITY.ja.md: Core has no cfg(windows), shell, .exe, USERPROFILE/APPDATA/LOCALAPPDATA, or Windows-only path dependency; CLI/config use platform-neutral Rust Path/PathBuf and loopback TCP/HTTP"
+      ci: ".github/workflows/ci.yml now makes windows-latest, ubuntu-latest, and macos-latest all release-blocking with identical locked fmt/clippy/test/release-build gates"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - no_required_windows_only_process_behavior
+      - no_required_windows_only_path_behavior
+
+  - id: LMG-G6-01
+    title: Isolate OpenAI Secure MCP Tunnel integration
+    lane: E
+    status: done
+    handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
+    depends_on: [LMG-G5-01]
+    allowed_paths: ["integrations/openai-secure-tunnel/", "scripts/", "docs/"]
+    evidence:
+      isolation: "scripts/tunnel.ps1 and scripts/configure-tunnel.ps1 moved (git mv) to integrations/openai-secure-tunnel/; rg over scripts/ finds no tunnel/openai/sops remnants"
+      core_independence: "rg -i 'openai|swibo|sops' over src/ and Cargo.toml is clean; cargo build/test need no OpenAI credentials"
+      workflow: "both wrappers keep LOCAL_MCP_TUNNEL_CLIENT/PATH resolution and single-attempt client invocation; PowerShell parser check clean; CONFIGURATION/OPERATIONS (en+ja) updated to the new paths"
+      hygiene_test: "tests/policy.rs hygiene test now reads the wrappers from integrations/openai-secure-tunnel/ (consequential move edit, disclosed in handoff)"
+      no_retry: "no retry loops added; every client operation runs exactly once per invocation"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - core_build_test_needs_no_openai_credentials
+      - current_local_tunnel_workflow_remains_usable
+
+  - id: LMG-G6-02
+    title: Isolate Swibo integration
+    lane: E
+    status: done
+    handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
+    depends_on: [LMG-G5-01]
+    allowed_paths: ["integrations/swibo/", "docs/"]
+    evidence:
+      template: "integrations/swibo/README.md (+ja) documents the external-supervisor boundary and a placeholder-only template (<gateway-target>, <config-path>, <repo-root>)"
+      no_machine_paths: "the template contains no machine-specific absolute paths; all values are checkout-relative or environment-provided"
+      core_independence: "rg -i 'swibo' over src/ and Cargo.toml is clean; core imports no Swibo code and scripts/ wrappers have no Swibo knowledge"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - public_template_has_no_machine_specific_absolute_path
+      - core_imports_no_swibo_code
+
+  - id: LMG-G6-03
+    title: Isolate SOPS integration
+    lane: E
+    status: done
+    handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
+    depends_on: [LMG-G5-01]
+    allowed_paths: ["integrations/sops/", "scripts/", "docs/"]
+    evidence:
+      helper: "integrations/sops/Import-SopsSecrets.ps1 resolves named secrets from the canonical store into process environment variables; LOCAL_MCP_SOPS_STORE overrides the store path"
+      decoupling: "tunnel wrappers no longer inline-decrypt SOPS; they call the helper only when required keys are absent from the environment"
+      core_independence: "rg -i 'sops' over src/ and Cargo.toml is clean; the gateway reads plain process environment variables only"
+      privacy: "no secret values in any public file; the helper writes values only into the process environment and prints nothing"
+      workflow: "existing canonical-store workflow remains supported via the same default store path"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - core_works_without_sops
+      - public_files_contain_no_secret_values
+      - existing_local_sops_workflow_can_remain_supported
+
+  - id: LMG-G6-04
+    title: Reduce PowerShell to CLI wrappers
+    lane: E
+    status: done
+    handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
+    depends_on: [LMG-G5-01]
+    allowed_paths: ["integrations/powershell/", "scripts/", "docs/"]
+    evidence:
+      wrappers: "scripts/ retains only thin wrappers (install/check/start/status/stop/common + integration-smoke regression wrapper); integration-specific scripts moved to integrations/<name>/"
+      no_business_logic: "wrappers invoke only cargo, the gateway CLI, or public HTTP endpoints; config/policy/namespace/routing stay single-sourced in the Rust core"
+      inventory: "integrations/powershell/README.md (+ja) documents the wrapper inventory, wrapper guarantees, and the no-duplicate-logic boundary"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - powershell_contains_no_duplicate_core_business_logic
+
+  - id: LMG-G7-01
+    title: Add public mock MCP fixtures
+    lane: F
+    status: done
+    depends_on: [LMG-G2-03, LMG-G4-02]
+    allowed_paths: ["tests/", "test-fixtures/"]
+    evidence:
+      one_many: "tests/fixtures.rs covers public one/many backend fixture serving; test-fixtures/configs remains redistributable"
+      failure: "tests/proxy.rs all_required_backends_down_fails_gateway_startup + one_failed_backend_at_startup_is_skipped_when_another_is_healthy cover required fail-closed and optional degrade"
+      collision_timeout: "tests/proxy.rs cross_prefix_tool_collision_fails_gateway_startup + timeout_does_not_retry_a_mutating_tool cover collision and timeout paths"
+      tests: "cargo test --locked --test proxy -> 13 passed; cargo test --locked --test fixtures -> covered again by full suite"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - one_many_backends_covered
+      - optional_required_failure_covered
+      - collision_timeout_covered
+      - no_private_service_dependency
+
+  - id: LMG-G7-02
+    title: Prove exactly once mutation semantics
+    lane: F
+    status: done
+    depends_on: [LMG-G7-01]
+    allowed_paths: ["tests/"]
+    evidence:
+      timeout: "tests/proxy.rs timeout_does_not_retry_a_mutating_tool asserts AtomicUsize == 1 after timeout"
+      error: "tests/proxy.rs tool_error_path_does_not_retry_a_mutating_tool asserts AtomicUsize == 1 after upstream tool error"
+      tests: "cargo test --locked --test proxy -> 13 passed, 0 failed"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - timeout_path_mutation_counter_equals_one
+      - error_path_mutation_counter_equals_one
+
+  - id: LMG-G7-03
+    title: Add portable real backend tests
+    lane: F
+    status: done
+    depends_on: [LMG-G5-01]
+    allowed_paths: ["tests/", "test-fixtures/", "docs/"]
+    evidence:
+      fixtures: "test-fixtures/configs/ ships three redistributable public configurations (zero/one/many backends) documented in test-fixtures/README.md (+ja)"
+      tests: "cargo test --locked --test fixtures -> 5 passed, 0 failed: pinned inventory + redistributability scan, zero/one/many loading with public<->legacy migration and the preserved >=1-backend deployment gate, live one/many backend gateway E2E (namespaced tools/list, tool calls, optional degrade-on-outage), and the ignored live-regression guard"
+      privacy: "fixture scan rejects credentials, private deployment identifiers, and machine paths; backend URLs must stay loopback or ${VAR} references"
+      clean_machine: "default cargo test --locked passes with zero local backends (real_backends remains 1 ignored)"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - at_least_two_redistributable_public_fixtures
+      - no_private_credentials
+      - clean_machine_reproducible
+
+  - id: LMG-G7-04
+    title: Preserve private deployment regression
+    lane: F
+    status: done
+    depends_on: [LMG-G1-03, LMG-G6-01, LMG-G6-02, LMG-G6-03]
+    allowed_paths: ["tests/", "docs/"]
+    evidence:
+      real_backends: "cargo test --locked --test real_backends -- --ignored --nocapture -> 1 passed; required baseline namespaces workbridge 12, memory 32, ufo 19, browser 97, xmind 21, praxiom 2 all present; extra chrome 30 allowed"
+      tunnel: "integrations/openai-secure-tunnel/tunnel.ps1 -Action status -> exit 0, local healthz/readyz 200, ready=true (user-level client path injected into process without exposing it)"
+      smoke_contract: "scripts/integration-smoke.ps1 requires exactly the six baseline namespace families and observes chrome as an optional extra instead of turning it into a seventh baseline requirement"
+      migration: "no connector/tunnel reset, recreation, destructive migration, or retry performed"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - current_six_namespaces_available
+      - current_openai_tunnel_workflow_ready
+      - no_destructive_connector_or_tunnel_migration
+
+  - id: LMG-G8-01
+    title: Write public threat model
+    lane: F
+    status: done
+    depends_on: [LMG-G4-02]
+    allowed_paths: ["docs/", "tests/"]
+    evidence:
+      threat_model_doc: docs/THREAT_MODEL.md
+      threat_model_doc_ja: docs/THREAT_MODEL.ja.md
+      coverage: "13 threats (T-01..T-13) mapped to mitigations with enforcement points and test evidence; loopback isolation enforced at defaults/schema/policy layers; unauthenticated local boundary documented as accepted residual risk with rationale"
+      privacy: "no machine paths, emails, credentials, or private endpoint inventory; test/source references are repository-relative"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - threat_to_mitigation_mapping_complete
+
+  - id: LMG-G8-02
+    title: Add secret privacy release scan
+    lane: F
+    status: done
+    depends_on: []
+    allowed_paths: ["scripts/", "docs/"]
+    evidence:
+      gate: "scripts/release_privacy_scan.py scans tracked + intended untracked UTF-8 release files, excluding build/runtime scratch, for user paths, emails, live IDs, API keys/tokens and private keys"
+      result: "python scripts/release_privacy_scan.py -> PASS (112 candidate UTF-8 files on the 2026-09-14 independent final re-review)"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - no_user_paths_emails_live_ids_api_keys_private_keys
+
+  - id: LMG-G8-03
+    title: Add dependency license vulnerability gate
+    lane: F
+    status: done
+    depends_on: []
+    allowed_paths: ["scripts/", "docs/", "Cargo.toml", "Cargo.lock"]
+    evidence:
+      gate: "scripts/dependency_gate.py compares Cargo.lock exact name/version multiset with cargo metadata --locked, requires license metadata for every package, and queries OSV querybatch for each registry package"
+      result: "python scripts/dependency_gate.py -> PASS: 309 exact locked packages, 26 license expressions, 0 missing license metadata, 0 unresolved OSV vulnerability records"
+      policy: "gate conservatively fails on any unresolved OSV record, therefore every unresolved high/critical finding blocks release"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - exact_lockfile_scanned
+      - licenses_reviewed
+      - unresolved_high_critical_blocks_release
+
+  - id: LMG-G9-01
+    title: Produce Windows clean machine artifact smoke
+    lane: F
+    status: done
+    depends_on: [LMG-G5-03, LMG-G7-01]
+    allowed_paths: [".github/", "scripts/", "docs/"]
+    evidence:
+      script: "scripts/clean-machine-smoke.ps1 builds into an isolated temporary CARGO_TARGET_DIR, copies only release lomway + public_mock_backend + test-fixtures/configs/one-backend.toml into a fresh system temp directory, and never touches the live release artifact"
+      result: "clean-machine artifact smoke PASS: copied release binary check + serve; /healthz 200; /readyz 200; no private deployment backend"
+      ci: ".github/workflows/ci.yml runs the smoke on windows-latest"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - binary_plus_example_config_check_passes
+      - binary_plus_example_config_serve_passes
+
+  - id: LMG-G9-02
+    title: Add CI matrix
+    lane: F
+    status: done
+    depends_on: [LMG-G5-03]
+    allowed_paths: [".github/", "Cargo.toml", "docs/"]
+    evidence:
+      workflow: ".github/workflows/ci.yml"
+      gates: "cargo fmt --check --all; cargo clippy --all-targets --locked -- -D warnings; cargo test --locked; cargo build --locked --release (each exactly once, no retry steps)"
+      matrix: "windows-latest, ubuntu-latest, and macos-latest are all required after LMG-G5-03 portability audit completion"
+      clean_machine: "no private paths, no credentials, no local backend dependency (ignored real-backend suite excluded); persist-credentials disabled; contents: read permission only"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - locked_fmt_clippy_test_build_gates
+      - windows_required
+      - linux_macos_only_after_portability_proven
+
+  - id: LMG-G9-03
+    title: Add release metadata
+    lane: F
+    status: done
+    depends_on: [LMG-G9-01, LMG-G9-02]
+    allowed_paths: ["docs/", ".github/", "README.md", "README.ja.md", "LICENSE"]
+    evidence:
+      version: "Cargo.toml [package] version = 0.1.0 is the single source of truth; lomway version reports it with the MCP protocol feature and config schema_version"
+      metadata: "Cargo.toml adds readme/keywords/categories alongside license = MIT; LICENSE (MIT text) added; repository field intentionally unset until a public location exists (never private or machine-specific)"
+      changelog: "docs/CHANGELOG.md (Keep-a-Changelog format, curated 0.1.0 entry)"
+      release_process: "docs/RELEASE.md + RELEASE.ja.md define versioning, changelog, release-time sha256 checksum procedure (checksums are not committed), license, tagged source, shipped examples, and eight pre-release gates including the exact dependency/license/OSV gate"
+      examples: "config/proxy.example.toml and test-fixtures/configs/ shipped and referenced from README and docs"
+      no_publish: "no publish, tag push, or artifact upload performed or automated; every release step is manual per docs/RELEASE.md"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - version_changelog_checksums_license_source_examples_present
+
+  - id: LMG-G10-01
+    title: Write standalone quickstart
+    lane: F
+    status: done
+    depends_on: [LMG-G5-01, LMG-G7-03]
+    allowed_paths: ["docs/", "README.md", "README.ja.md", "config/"]
+    evidence:
+      quickstart: "docs/QUICKSTART.md + QUICKSTART.ja.md: build, minimal two-backend public config (one required + one optional), check / check --probe / list-backends, serve, endpoint table (/mcp /healthz /readyz), client-less verification, config path precedence"
+      no_integrations: "walkthrough uses zero OpenAI/Swibo/SOPS/PowerShell and says so explicitly; redistributable fixture configs are cross-referenced (test-fixtures/configs/)"
+      readme_sync: "README.md/README.ja.md link the quickstart, list the real scripts/ inventory, point tunnel commands at integrations/openai-secure-tunnel/, and document binary-only core modes"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - two_arbitrary_backends_without_integrations_documented
+
+  - id: LMG-G10-02
+    title: Write optional integration guides
+    lane: F
+    status: done
+    depends_on: [LMG-G6-01, LMG-G6-02, LMG-G6-03, LMG-G6-04]
+    allowed_paths: ["docs/", "integrations/"]
+    evidence:
+      index: "docs/INTEGRATIONS.md + INTEGRATIONS.ja.md index the four optional integrations, state the core-independence guarantee, and give a which-integration-when guide"
+      guides: "integrations/openai-secure-tunnel/, integrations/swibo/, integrations/sops/, integrations/powershell/ each keep separate README.md + README.ja.md guides"
+      core_independence: "guides and hygiene tests both enforce that src/ and Cargo.toml reference no integration (rg scan clean, 0 matches)"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - openai_swibo_sops_windows_guides_separate
+
+  - id: LMG-G10-03
+    title: Write migration rollback guide
+    lane: F
+    status: done
+    depends_on: [LMG-G1-03, LMG-G7-04]
+    allowed_paths: ["docs/"]
+    evidence:
+      migration: "docs/MIGRATION.md + MIGRATION.ja.md: format detection table, lomway migrate guarantees (never overwrites input or output, ${VAR} references preserved verbatim, migrated backends required=false to keep degrade-on-outage, pure in-memory transformation), field mapping, post-migration verification commands"
+      rollback: "config rollback (legacy file never mutated), permanent legacy-format support, source rollback anchored to the LMG-G0 root-commit rollback point via PUBLIC_GENERALIZATION_ROLLBACK (en+ja), optional integrations unaffected"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - current_to_generic_migration_documented
+      - rollback_documented
+
+  - id: LMG-G11-01
+    title: Execute final public release review
+    lane: F
+    status: done
+    depends_on:
+      - LMG-G7-04
+      - LMG-G8-01
+      - LMG-G8-02
+      - LMG-G8-03
+      - LMG-G9-03
+      - LMG-G10-01
+      - LMG-G10-02
+      - LMG-G10-03
+    allowed_paths: ["docs/"]
+    evidence:
+      review: "docs/FINAL_REVIEW.md + FINAL_REVIEW.ja.md authoritative public-generalization recovery section"
+      regression: "cargo fmt --check --all PASS; cargo clippy --all-targets --locked -- -D warnings PASS; cargo test --locked PASS (79 tests; real_backends 1 intentionally ignored); explicit real_backends --ignored 1/1 PASS"
+      portability: "docs/PORTABILITY.md (+ja); Windows/Linux/macOS all release-blocking in CI; clean-machine artifact smoke PASS in isolated target/temp directory"
+      security_privacy: "release_privacy_scan PASS on 112 candidate UTF-8 files; dependency_gate PASS on 309 exact locked packages, 26 license expressions, missing licenses 0, unresolved OSV records 0"
+      deployment: "six baseline namespaces available; 2026-09-14 re-review live smoke reports 213 tools / 7 representative calls with optional Chrome namespace; operator-approved post-certification migration leaves exactly one Lomway Secure MCP Tunnel/runtime alias and one tunnel-client process"
+      docs: "README/Quickstart/Configuration/Testing/Release/Final Review reflect current CLI, public config, integration paths and release gates"
+      core_independence: "src/ and Cargo.toml require no OpenAI/Swibo/SOPS/PowerShell integration"
+      re_review: "2026-09-14 independent review corrected stale HTTP-surface, release-checklist, public 0..N vs private baseline, test-count, single-Tunnel migration documentation, and the live-Windows release-build procedure before final acceptance"
+      release_tree: "git diff --check PASS (line-ending warnings only); no publish/push/tag performed"
+      completed_at_utc: "2026-09-13"
+    acceptance:
+      - zero_functional_regression
+      - portable_clean_machine_setup_passes
+      - current_deployment_regression_passes
+      - security_privacy_gate_passes
+      - docs_match_actual_cli_and_config
+      - core_has_no_mandatory_integration
+      - intended_release_tree_clean
+
+handoff_template:
+  fields:
+    - task_id
+    - status
+    - files_changed
+    - behavior_changed
+    - tests_run_and_result
+    - security_privacy_impact
+    - compatibility_impact
+    - known_followups
+    - unresolved_decisions

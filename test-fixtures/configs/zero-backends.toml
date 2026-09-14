@@ -1,0 +1,21 @@
+# Lomway portable fixture: zero backends.
+#
+# The public schema aggregates 0..N loopback MCP backends, so an empty
+# backend list is a valid public configuration. The deployment gate still
+# requires at least one backend, matching the pinned upstream loader; this
+# fixture proves that split without weakening it.
+#
+# Redistribution-safe: loopback-only listener on a documentation port, no
+# private service names, no machine paths, no credentials.
+
+schema_version = 1
+
+[server]
+host = "127.0.0.1"
+port = 18790
+
+[policy]
+allow_non_loopback_listener = false
+allow_non_loopback_backends = false
+hot_reload = false
+max_argument_size_bytes = 1048576

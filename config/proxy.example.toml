@@ -1,0 +1,76 @@
+# Documentation/example configuration only.
+# Runtime implementation should pin and validate the upstream mcp-proxy version.
+# Machine-specific URLs are environment-injected so this file can remain public.
+
+[proxy]
+name = "lomway"
+version = "0.1.0"
+separator = "_"
+hot_reload = false
+shutdown_timeout_seconds = 30
+# Preserve native schemas initially. Change to search exposure only after measured need.
+tool_exposure = "direct"
+tool_discovery = false
+instructions = "Aggregates trusted local MCP backends. Backend names are namespace prefixes."
+
+[proxy.listen]
+host = "127.0.0.1"
+port = 17777
+
+# Do not configure tool-call caching, retry, or hedging in v1.
+# Each backend is independently supervised outside this gateway.
+
+[[backends]]
+name = "workbridge"
+transport = "http"
+url = "${WORKBRIDGE_MCP_URL}"
+[backends.timeout]
+seconds = 300
+
+[[backends]]
+name = "memory"
+transport = "http"
+url = "${MEMORY_GATEWAY_MCP_URL}"
+[backends.timeout]
+seconds = 90
+
+[[backends]]
+name = "ufo"
+transport = "http"
+url = "${MICROSOFT_UFO_MCP_URL}"
+[backends.timeout]
+seconds = 180
+
+[[backends]]
+name = "browser"
+transport = "http"
+url = "${STEALTH_BROWSER_MCP_URL}"
+[backends.timeout]
+seconds = 180
+
+[[backends]]
+name = "xmind"
+transport = "http"
+url = "${XMIND_WORKBOARD_MCP_URL}"
+[backends.timeout]
+seconds = 90
+
+[[backends]]
+name = "praxiom"
+transport = "http"
+url = "${PRAXIOM_MCP_URL}"
+[backends.timeout]
+seconds = 180
+
+# The host does not serve upstream /admin/* at all and removes the MCP `proxy`
+# control-plane backend from the client-visible catalog.
+[security]
+max_argument_size = 1048576
+
+[observability]
+audit = true
+log_level = "info"
+json_logs = true
+
+[observability.metrics]
+enabled = false

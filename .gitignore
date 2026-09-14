@@ -1,0 +1,45 @@
+# Secrets and environment files
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.p12
+secrets/
+
+# Machine-local configuration
+config/proxy.local.toml
+config/*.local.toml
+config/*.local.json
+local-config.json
+
+# Runtime state / generated data
+runtime/
+logs/
+tmp/
+*.log
+*.pid
+*.lock
+!Cargo.lock
+
+# Rust
+/target/
+/target-deploy/
+
+# Local dependency / investigation scratch trees
+/.tmp_vendor/
+/.tmp_tower_mcp/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Test / coverage output
+coverage/
+artifacts/
+
+# Never commit local SOPS material copied into the repository
+*.sops.local.*

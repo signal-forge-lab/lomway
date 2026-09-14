@@ -1,0 +1,32 @@
+# Lomway portable fixture: many backends (required + optional mix).
+#
+# `alpha` and `beta` model required sample endpoints; `gamma` is optional and
+# models the degrade-on-outage path when a backend is unreachable. Replace
+# the sample loopback URLs with your own endpoints or `${VAR}` references.
+
+schema_version = 1
+
+[server]
+host = "127.0.0.1"
+port = 18792
+
+[[backends]]
+id = "alpha"
+prefix = "alpha_"
+url = "http://127.0.0.1:18701/mcp"
+required = true
+timeout_seconds = 30
+
+[[backends]]
+id = "beta"
+prefix = "beta_"
+url = "http://127.0.0.1:18702/mcp"
+required = true
+timeout_seconds = 30
+
+[[backends]]
+id = "gamma"
+prefix = "gamma_"
+url = "http://127.0.0.1:18703/mcp"
+required = false
+timeout_seconds = 5

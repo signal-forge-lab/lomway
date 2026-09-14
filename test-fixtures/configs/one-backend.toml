@@ -1,0 +1,18 @@
+# Lomway portable fixture: one required backend.
+#
+# Point `url` at any local Streamable HTTP MCP endpoint that is already
+# supervised outside this gateway, or replace it with a `${VAR}` environment
+# reference. Ports 18701-18703 are documentation sample ports only.
+
+schema_version = 1
+
+[server]
+host = "127.0.0.1"
+port = 18791
+
+[[backends]]
+id = "alpha"
+prefix = "alpha_"
+url = "http://127.0.0.1:18701/mcp"
+required = true
+timeout_seconds = 30

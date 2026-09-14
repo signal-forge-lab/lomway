@@ -1,0 +1,80 @@
+# CI matrix for Lomway (LMG-G9-02).
+#
+# Gate order per platform: locked fmt -> clippy -> test -> release build.
+# Windows, Linux and macOS are required after the LMG-G5-03 portability audit.
+#
+# No step in this workflow retries: every gate runs exactly once, and there
+# is no retry wrapper, no auto-re-run of failing steps, and no flaky-test
+# requeue. A failed gate fails the job.
+#
+# Clean-machine contract: no private machine paths, no credentials, no
+# environment-dependent configuration. `cargo test --locked` excludes the
+# `--ignored` real-backend suite, so no local backends are required.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  gates:
+    name: gates (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            required: true
+          - os: ubuntu-latest
+            required: true
+          - os: macos-latest
+            required: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Format check (locked dependency tree unchanged by fmt)
+        run: cargo fmt --check --all
+
+      - name: Clippy (all targets, warnings denied)
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Tests (locked; mock backends only)
+        run: cargo test --locked
+
+      - name: Release build (locked)
+        run: cargo build --locked --release
+
+      - name: Public release privacy scan
+        if: matrix.os == 'windows-latest'
+        run: python scripts/release_privacy_scan.py
+
+      - name: Exact lockfile dependency gate
+        if: matrix.os == 'windows-latest'
+        run: python scripts/dependency_gate.py
+
+      - name: Windows clean-machine artifact smoke
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/clean-machine-smoke.ps1
