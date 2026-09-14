@@ -29,11 +29,13 @@ impl BackendRegistry {
     }
 
     /// Construct a registry from already-validated descriptors.
+    #[cfg(test)]
     pub fn from_descriptors(backends: Vec<BackendDescriptor>) -> Self {
         Self { backends }
     }
 
     /// Look up a backend by id.
+    #[cfg(test)]
     pub fn get(&self, id: &str) -> Option<&BackendDescriptor> {
         self.backends.iter().find(|backend| backend.id() == id)
     }
@@ -44,6 +46,7 @@ impl BackendRegistry {
     }
 
     /// Number of registered backends.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.backends.len()
     }

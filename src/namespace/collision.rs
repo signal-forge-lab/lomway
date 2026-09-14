@@ -7,59 +7,20 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, bail};
-use serde_json::Value;
 
 use crate::backend::probe::ProbeReport;
 use crate::namespace::public_tool_name;
 
-/// A single upstream tool with its planned client-visible identity.
-#[derive(Debug, Clone)]
-pub struct PlannedTool {
-    /// Tool name as exposed by the backend.
-    pub upstream: String,
-    /// Final client-visible name: `<prefix><upstream>`.
-    pub public_name: String,
-    /// Upstream description, preserved verbatim.
-    pub description: Option<String>,
-    /// Upstream input schema, preserved verbatim.
-    pub input_schema: Value,
-}
-
-/// Planned tool surface for one backend.
-#[derive(Debug, Clone)]
-pub struct PlannedBackend {
-    /// Backend id.
-    pub id: String,
-    /// Backend namespace prefix.
-    pub prefix: String,
-    /// Planned tools in upstream listing order.
-    pub tools: Vec<PlannedTool>,
-}
-
 /// The complete precomputed tool surface of the gateway.
 #[derive(Debug, Clone)]
 pub struct ToolPlan {
-    backends: Vec<PlannedBackend>,
     total_tools: usize,
 }
 
 impl ToolPlan {
-    /// Planned backends in configuration (deterministic) order.
-    pub fn backends(&self) -> &[PlannedBackend] {
-        &self.backends
-    }
-
     /// Total number of planned final tool names.
     pub fn total_tools(&self) -> usize {
         self.total_tools
-    }
-
-    /// All final tool names in deterministic order.
-    pub fn public_names(&self) -> Vec<&str> {
-        self.backends
-            .iter()
-            .flat_map(|backend| backend.tools.iter().map(|tool| tool.public_name.as_str()))
-            .collect()
     }
 }
 
@@ -68,12 +29,10 @@ impl ToolPlan {
 /// Fails fast when two upstream tools would map to the same final name; the
 /// error identifies both sources.
 pub fn plan_tools(report: &ProbeReport) -> Result<ToolPlan> {
-    let mut backends = Vec::with_capacity(report.healthy.len());
     let mut seen: HashMap<String, (&str, &str)> = HashMap::new();
     let mut total = 0usize;
 
     for backend in &report.healthy {
-        let mut tools = Vec::with_capacity(backend.tools.len());
         for tool in &backend.tools {
             let public_name = public_tool_name(backend.descriptor.prefix(), &tool.name);
             if let Some((owner, upstream)) = seen.get(&public_name) {
@@ -85,26 +44,12 @@ pub fn plan_tools(report: &ProbeReport) -> Result<ToolPlan> {
                     tool.name
                 );
             }
-            seen.insert(public_name.clone(), (backend.descriptor.id(), &tool.name));
-            tools.push(PlannedTool {
-                upstream: tool.name.clone(),
-                public_name,
-                description: tool.description.clone(),
-                input_schema: tool.input_schema.clone(),
-            });
+            seen.insert(public_name, (backend.descriptor.id(), &tool.name));
             total += 1;
         }
-        backends.push(PlannedBackend {
-            id: backend.descriptor.id().to_string(),
-            prefix: backend.descriptor.prefix().to_string(),
-            tools,
-        });
     }
 
-    Ok(ToolPlan {
-        backends,
-        total_tools: total,
-    })
+    Ok(ToolPlan { total_tools: total })
 }
 
 #[cfg(test)]
@@ -127,8 +72,6 @@ mod tests {
     fn tool(name: &str) -> crate::backend::probe::UpstreamTool {
         crate::backend::probe::UpstreamTool {
             name: name.to_string(),
-            description: Some("demo".to_string()),
-            input_schema: serde_json::json!({"type": "object"}),
         }
     }
 
@@ -149,8 +92,6 @@ mod tests {
         };
         let plan = plan_tools(&report).expect("no collision expected");
         assert_eq!(plan.total_tools(), 3);
-        assert_eq!(plan.public_names(), vec!["a_status", "a_extra", "b_status"]);
-        assert_eq!(plan.backends()[0].id, "a", "configuration order is kept");
     }
 
     #[test]

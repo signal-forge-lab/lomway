@@ -41,5 +41,9 @@ Thumbs.db
 coverage/
 artifacts/
 
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+
 # Never commit local SOPS material copied into the repository
 *.sops.local.*

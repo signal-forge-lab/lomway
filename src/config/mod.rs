@@ -5,14 +5,14 @@
 //! prefixes. Unknown keys are rejected so configuration drift fails loudly
 //! instead of being silently ignored.
 
+mod constants;
 pub mod load;
 pub mod migrate;
 pub mod model;
 pub mod validate;
 
-pub use load::{load_config, load_gateway_config, resolve_config_path, resolve_config_path_with};
+pub use load::{load_config, load_gateway_config, resolve_config_path};
 pub use model::{BackendEntry, GatewayConfig, ObservabilityConfig, PolicyConfig, ServerConfig};
 pub use validate::{
     ALLOWED_PREFIX_CHARSET, MAX_ARGUMENT_SIZE_BYTES, RESERVED_PREFIXES, SCHEMA_VERSION, validate,
-    validate_backend_id, validate_backend_prefix, validate_backend_url,
 };

@@ -59,11 +59,28 @@ All of the following must pass on the intended release tree before tagging:
 3. `cargo test --locked` → green (mock backends only; the live six-backend regression stays `--ignored` and machine-local)
 4. Locked release build → success. On an idle/clean machine `cargo build --locked --release` is sufficient; on a live Windows workstation use a fresh staging `CARGO_TARGET_DIR` so the running executable is never overwritten.
 5. Docs match the actual CLI and configuration schema (commands in [QUICKSTART.md](QUICKSTART.md) and [CONFIGURATION.md](CONFIGURATION.md) run as written).
-6. Privacy/hygiene scan: `python scripts/release_privacy_scan.py` must pass with no credentials, private identifiers, machine-specific paths, or secret values in the intended release tree.
+6. Privacy/hygiene scan: `python scripts/release_privacy_scan.py` must pass with no credentials, private identifiers, machine-specific paths, secret values, or forbidden generated/private paths in the current candidate **or any blob reachable from `HEAD`**.
 7. Dependency/license/vulnerability gate: `python scripts/dependency_gate.py` must match the exact lockfile package set, find license metadata for every package, and return no unresolved OSV records.
 8. Clean-machine artifact smoke: `pwsh -NoProfile -File scripts/clean-machine-smoke.ps1` copies the release binary and public one-backend fixture into a fresh temp directory, starts only the redistributable public mock backend, and proves `check`, `/healthz`, and `/readyz` without any private deployment backend.
+9. Public-push shape: `main` must contain only intended public history; `git status --short --branch` must be clean; the intended push is `git push -u origin main`, never `git push --all` or `git push --mirror`. Local review/backup refs are not publication inputs.
 
-## 8. What this repository deliberately does not do
+## 8. First public push preparation
+
+The repository URL is intentionally not invented by this project. Until the maintainer supplies the real public destination, `Cargo.toml` leaves `repository` unset and no Git remote is configured.
+
+Once the public repository exists, the prepared push sequence is:
+
+```powershell
+git remote add origin <public-repository-url>
+git remote -v
+python scripts/release_privacy_scan.py
+git status --short --branch
+git push -u origin main
+```
+
+Push **only `main`**. Do not use `--all` or `--mirror`: local tooling may maintain non-public review/backup refs that are deliberately outside the public branch.
+
+## 9. What this repository deliberately does not do
 
 - No automatic publish, tag push, artifact upload, or CI-triggered release. Every step above is manual.
 - No retry of any release step; a failed gate fails and is investigated, not re-run blindly.

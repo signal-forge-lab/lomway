@@ -13,14 +13,32 @@
 
 use anyhow::{Result, ensure};
 use axum::Router;
-use mcp_proxy::ProxyConfig;
+use mcp_proxy::{Proxy, ProxyConfig};
 
 use crate::backend::registry::BackendRegistry;
 use crate::config::migrate;
 use crate::config::model::GatewayConfig;
 use crate::gateway::policy::validate_proxy_policy;
-use crate::health::{HealthState, HealthTracker};
+use crate::gateway::reconnect;
 use crate::namespace::collision::plan_tools;
+
+/// Construct the upstream proxy and fail closed unless its client-visible
+/// control-plane backend can be removed before serving.
+///
+/// Backend transport recovery is attached here so every serving entry point
+/// receives identical long-lived recovery semantics without retrying client
+/// tool calls.
+pub async fn build_proxy(config: ProxyConfig) -> Result<Proxy> {
+    validate_proxy_policy(&config)?;
+    let reconnect_specs = reconnect::specs(&config);
+    let proxy = Proxy::from_config(config).await?;
+    ensure!(
+        proxy.mcp_proxy().remove_backend("proxy").await,
+        "upstream control-plane MCP backend 'proxy' was not present; refusing to serve because admin-tool removal cannot be proven"
+    );
+    reconnect::spawn(proxy.mcp_proxy().clone(), reconnect_specs);
+    Ok(proxy)
+}
 
 /// A constructed, validated gateway that is not yet bound to a port.
 #[derive(Debug, Clone)]
@@ -28,7 +46,6 @@ pub struct Gateway {
     router: Router,
     listen_host: String,
     listen_port: u16,
-    health: HealthState,
     namespaces: Vec<String>,
 }
 
@@ -65,12 +82,6 @@ impl Gateway {
             "startup validation complete"
         );
 
-        let health = HealthTracker::from_startup(&registry, &report).snapshot();
-        ensure!(
-            health.ready(),
-            "startup validation failed; readiness was never achieved"
-        );
-
         let listen_host = public.server.host.clone();
         let listen_port = public.server.port;
         // Reuse the established production proxy path so the new public CLI
@@ -78,14 +89,13 @@ impl Gateway {
         // legacy mapping runs after startup validation and re-validates the
         // public model.
         let legacy = migrate::to_legacy(&public)?;
-        let proxy = crate::build_proxy(legacy).await?;
+        let proxy = build_proxy(legacy).await?;
         let namespaces = proxy.mcp_proxy().backend_namespaces();
-        let router = crate::gateway_router(proxy);
+        let router = crate::gateway::router::gateway_router(proxy);
         Ok(Self {
             router,
             listen_host,
             listen_port,
-            health,
             namespaces,
         })
     }
@@ -100,11 +110,6 @@ impl Gateway {
         (&self.listen_host, self.listen_port)
     }
 
-    /// Startup health snapshot served by `/readyz`.
-    pub fn health(&self) -> &HealthState {
-        &self.health
-    }
-
     /// Client-visible backend namespaces (after control-plane removal).
     pub fn namespaces(&self) -> &[String] {
         &self.namespaces
@@ -112,15 +117,11 @@ impl Gateway {
 
     /// Bind the configured loopback listener and serve until Ctrl-C.
     pub async fn serve(self) -> Result<()> {
-        let listener =
-            tokio::net::TcpListener::bind((self.listen_host.as_str(), self.listen_port)).await?;
-        tracing::info!(listen = %listener.local_addr()?, mcp_path = "/mcp", "gateway ready");
-        axum::serve(listener, self.router)
-            .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
-                tracing::info!("shutdown signal received");
-            })
-            .await?;
-        Ok(())
+        crate::gateway::router::serve_router(
+            self.router,
+            self.listen_host.as_str(),
+            self.listen_port,
+        )
+        .await
     }
 }

@@ -10,14 +10,11 @@
 
 use anyhow::{Context, Result, ensure};
 
+pub use crate::config::constants::{
+    MAX_ARGUMENT_SIZE_BYTES, MAX_BACKEND_TIMEOUT_SECONDS, SCHEMA_VERSION,
+};
 use crate::config::model::GatewayConfig;
 
-/// The only supported configuration schema version.
-pub const SCHEMA_VERSION: u32 = 1;
-/// Default (and maximum) tool-call argument payload size in bytes: 1 MiB.
-pub const MAX_ARGUMENT_SIZE_BYTES: usize = 1024 * 1024;
-/// Maximum backend request/probe timeout in seconds.
-pub const MAX_BACKEND_TIMEOUT_SECONDS: u64 = 300;
 /// Namespace prefixes reserved for gateway control planes. Backends may
 /// never claim them.
 pub const RESERVED_PREFIXES: [&str; 3] = ["proxy_", "lomway_", "lmg_"];
@@ -54,7 +51,7 @@ pub fn validate(config: &GatewayConfig) -> Result<()> {
 
 /// Only schema version 1 exists today; newer or older files fail with the
 /// exact value so users know what to change.
-pub fn validate_schema_version(schema_version: u32) -> Result<()> {
+fn validate_schema_version(schema_version: u32) -> Result<()> {
     ensure!(
         schema_version == SCHEMA_VERSION,
         "unsupported schema_version {schema_version}: this release supports only {SCHEMA_VERSION}"
@@ -63,7 +60,7 @@ pub fn validate_schema_version(schema_version: u32) -> Result<()> {
 }
 
 /// The listener is loopback-only in v1.
-pub fn validate_server(host: &str, port: u16) -> Result<()> {
+fn validate_server(host: &str, port: u16) -> Result<()> {
     ensure!(
         host == "127.0.0.1",
         "server.host must be exactly 127.0.0.1; non-loopback listeners require a future security profile"
@@ -73,7 +70,7 @@ pub fn validate_server(host: &str, port: u16) -> Result<()> {
 }
 
 /// Every policy escape hatch fails closed in v1.
-pub fn validate_policy_flags(config: &GatewayConfig) -> Result<()> {
+fn validate_policy_flags(config: &GatewayConfig) -> Result<()> {
     ensure!(
         !config.policy.allow_non_loopback_listener,
         "policy.allow_non_loopback_listener is not permitted in this release"
@@ -122,7 +119,7 @@ fn validate_unique_prefixes(config: &GatewayConfig) -> Result<()> {
 /// Backend ids stay stable and readable: lowercase, digits, `_` and `-`,
 /// starting with a letter or digit. Ambiguous spellings are rejected instead
 /// of being silently normalized.
-pub fn validate_backend_id(id: &str) -> Result<()> {
+pub(crate) fn validate_backend_id(id: &str) -> Result<()> {
     ensure!(!id.is_empty(), "backend id must not be empty");
     ensure!(
         id.len() <= 64,
@@ -145,7 +142,7 @@ pub fn validate_backend_id(id: &str) -> Result<()> {
 
 /// Prefixes are explicit: non-empty, lowercase, and terminated by the `_`
 /// namespace separator. Missing separators and reserved prefixes fail.
-pub fn validate_backend_prefix(prefix: &str) -> Result<()> {
+pub(crate) fn validate_backend_prefix(prefix: &str) -> Result<()> {
     ensure!(
         !prefix.is_empty(),
         "backend prefix must not be empty in this release"
@@ -177,7 +174,7 @@ pub fn validate_backend_prefix(prefix: &str) -> Result<()> {
 
 /// Backend URLs must be exact loopback Streamable HTTP MCP endpoints:
 /// `http://127.0.0.1:<port>/mcp`.
-pub fn validate_backend_url(url: &str) -> Result<()> {
+pub(crate) fn validate_backend_url(url: &str) -> Result<()> {
     ensure!(
         is_exact_loopback_mcp_url(url),
         "backend URL must be a loopback http://127.0.0.1:<port>/mcp endpoint, got {url:?}"

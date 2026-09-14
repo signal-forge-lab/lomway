@@ -90,7 +90,7 @@ pub fn migrate_legacy_to_public_file(input: &Path, output: &Path) -> Result<usiz
 
 /// Injectable core of [`migrate_legacy_to_public_file`], unit-testable
 /// without touching the process environment.
-pub fn migrate_legacy_to_public_file_with(
+fn migrate_legacy_to_public_file_with(
     input: &Path,
     output: &Path,
     lookup: impl Fn(&str) -> Option<String>,
@@ -191,7 +191,7 @@ fn resolve_legacy_env_with(
 
 /// Resolve `${VAR}` references in backend URLs against the process
 /// environment. Unresolved variables fail the load.
-pub fn resolve_env_refs(config: &mut GatewayConfig) -> Result<()> {
+fn resolve_env_refs(config: &mut GatewayConfig) -> Result<()> {
     for backend in &mut config.backends {
         if backend.url.contains("${") {
             backend.url = expand_env_vars(&backend.url)?;
@@ -245,7 +245,7 @@ pub fn resolve_config_path(explicit: Option<&Path>) -> Result<PathBuf> {
 
 /// Pure core of [`resolve_config_path`], unit-testable without touching the
 /// process environment or working directory.
-pub fn resolve_config_path_with(
+fn resolve_config_path_with(
     explicit: Option<&Path>,
     env_value: Option<&str>,
     base: &Path,

@@ -329,7 +329,7 @@ Do not infer / unresolved decisions: none
 
 ### Task ID: LMG-G9-03
 Status: DONE
-Files changed: `Cargo.toml` (`readme`, `keywords`, `categories`; comment explaining the intentionally unset `repository` field), `LICENSE` (new, MIT — matching the already-declared `license = "MIT"`), `docs/CHANGELOG.md` (new, curated 0.0→0.1.0 entry), `docs/RELEASE.md` + `docs/RELEASE.ja.md` (new release checklist: versioning, changelog, release-time sha256 procedure, license, tagged source, examples, seven pre-release gates), `docs/PUBLIC_GENERALIZATION_TASKS.yaml` (evidence)
+Files changed: `Cargo.toml` (`readme`, `keywords`, `categories`; comment explaining the intentionally unset `repository` field), `LICENSE` (new, MIT — matching the already-declared `license = "MIT"`), `docs/CHANGELOG.md` (new, curated 0.0→0.1.0 entry), `docs/RELEASE.md` + `docs/RELEASE.ja.md` (new release checklist: versioning, changelog, release-time sha256 procedure, license, tagged source, examples, seven pre-release gates at that historical handoff point; superseded by the current nine-gate push-ready checklist), `docs/PUBLIC_GENERALIZATION_TASKS.yaml` (evidence)
 Behavior changed: none — metadata and documentation only; no publish, tag push, or artifact upload performed and none is automated
 Tests run + result: `cargo clippy --all-targets --locked -- -D warnings` exit 0 after the Cargo.toml change; `cargo test --locked` green; `cargo run --locked -- version` reports the pinned version string; YAML re-parsed successfully (35 tasks); hygiene scan over the release candidate files clean (only the fixtures test's own forbidden-marker list matches)
 Security/privacy impact: none; `repository` stays unset rather than pointing at any private or machine-specific location; checksums are defined as release-time artifacts and are not committed
@@ -344,7 +344,7 @@ Recovery added the cross-platform audit (`docs/PORTABILITY.md` + ja), repeatable
 
 Private deployment regression was re-run without destructive migration: the six baseline namespaces all passed the explicit ignored real-backend test, an extra Chrome namespace was observed but is not baseline-required, and Secure Tunnel reported ready with local health/readiness 200. `scripts/integration-smoke.ps1` now enforces only the six baseline namespaces while reporting Chrome when present.
 
-Final settled-tree evidence: fmt PASS; clippy `-D warnings` PASS; default `cargo test --locked` 79 PASS with real_backends 1 ignored; explicit real_backends 1/1 PASS; privacy scan PASS; exact 309-package dependency/OSV gate PASS with missing licenses 0 and unresolved OSV records 0; clean-machine artifact smoke PASS; `git diff --check` PASS (line-ending warnings only).
+Final settled-tree evidence at the 2026-09-13 recovery point: fmt PASS; clippy `-D warnings` PASS; default `cargo test --locked` 79 PASS with real_backends 1 ignored; explicit real_backends 1/1 PASS; privacy scan PASS; exact 309-package dependency/OSV gate PASS with missing licenses 0 and unresolved OSV records 0; clean-machine artifact smoke PASS; `git diff --check` PASS (line-ending warnings only). A later source-wide refactor removed five tests belonging only to the superseded snapshot-health implementation; the authoritative post-refactor count is 74 PASS.
 Do not infer / unresolved decisions: the public repository URL and the release execution (tag/artifacts) belong to the maintainer
 
 ---
@@ -358,7 +358,8 @@ Review findings fixed:
 - the public product is documented as 0..N backends; the original six-backend / 183-tool inventory is a regression baseline, not a product limit;
 - northbound surface documentation consistently includes `/mcp`, `/healthz`, and `/readyz`;
 - the release checklist has **8** gates, explicitly including `python scripts/dependency_gate.py` in addition to the privacy and clean-machine gates;
-- testing documentation matches the settled suite (50 lib + 5 fixtures + 11 policy + 13 proxy = 79 default PASS, plus one ignored real-backend test) and the 2026-09-14 live smoke (213 tools, proxy tools 0, representative calls 7/7 PASS);
+- testing documentation matches the post-refactor suite (45 lib + 5 fixtures + 11 policy + 13 proxy = 74 default PASS, plus one ignored real-backend test) and the 2026-09-14 live smoke (213 tools, proxy tools 0, representative calls 7/7 PASS);
+- the earlier G4-03 open decision is resolved: the snapshot-based `HealthState` / `HealthTracker` path was unwired duplication and has been removed; live backend-health recomputation in `gateway/router.rs` is the single readiness authority;
 - the operator-approved post-certification migration is recorded accurately: obsolete individual Secure MCP Tunnels and local aliases were removed, the retained remote tunnel is named Lomway, and the runtime has one `lomway` alias / one tunnel-client process.
 
 Final re-review requirement: rerun fmt, clippy, default tests, explicit real-backend test, release privacy scan, dependency gate, clean-machine smoke, integration smoke, and `git diff --check`; commit only after all gates are green.

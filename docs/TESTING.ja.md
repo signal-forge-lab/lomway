@@ -101,7 +101,7 @@ v1はadmin plane自体を公開せずadmin tokenも不要なので、「missing/
 
 - Rust fmt: PASS
 - Rust clippy `-D warnings`: PASS
-- lib: 50/50 PASS
+- lib: 45/45 PASS
 - fixture: 5/5 PASS
 - policy: 11/11 PASS
 - proxy E2E/fault: 13/13 PASS

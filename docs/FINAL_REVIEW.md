@@ -2,7 +2,7 @@
 
 Review date: 2026-09-14 (independent re-review; original certification evidence: 2026-09-13)
 
-Verdict: **PASS — public generalization complete after independent re-review and corrections (100%)**
+Verdict: **PASS — public generalization, final review, and local push preparation complete (100%)**
 
 ## Public generalization recovery — authoritative current result
 
@@ -12,7 +12,7 @@ Current release evidence:
 
 - `cargo fmt --check --all` — PASS.
 - `cargo clippy --all-targets --locked -- -D warnings` — PASS.
-- `cargo test --locked` — PASS: 50 lib + 5 fixtures + 11 policy + 13 proxy = **79 passing**, with the machine-local real-backend test intentionally ignored by default.
+- `cargo test --locked` — PASS: 45 lib + 5 fixtures + 11 policy + 13 proxy = **74 passing**, with the machine-local real-backend test intentionally ignored by default. The five removed unit tests belonged only to the deleted, unwired `HealthState` / `HealthTracker` snapshot implementation; live readiness remains covered by the proxy E2E suite.
 - `cargo test --locked --test real_backends -- --ignored --nocapture` — **1/1 PASS**; all six baseline namespaces remain available (Workbridge, Memory Gateway, Microsoft UFO, Stealth Browser, XMind Workboard, Praxiom). An additional Chrome namespace is allowed and is not part of the six-backend baseline requirement.
 - schema preservation, required/optional startup failure, collision, timeout, and exactly-once mutation error-path regressions all pass in `tests/proxy.rs`.
 - `python scripts/release_privacy_scan.py` — PASS on the intended release candidate tree.
@@ -21,6 +21,7 @@ Current release evidence:
 - Aggregate live smoke (2026-09-14) — **213 tools**, `proxy_* = 0`, representative calls **7/7 PASS**. The original six namespaces remain the regression baseline; an optional 30-tool Chrome DevTools namespace is present on the reviewed workstation.
 - Secure Tunnel status — PASS: exactly one Lomway runtime alias is READY, local health/readiness return 200, and exactly one `tunnel-client` process remains.
 - `git diff --check` — PASS (line-ending warnings only).
+- Public-main history privacy — PASS after push-readiness review: `main` was rebuilt from the reviewed clean tree as a fresh public root after older pre-public commits were found to contain a machine-specific path. The current `main` history contains only intended public history, no forbidden generated/private paths, and no privacy findings. The former local history is retained only under a non-head local backup ref and is not part of the intended push.
 
 Portability is documented in `PORTABILITY.md` / `PORTABILITY.ja.md`: Core has no required Windows-only process/path dependency, and Windows/Linux/macOS are all release-blocking in CI. Optional PowerShell and SOPS/OpenAI/Swibo integrations stay outside Core.
 
@@ -38,6 +39,12 @@ The re-review found and fixed documentation/release-record inconsistencies rathe
 - Testing documentation now matches the actual 11 policy tests, 13 proxy E2E/fault tests, and the current 213-tool / 7-call live smoke;
 - the operational Tunnel record now matches the completed single-Tunnel migration.
 - a live-Windows release-build conflict was found and resolved at the procedure level: Windows cannot overwrite the running `target/release/lomway.exe`; the release checklist now recommends a fresh staging `CARGO_TARGET_DIR`, and an isolated release build passed while the live service remained available.
+- push-readiness review found machine-local path text in pre-public `main` history even though the current tree was clean; `main` was therefore reconstructed from the reviewed clean tree as a fresh public root and the repeatable privacy gate was extended to scan all blobs reachable from `HEAD`.
+- source-wide architecture review removed the remaining structural duplication: `src/lib.rs` is now a thin public facade, proxy construction lives in `gateway/build.rs`, restart recovery in `gateway/reconnect.rs`, and the sole HTTP/readiness surface in `gateway/router.rs`. The unused snapshot-based health subsystem was deleted in favor of the already-wired live backend-health semantics, and internal API/data surfaces were reduced to what the runtime actually uses.
+
+### Push readiness — 2026-09-14
+
+Local push preparation is complete. `main` is the only branch intended for publication, its history is privacy-clean, the worktree is clean after certification, and the release gates are repeatable. No public remote URL exists in the repository and no remote is configured; this is an external maintainer choice, not an implementation blocker. Once the real public repository exists, add it as `origin` and push **only `main`** with `git push -u origin main`. Never use `--all` or `--mirror` because local tooling refs are intentionally non-public.
 
 ---
 
@@ -217,14 +224,14 @@ The implementation/re-review cycle found and resolved these material issues rath
 
 Blocking implementation/review work: **none**.
 
-Not performed because it is outside the requested implementation or is a separate explicit publication/user-UI action:
+Not performed because it is a separate explicit publication/user-UI action. Local push preparation is complete:
 
 - disabling/deleting existing individual ChatGPT connectors;
 - changing Google Drive;
-- publishing/pushing the repository.
+- creating/selecting the external public repository and performing the actual network push.
 
 Those are optional later migration/release actions, not incomplete gateway implementation work.
 
 ## 9. Final verdict
 
-**PASS — 100% complete for the requested design, implementation, tests, operational integration, single-Tunnel migration state, security/hygiene review, and final review scope.**
+**PASS — 100% complete for the requested design, implementation, tests, operational integration, single-Tunnel migration state, security/hygiene review, final review, and local push-preparation scope.**

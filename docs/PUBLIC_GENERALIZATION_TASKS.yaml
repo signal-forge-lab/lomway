@@ -81,7 +81,7 @@ tasks:
     depends_on: [LMG-G0-01]
     allowed_paths: ["src/config/", "src/lib.rs", "tests/"]
     evidence:
-      wiring: "src/lib.rs declares config/backend/cli/gateway/health/namespace; adds DEFAULT_SERVER_NAME; Cargo.toml gains serde/serde_json/toml (regular deps)"
+      wiring: "src/lib.rs is the thin public facade over config/cli/gateway plus internal backend/namespace modules; DEFAULT_SERVER_NAME remains public; Cargo.toml includes serde/serde_json/toml as regular dependencies"
       zero_one_many: "validate accepts 0/1/N backends (accepts_zero_one_and_many_backends); empty public config loads cleanly (empty_single_and_many_public_configs_load_cleanly)"
       unknown_keys: "deny_unknown_fields asserted at top, server, and backend level (unknown_keys_are_rejected_strictly)"
       tests: "cargo test --locked --lib -> 37 passed, 0 failed (was 0 executable before wiring)"
@@ -260,11 +260,11 @@ tasks:
     status: done
     handoff: docs/PUBLIC_GENERALIZATION_HANDOFF.md
     depends_on: [LMG-G2-03, LMG-G4-02]
-    allowed_paths: ["src/health/", "src/gateway/", "tests/"]
+    allowed_paths: ["src/gateway/", "tests/"]
     evidence:
-      model: "src/health/state.rs HealthState/HealthTracker keep liveness and readiness distinct: optional degradation is reported but ready; required failure never reports ready; all-unobserved/unhealthy is never ready"
-      wiring: "Gateway::finish snapshots HealthTracker::from_startup and refuses startup unless ready; /readyz additionally recomputes live from backend health as the stricter serving-time check"
-      tests: "liveness_and_readiness_are_distinct_concepts, optional_degradation_is_reported_but_ready, required_failure_never_reports_ready, all_backends_unobserved_or_unhealthy_is_never_ready; E2E readiness_tracks_backend_outage_and_recovery"
+      model: "liveness is process-local /healthz=200 while serving; readiness is the single canonical live path in src/gateway/router.rs and recomputes mcp-proxy backend health on every /readyz request"
+      wiring: "Gateway::finish enforces startup probe acceptance before serving; /readyz independently reflects live backend health after startup, including outage and recovery without gateway restart"
+      tests: "required_backend_down_fails_startup and optional_backend_down_degrades_but_is_reported cover startup semantics; E2E readiness_tracks_backend_outage_and_recovery covers live readiness transitions"
       completed_at_utc: "2026-09-13"
     acceptance:
       - liveness_and_readiness_are_distinct
@@ -476,8 +476,8 @@ tasks:
     depends_on: []
     allowed_paths: ["scripts/", "docs/"]
     evidence:
-      gate: "scripts/release_privacy_scan.py scans tracked + intended untracked UTF-8 release files, excluding build/runtime scratch, for user paths, emails, live IDs, API keys/tokens and private keys"
-      result: "python scripts/release_privacy_scan.py -> PASS (112 candidate UTF-8 files on the 2026-09-14 independent final re-review)"
+      gate: "scripts/release_privacy_scan.py scans tracked + intended untracked UTF-8 release files plus every blob reachable from HEAD; generated/private history paths fail instead of being skipped; checks cover user paths, emails, live IDs, API keys/tokens and private keys"
+      result: "python scripts/release_privacy_scan.py -> PASS on the 2026-09-14 push-readiness re-review after public main history was rebuilt from the reviewed clean tree"
       completed_at_utc: "2026-09-13"
     acceptance:
       - no_user_paths_emails_live_ids_api_keys_private_keys
@@ -540,7 +540,7 @@ tasks:
       version: "Cargo.toml [package] version = 0.1.0 is the single source of truth; lomway version reports it with the MCP protocol feature and config schema_version"
       metadata: "Cargo.toml adds readme/keywords/categories alongside license = MIT; LICENSE (MIT text) added; repository field intentionally unset until a public location exists (never private or machine-specific)"
       changelog: "docs/CHANGELOG.md (Keep-a-Changelog format, curated 0.1.0 entry)"
-      release_process: "docs/RELEASE.md + RELEASE.ja.md define versioning, changelog, release-time sha256 checksum procedure (checksums are not committed), license, tagged source, shipped examples, and eight pre-release gates including the exact dependency/license/OSV gate"
+      release_process: "docs/RELEASE.md + RELEASE.ja.md define versioning, changelog, release-time sha256 checksum procedure (checksums are not committed), license, tagged source, shipped examples, nine pre-release gates including HEAD-history privacy and main-only public push shape"
       examples: "config/proxy.example.toml and test-fixtures/configs/ shipped and referenced from README and docs"
       no_publish: "no publish, tag push, or artifact upload performed or automated; every release step is manual per docs/RELEASE.md"
       completed_at_utc: "2026-09-13"
@@ -605,14 +605,14 @@ tasks:
     allowed_paths: ["docs/"]
     evidence:
       review: "docs/FINAL_REVIEW.md + FINAL_REVIEW.ja.md authoritative public-generalization recovery section"
-      regression: "cargo fmt --check --all PASS; cargo clippy --all-targets --locked -- -D warnings PASS; cargo test --locked PASS (79 tests; real_backends 1 intentionally ignored); explicit real_backends --ignored 1/1 PASS"
+      regression: "cargo fmt --check --all PASS; cargo clippy --all-targets --locked -- -D warnings PASS; cargo test --locked PASS (74 tests; real_backends 1 intentionally ignored); explicit real_backends --ignored 1/1 PASS"
       portability: "docs/PORTABILITY.md (+ja); Windows/Linux/macOS all release-blocking in CI; clean-machine artifact smoke PASS in isolated target/temp directory"
-      security_privacy: "release_privacy_scan PASS on 112 candidate UTF-8 files; dependency_gate PASS on 309 exact locked packages, 26 license expressions, missing licenses 0, unresolved OSV records 0"
+      security_privacy: "release_privacy_scan PASS on current candidate plus HEAD-reachable history after public-main history cleanup; dependency_gate PASS on 309 exact locked packages, 26 license expressions, missing licenses 0, unresolved OSV records 0"
       deployment: "six baseline namespaces available; 2026-09-14 re-review live smoke reports 213 tools / 7 representative calls with optional Chrome namespace; operator-approved post-certification migration leaves exactly one Lomway Secure MCP Tunnel/runtime alias and one tunnel-client process"
       docs: "README/Quickstart/Configuration/Testing/Release/Final Review reflect current CLI, public config, integration paths and release gates"
       core_independence: "src/ and Cargo.toml require no OpenAI/Swibo/SOPS/PowerShell integration"
-      re_review: "2026-09-14 independent review corrected stale HTTP-surface, release-checklist, public 0..N vs private baseline, test-count, single-Tunnel migration documentation, and the live-Windows release-build procedure before final acceptance"
-      release_tree: "git diff --check PASS (line-ending warnings only); no publish/push/tag performed"
+      re_review: "2026-09-14 independent review corrected stale HTTP-surface, release-checklist, public 0..N vs private baseline, test-count, single-Tunnel migration documentation, live-Windows release-build procedure, and push-history privacy before final acceptance"
+      release_tree: "public main reconstructed from the reviewed clean tree so pre-public machine-specific history is not reachable from main; git diff --check PASS; no publish/push/tag performed; public remote intentionally remains unset until maintainer supplies the real destination"
       completed_at_utc: "2026-09-13"
     acceptance:
       - zero_functional_regression

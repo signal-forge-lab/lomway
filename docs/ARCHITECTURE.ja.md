@@ -44,7 +44,7 @@ config load（フォーマット自動判定。legacyはメモリ内で移行）
   -> backend registry（検証済みdescriptorのみ。構成順どおり）
   -> startup probe（requiredは起動必須。optionalはdegrade。全欠損は失敗）
   -> tool collision preflight（最終tool名をserve前に確定）
-  -> startup health snapshot（readiness未達なら起動失敗）
+  -> startup acceptance（required backendはhealthy必須、optionalはdegrade可、最低1 backendはhealthy必須）
   -> Proxy::from_config(...)
   -> remove_backend("proxy") 成功を必須化
   -> upstream routerの/admin拒否

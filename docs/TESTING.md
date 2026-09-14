@@ -103,7 +103,7 @@ There are no “missing/wrong gateway admin token” tests because v1 serves no 
 
 - Rust fmt: PASS
 - Rust clippy `-D warnings`: PASS
-- lib tests: 50/50 PASS
+- lib tests: 45/45 PASS
 - fixture tests: 5/5 PASS
 - policy tests: 11/11 PASS
 - proxy E2E/fault tests: 13/13 PASS

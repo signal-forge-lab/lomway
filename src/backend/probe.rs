@@ -9,7 +9,6 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
 use tower_mcp::client::{HttpClientTransport, McpClient};
 
 use crate::backend::descriptor::BackendDescriptor;
@@ -20,10 +19,6 @@ use crate::backend::registry::BackendRegistry;
 pub struct UpstreamTool {
     /// Upstream tool name.
     pub name: String,
-    /// Upstream description, preserved verbatim.
-    pub description: Option<String>,
-    /// Upstream input schema, preserved verbatim.
-    pub input_schema: Value,
 }
 
 /// A backend that answered the startup probe.
@@ -42,8 +37,6 @@ pub struct UnavailableBackend {
     pub id: String,
     /// Whether the entry was marked required.
     pub required: bool,
-    /// The probe failure reason (never includes request payloads).
-    pub error: String,
 }
 
 /// The complete startup probe outcome.
@@ -56,11 +49,6 @@ pub struct ProbeReport {
 }
 
 impl ProbeReport {
-    /// Number of healthy backends.
-    pub fn healthy_count(&self) -> usize {
-        self.healthy.len()
-    }
-
     /// Ids of unavailable backends.
     pub fn unavailable_ids(&self) -> Vec<&str> {
         self.unavailable
@@ -97,10 +85,9 @@ pub async fn probe_registry(registry: &BackendRegistry) -> Result<ProbeReport> {
                 descriptor: descriptor.clone(),
                 tools,
             }),
-            Err(error) => unavailable.push(UnavailableBackend {
+            Err(_error) => unavailable.push(UnavailableBackend {
                 id: descriptor.id().to_string(),
                 required: descriptor.required(),
-                error: format!("{error:#}"),
             }),
         }
     }
@@ -150,8 +137,6 @@ pub async fn probe_backend(descriptor: &BackendDescriptor) -> Result<Vec<Upstrea
             .into_iter()
             .map(|definition| UpstreamTool {
                 name: definition.name,
-                description: definition.description,
-                input_schema: definition.input_schema,
             })
             .collect())
     };

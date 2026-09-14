@@ -59,11 +59,28 @@ repositoryに同梱され、ドキュメントから参照されます:
 3. `cargo test --locked` → グリーン（モックbackendのみ。6-backendの実機regressionは `--ignored` かつmachine-localのまま）
 4. locked release build → 成功。idle/clean machineでは `cargo build --locked --release` でよく、live Windows workstationではfresh staging `CARGO_TARGET_DIR` を使い、実行中exeを上書きしないこと。
 5. ドキュメントが実際のCLIと構成schemaと一致していること（[QUICKSTART.ja.md](QUICKSTART.ja.md) と [CONFIGURATION.ja.md](CONFIGURATION.ja.md) のコマンドが記載どおり動くこと）。
-6. プライバシー/衛生スキャン: `python scripts/release_privacy_scan.py` がcredential・非公開識別子・マシン固有パス・secret値0でPASSすること。
+6. プライバシー/衛生スキャン: `python scripts/release_privacy_scan.py` が、現在の候補treeだけでなく **`HEAD` から到達可能な全履歴blob** についてもcredential・非公開識別子・マシン固有パス・secret値・禁止されたgenerated/private path 0でPASSすること。
 7. 依存/license/vulnerability gate: `python scripts/dependency_gate.py` がexact lockfile package setと一致し、全packageにlicense metadataがあり、未解決OSV recordが0であること。
 8. クリーンマシン成果物スモーク: `pwsh -NoProfile -File scripts/clean-machine-smoke.ps1` がfresh temp directoryへrelease binaryとpublic fixtureをcopyし、再配布可能public mock backendだけで `check` / `serve` / `/healthz` / `/readyz` をPASSすること。
+9. 公開push形状: `main` は公開対象履歴だけを含み、`git status --short --branch` がcleanであること。pushは `git push -u origin main` を使用し、`git push --all` / `git push --mirror` は使用しない。local review/backup refは公開対象ではありません。
 
-## 8. このrepositoryが意図的に行わないこと
+## 8. 初回public push準備
+
+公開repository URLはこのproject側で勝手に作りません。maintainerが実際の公開先を指定するまで、`Cargo.toml` の `repository` は未設定、Git remoteも未設定のままにします。
+
+公開repository作成後のpush手順:
+
+```powershell
+git remote add origin <public-repository-url>
+git remote -v
+python scripts/release_privacy_scan.py
+git status --short --branch
+git push -u origin main
+```
+
+push対象は **`main` のみ**です。local toolingが非公開review/backup refを保持する場合があるため、`--all` / `--mirror` は使用しません。
+
+## 9. このrepositoryが意図的に行わないこと
 
 - 自動publish・タグpush・成果物アップロード・CI起動のリリースは行いません。上記の全ステップは手動です。
 - リリースステップの自動retryはしません。失敗したゲートは失敗として調査対象になり、盲目的な再実行はしません。

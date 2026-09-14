@@ -16,9 +16,6 @@ use crate::config::validate;
 pub struct BackendDescriptor {
     id: String,
     prefix: String,
-    /// `mcp-proxy` backend name realizing the prefix (prefix minus its
-    /// trailing `_` separator).
-    mcp_name: String,
     url: String,
     required: bool,
     timeout: Duration,
@@ -37,19 +34,16 @@ impl BackendDescriptor {
             entry.id,
             validate::MAX_BACKEND_TIMEOUT_SECONDS
         );
-        let mcp_name = crate::namespace::mcp_name_from_prefix(&entry.prefix)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "backend '{}' prefix {:?} is not a valid namespace prefix: it must end with the '_' separator and contain a non-empty stem",
-                    entry.id,
-                    entry.prefix
-                )
-            })?
-            .to_string();
+        crate::namespace::mcp_name_from_prefix(&entry.prefix).ok_or_else(|| {
+            anyhow::anyhow!(
+                "backend '{}' prefix {:?} is not a valid namespace prefix: it must end with the '_' separator and contain a non-empty stem",
+                entry.id,
+                entry.prefix
+            )
+        })?;
         Ok(Self {
             id: entry.id.clone(),
             prefix: entry.prefix.clone(),
-            mcp_name,
             url: entry.url.clone(),
             required: entry.required,
             timeout: Duration::from_secs(entry.timeout_seconds.max(1)),
@@ -66,11 +60,6 @@ impl BackendDescriptor {
         &self.prefix
     }
 
-    /// `mcp-proxy` namespace name derived from the prefix.
-    pub fn mcp_name(&self) -> &str {
-        &self.mcp_name
-    }
-
     /// Loopback Streamable HTTP MCP endpoint.
     pub fn url(&self) -> &str {
         &self.url
@@ -84,11 +73,6 @@ impl BackendDescriptor {
     /// Request and probe timeout.
     pub fn timeout(&self) -> Duration {
         self.timeout
-    }
-
-    /// Timeout seconds as configured (descriptor-invariant for tests).
-    pub fn timeout_seconds(&self) -> u64 {
-        self.timeout.as_secs().max(1)
     }
 }
 
@@ -110,7 +94,6 @@ mod tests {
         let good =
             BackendDescriptor::try_from_entry(&entry("fs", "fs_", "http://127.0.0.1:18701/mcp"))
                 .expect("valid entry");
-        assert_eq!(good.mcp_name(), "fs");
         assert_eq!(good.prefix(), "fs_");
         assert_eq!(good.url(), "http://127.0.0.1:18701/mcp");
         assert!(good.required());

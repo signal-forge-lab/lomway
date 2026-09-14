@@ -2,7 +2,7 @@
 
 Review date: 2026-09-14（独立再review。元のcertification evidenceは2026-09-13）
 
-Verdict: **PASS — 独立再reviewと修正後、public generalization complete (100%)**
+Verdict: **PASS — public generalization / Final Review / local push準備 complete (100%)**
 
 ## Public generalization recovery — 現在の正本結果
 
@@ -10,7 +10,7 @@ LMG public-generalization backlogは **35/35 done、todo 0、blocked 0** です�
 
 - `cargo fmt --check --all` — PASS
 - `cargo clippy --all-targets --locked -- -D warnings` — PASS
-- `cargo test --locked` — 50 lib + 5 fixtures + 11 policy + 13 proxy = **79 PASS**。machine-localなreal-backend testはdefaultでは意図的にignoredです。
+- `cargo test --locked` — 45 lib + 5 fixtures + 11 policy + 13 proxy = **74 PASS**。machine-localなreal-backend testはdefaultでは意図的にignoredです。削除された5 unit testは未使用だった `HealthState` / `HealthTracker` snapshot実装専用で、live readinessはproxy E2Eで引き続き検証されています。
 - `cargo test --locked --test real_backends -- --ignored --nocapture` — **1/1 PASS**。baseline 6 namespace（Workbridge / Memory Gateway / Microsoft UFO / Stealth Browser / XMind Workboard / Praxiom）はすべて利用可能です。追加のChrome namespaceは許容し、6-backend baselineの必須条件にはしません。
 - schema preservation、required/optional startup failure、collision、timeout、mutation error-path exactly-once regressionはすべてPASSです。
 - `python scripts/release_privacy_scan.py` — PASS
@@ -19,6 +19,7 @@ LMG public-generalization backlogは **35/35 done、todo 0、blocked 0** です�
 - 2026-09-14 live aggregate smoke — **213 tools**、`proxy_* = 0`、代表call **7/7 PASS**。元の6 namespaceをregression baselineとして維持し、review済みworkstationには任意追加のChrome DevTools 30 toolsがあります。
 - Secure Tunnel — Lomway runtime aliasは正確に1件だけREADY、local health/readiness 200、`tunnel-client` processも1本だけです。
 - `git diff --check` — PASS（line-ending warningのみ）
+- public main履歴privacy — push-readiness reviewでPASS。current treeはcleanでしたが、pre-publicの旧main commitにmachine-specific pathが残っていたため、review済みclean treeからfresh public rootとして`main`を再構築しました。現在の`main`履歴は公開対象だけを含み、禁止generated/private path・privacy findingとも0です。旧履歴はheadではないlocal backup refにのみ退避し、push対象外です。
 
 Core portabilityは`PORTABILITY.md` / `PORTABILITY.ja.md`に記録し、Windows / Linux / macOSをCIでrelease-blockingにしました。PowerShell、SOPS、OpenAI、Swiboは任意integrationのままでCore dependencyではありません。
 
@@ -34,6 +35,12 @@ orchestratorのcompletion flagをそのまま採用せず再reviewし、以下�
 - Testingを実数のpolicy 11、proxy E2E/fault 13、current live smoke 213 tools / 7 callsへ同期。
 - Tunnel運用記録を完了済みsingle-Tunnel migrationへ同期。
 - live Windows release buildの競合を発見して手順修正。実行中 `target/release/lomway.exe` はWindows上で上書きできないため、release checklistをfresh staging `CARGO_TARGET_DIR` 推奨へ変更し、live serviceを維持したままisolated release build PASSを確認。
+- push-readiness reviewで、current treeがcleanでもpre-public `main`履歴にmachine-local path文字列が残る問題を発見。`main`をreview済みclean treeからfresh public rootへ再構築し、repeatable privacy gateを`HEAD`到達可能な全履歴blobまでscanするよう強化。
+- source全体のarchitecture reviewで残存していた構造重複も解消。`src/lib.rs`を薄いpublic facadeとし、proxy構築を`gateway/build.rs`、backend再接続を`gateway/reconnect.rs`、唯一のHTTP/readiness surfaceを`gateway/router.rs`へ分離しました。未使用のsnapshot型health subsystemは削除し、既にwiredだったlive backend-health semanticsへ一本化しています。internal API/data surfaceもruntimeで実際に必要な範囲へ縮小しました。
+
+### Push readiness — 2026-09-14
+
+local push準備は完了です。公開対象branchは`main`のみで、履歴privacyはclean、certification後のworktreeもclean、release gateはrepeatableです。公開repository URLはまだrepository内に存在せずremoteも未設定ですが、これはmaintainerが実際の公開先を決める外部判断であり実装blockerではありません。公開先作成後は`origin`を追加し、**`git push -u origin main` のみ**を実行します。local tooling refは非公開のため、`--all` / `--mirror` は使用しません。
 
 ---
 
@@ -209,14 +216,14 @@ local config / runtime / logs / build outputはignore済み。final scanではre
 
 Blocking implementation/review work: **none**。
 
-依頼範囲外、または別の明示的publish/user-UI actionなので未実施:
+別の明示的publish/user-UI actionなので未実施です。local push準備は完了しています:
 
 - 既存個別ChatGPT connectorのdisable/delete
 - Google Drive変更
-- repository publish/push
+- external public repositoryの作成/選択と実際のnetwork push
 
 これらは任意の後続migration/release actionであり、Gateway実装の未完了ではありません。
 
 ## 9. Final verdict
 
-**PASS — requested design / implementation / tests / operational integration / single-Tunnel migration state / security & hygiene review / Final Review scope を100%完了。**
+**PASS — requested design / implementation / tests / operational integration / single-Tunnel migration state / security & hygiene review / Final Review / local push準備 scope を100%完了。**

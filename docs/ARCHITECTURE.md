@@ -44,7 +44,7 @@ load config (format auto-detected; legacy migrated in memory)
   -> backend registry (validated descriptors only, configuration order)
   -> startup probe (required must be up; optional may degrade; all-down fails)
   -> tool collision preflight (final names computed before serving)
-  -> startup health snapshot (readiness must be achieved or startup fails)
+  -> startup acceptance (required backends healthy; optional backends may degrade; at least one backend healthy)
   -> Proxy::from_config(...)
   -> remove_backend("proxy") and require success
   -> wrap upstream router with /admin rejection

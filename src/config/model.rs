@@ -24,7 +24,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::validate::MAX_ARGUMENT_SIZE_BYTES;
+use crate::config::constants::MAX_ARGUMENT_SIZE_BYTES;
 
 pub const DEFAULT_LISTEN_HOST: &str = "127.0.0.1";
 pub const DEFAULT_LISTEN_PORT: u16 = 17777;
