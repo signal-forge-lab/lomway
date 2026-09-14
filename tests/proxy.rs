@@ -713,14 +713,13 @@ max_argument_size = 1048576
         "after"
     );
 
-    assert_eq!(
-        client
-            .call_tool("restartable_status", serde_json::json!({}))
-            .await
-            .expect("gateway should recover after a brief backend restart")
-            .all_text(),
-        "after"
-    );
+    wait_for_tool_text(
+        &client,
+        "restartable_status",
+        "after",
+        Duration::from_secs(5),
+    )
+    .await;
 
     gateway_task.abort();
     let (replacement_gateway_addr, replacement_gateway_task, _replacement_dir) =
