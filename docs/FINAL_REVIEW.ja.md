@@ -40,7 +40,7 @@ orchestratorのcompletion flagをそのまま採用せず再reviewし、以下�
 
 ### Push readiness — 2026-09-14
 
-local push準備は完了です。公開対象branchは`main`のみで、履歴privacyはclean、certification後のworktreeもclean、release gateはrepeatableです。公開repository URLはまだrepository内に存在せずremoteも未設定ですが、これはmaintainerが実際の公開先を決める外部判断であり実装blockerではありません。公開先作成後は`origin`を追加し、**`git push -u origin main` のみ**を実行します。local tooling refは非公開のため、`--all` / `--mirror` は使用しません。
+local push準備は完了です。公開対象branchは`main`のみで、履歴privacyはclean、release gateはrepeatableです。正式な公開先は既存の `signal-forge-lab` 公開repo構成に合わせて `https://github.com/signal-forge-lab/lomway` とします。pushは **`git push -u origin main` のみ**を実行し、local tooling refは非公開のため `--all` / `--mirror` は使用しません。
 
 ---
 
@@ -220,7 +220,7 @@ Blocking implementation/review work: **none**。
 
 - 既存個別ChatGPT connectorのdisable/delete
 - Google Drive変更
-- external public repositoryの作成/選択と実際のnetwork push
+- 初回public push後のrelease tag / release artifact公開
 
 これらは任意の後続migration/release actionであり、Gateway実装の未完了ではありません。
 

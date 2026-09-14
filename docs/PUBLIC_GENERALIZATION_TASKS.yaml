@@ -538,7 +538,7 @@ tasks:
     allowed_paths: ["docs/", ".github/", "README.md", "README.ja.md", "LICENSE"]
     evidence:
       version: "Cargo.toml [package] version = 0.1.0 is the single source of truth; lomway version reports it with the MCP protocol feature and config schema_version"
-      metadata: "Cargo.toml adds readme/keywords/categories alongside license = MIT; LICENSE (MIT text) added; repository field intentionally unset until a public location exists (never private or machine-specific)"
+      metadata: "Cargo.toml adds readme/keywords/categories alongside license = MIT; LICENSE (MIT text) added; canonical public repository is https://github.com/signal-forge-lab/lomway"
       changelog: "docs/CHANGELOG.md (Keep-a-Changelog format, curated 0.1.0 entry)"
       release_process: "docs/RELEASE.md + RELEASE.ja.md define versioning, changelog, release-time sha256 checksum procedure (checksums are not committed), license, tagged source, shipped examples, nine pre-release gates including HEAD-history privacy and main-only public push shape"
       examples: "config/proxy.example.toml and test-fixtures/configs/ shipped and referenced from README and docs"
@@ -612,7 +612,7 @@ tasks:
       docs: "README/Quickstart/Configuration/Testing/Release/Final Review reflect current CLI, public config, integration paths and release gates"
       core_independence: "src/ and Cargo.toml require no OpenAI/Swibo/SOPS/PowerShell integration"
       re_review: "2026-09-14 independent review corrected stale HTTP-surface, release-checklist, public 0..N vs private baseline, test-count, single-Tunnel migration documentation, live-Windows release-build procedure, and push-history privacy before final acceptance"
-      release_tree: "public main reconstructed from the reviewed clean tree so pre-public machine-specific history is not reachable from main; git diff --check PASS; no publish/push/tag performed; public remote intentionally remains unset until maintainer supplies the real destination"
+      release_tree: "public main reconstructed from the reviewed clean tree so pre-public machine-specific history is not reachable from main; git diff --check PASS; canonical public destination selected as https://github.com/signal-forge-lab/lomway to match existing signal-forge-lab repositories; tag/release publication remains separate"
       completed_at_utc: "2026-09-13"
     acceptance:
       - zero_functional_regression

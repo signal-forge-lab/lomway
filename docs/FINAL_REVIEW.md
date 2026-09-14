@@ -44,7 +44,7 @@ The re-review found and fixed documentation/release-record inconsistencies rathe
 
 ### Push readiness — 2026-09-14
 
-Local push preparation is complete. `main` is the only branch intended for publication, its history is privacy-clean, the worktree is clean after certification, and the release gates are repeatable. No public remote URL exists in the repository and no remote is configured; this is an external maintainer choice, not an implementation blocker. Once the real public repository exists, add it as `origin` and push **only `main`** with `git push -u origin main`. Never use `--all` or `--mirror` because local tooling refs are intentionally non-public.
+Local push preparation is complete. `main` is the only branch intended for publication, its history is privacy-clean, and the release gates are repeatable. The canonical public destination is `https://github.com/signal-forge-lab/lomway`, selected to match the existing `signal-forge-lab` public repository convention. Push **only `main`** with `git push -u origin main`; never use `--all` or `--mirror` because local tooling refs are intentionally non-public.
 
 ---
 
@@ -228,7 +228,7 @@ Not performed because it is a separate explicit publication/user-UI action. Loca
 
 - disabling/deleting existing individual ChatGPT connectors;
 - changing Google Drive;
-- creating/selecting the external public repository and performing the actual network push.
+- release tagging and release-artifact publication after the initial public push.
 
 Those are optional later migration/release actions, not incomplete gateway implementation work.
 

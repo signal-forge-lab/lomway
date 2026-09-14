@@ -64,14 +64,14 @@ repositoryに同梱され、ドキュメントから参照されます:
 8. クリーンマシン成果物スモーク: `pwsh -NoProfile -File scripts/clean-machine-smoke.ps1` がfresh temp directoryへrelease binaryとpublic fixtureをcopyし、再配布可能public mock backendだけで `check` / `serve` / `/healthz` / `/readyz` をPASSすること。
 9. 公開push形状: `main` は公開対象履歴だけを含み、`git status --short --branch` がcleanであること。pushは `git push -u origin main` を使用し、`git push --all` / `git push --mirror` は使用しない。local review/backup refは公開対象ではありません。
 
-## 8. 初回public push準備
+## 8. 初回public push
 
-公開repository URLはこのproject側で勝手に作りません。maintainerが実際の公開先を指定するまで、`Cargo.toml` の `repository` は未設定、Git remoteも未設定のままにします。
+正式な公開repositoryは、既存の `signal-forge-lab` 公開repo構成に合わせて `https://github.com/signal-forge-lab/lomway` とします。`Cargo.toml` も同じURLを正本として使用します。
 
-公開repository作成後のpush手順:
+初回push手順:
 
 ```powershell
-git remote add origin <public-repository-url>
+git remote add origin https://github.com/signal-forge-lab/lomway.git
 git remote -v
 python scripts/release_privacy_scan.py
 git status --short --branch

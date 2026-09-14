@@ -64,14 +64,14 @@ All of the following must pass on the intended release tree before tagging:
 8. Clean-machine artifact smoke: `pwsh -NoProfile -File scripts/clean-machine-smoke.ps1` copies the release binary and public one-backend fixture into a fresh temp directory, starts only the redistributable public mock backend, and proves `check`, `/healthz`, and `/readyz` without any private deployment backend.
 9. Public-push shape: `main` must contain only intended public history; `git status --short --branch` must be clean; the intended push is `git push -u origin main`, never `git push --all` or `git push --mirror`. Local review/backup refs are not publication inputs.
 
-## 8. First public push preparation
+## 8. First public push
 
-The repository URL is intentionally not invented by this project. Until the maintainer supplies the real public destination, `Cargo.toml` leaves `repository` unset and no Git remote is configured.
+The canonical public repository is `https://github.com/signal-forge-lab/lomway`, matching the existing `signal-forge-lab` public repository convention. `Cargo.toml` uses the same URL.
 
-Once the public repository exists, the prepared push sequence is:
+The first-push sequence is:
 
 ```powershell
-git remote add origin <public-repository-url>
+git remote add origin https://github.com/signal-forge-lab/lomway.git
 git remote -v
 python scripts/release_privacy_scan.py
 git status --short --branch
@@ -84,4 +84,4 @@ Push **only `main`**. Do not use `--all` or `--mirror`: local tooling may mainta
 
 - No automatic publish, tag push, artifact upload, or CI-triggered release. Every step above is manual.
 - No retry of any release step; a failed gate fails and is investigated, not re-run blindly.
-- The `repository` field in `Cargo.toml` is intentionally unset until the maintainer creates the public repository location; it must never point at a private or machine-specific location.
+- The `repository` field in `Cargo.toml` must remain the canonical public URL `https://github.com/signal-forge-lab/lomway`.

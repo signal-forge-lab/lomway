@@ -8,8 +8,7 @@ description = "Lomway: a thin local aggregation boundary for trusted MCP backend
 readme = "README.md"
 keywords = ["mcp", "proxy", "gateway", "llm", "ai"]
 categories = ["development-tools"]
-# `repository` stays unset until the maintainer creates the public repository
-# location; it must never point at a private or machine-specific location.
+repository = "https://github.com/signal-forge-lab/lomway"
 # Release process and gates: docs/RELEASE.md (+ja) and docs/CHANGELOG.md.
 
 [dependencies]
