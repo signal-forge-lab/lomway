@@ -67,6 +67,22 @@ pub struct ServerConfig {
     /// Graceful shutdown timeout in seconds.
     #[serde(default = "default_shutdown_timeout")]
     pub shutdown_timeout_seconds: u64,
+    /// Optional northbound OAuth protection for the public MCP endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<NorthboundOAuthConfig>,
+}
+
+/// OAuth protected-resource settings for direct remote MCP access.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NorthboundOAuthConfig {
+    /// Canonical public MCP resource URL, for example `https://host.example/mcp`.
+    pub resource_url: String,
+    /// Loopback-only RFC 7662 token introspection endpoint.
+    pub introspection_url: String,
+    /// Scope required on every accepted access token.
+    #[serde(default = "default_required_scope")]
+    pub required_scope: String,
 }
 
 /// Policy switches. Every non-default value fails closed in v1.
@@ -136,6 +152,10 @@ fn default_shutdown_timeout() -> u64 {
     30
 }
 
+fn default_required_scope() -> String {
+    "devspace".to_string()
+}
+
 fn default_max_argument_size() -> usize {
     MAX_ARGUMENT_SIZE_BYTES
 }
@@ -175,6 +195,7 @@ impl Default for ServerConfig {
             port: default_port(),
             instructions: None,
             shutdown_timeout_seconds: default_shutdown_timeout(),
+            oauth: None,
         }
     }
 }
@@ -295,5 +316,27 @@ url = "http://127.0.0.1:18701/mcp"
         assert_eq!(config.observability.log_level, "info");
         assert!(!config.observability.json_logs);
         assert_eq!(config.backends.len(), 0);
+        assert!(config.server.oauth.is_none());
+    }
+
+    #[test]
+    fn parses_optional_northbound_oauth() {
+        let config = parse(
+            r#"
+schema_version = 1
+
+[server.oauth]
+resource_url = "https://example.test/mcp"
+introspection_url = "http://127.0.0.1:7677/oauth/introspect"
+"#,
+        )
+        .expect("parse oauth");
+        let oauth = config.server.oauth.expect("oauth config");
+        assert_eq!(oauth.resource_url, "https://example.test/mcp");
+        assert_eq!(
+            oauth.introspection_url,
+            "http://127.0.0.1:7677/oauth/introspect"
+        );
+        assert_eq!(oauth.required_scope, "devspace");
     }
 }

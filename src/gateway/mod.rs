@@ -1,5 +1,6 @@
 //! The gateway runtime: policy validation, router surface, and builder.
 
+mod auth;
 pub mod build;
 pub mod policy;
 mod reconnect;

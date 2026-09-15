@@ -13,7 +13,7 @@ use anyhow::{Context, Result, ensure};
 pub use crate::config::constants::{
     MAX_ARGUMENT_SIZE_BYTES, MAX_BACKEND_TIMEOUT_SECONDS, SCHEMA_VERSION,
 };
-use crate::config::model::GatewayConfig;
+use crate::config::model::{GatewayConfig, NorthboundOAuthConfig};
 
 /// Namespace prefixes reserved for gateway control planes. Backends may
 /// never claim them.
@@ -32,6 +32,9 @@ pub const ALLOWED_ID_CHARSET: &str = "a-z 0-9 '_' '-' (must start with a letter 
 pub fn validate(config: &GatewayConfig) -> Result<()> {
     validate_schema_version(config.schema_version)?;
     validate_server(&config.server.host, config.server.port)?;
+    if let Some(oauth) = &config.server.oauth {
+        validate_northbound_oauth(oauth)?;
+    }
     validate_policy_flags(config)?;
     validate_unique_ids(config)?;
     validate_unique_prefixes(config)?;
@@ -46,6 +49,45 @@ pub fn validate(config: &GatewayConfig) -> Result<()> {
             backend.id
         );
     }
+    Ok(())
+}
+
+fn validate_northbound_oauth(oauth: &NorthboundOAuthConfig) -> Result<()> {
+    let resource: axum::http::Uri = oauth
+        .resource_url
+        .parse()
+        .context("server.oauth.resource_url is not a valid URI")?;
+    ensure!(
+        resource.scheme_str() == Some("https")
+            && resource.authority().is_some()
+            && resource.path() == "/mcp"
+            && resource.query().is_none(),
+        "server.oauth.resource_url must be an exact https://<host>/mcp URL"
+    );
+
+    const LOOPBACK_PREFIX: &str = "http://127.0.0.1:";
+    let Some(rest) = oauth.introspection_url.strip_prefix(LOOPBACK_PREFIX) else {
+        anyhow::bail!(
+            "server.oauth.introspection_url must be loopback http://127.0.0.1:<port>/oauth/introspect"
+        );
+    };
+    let Some((port, path)) = rest.split_once('/') else {
+        anyhow::bail!(
+            "server.oauth.introspection_url must be loopback http://127.0.0.1:<port>/oauth/introspect"
+        );
+    };
+    ensure!(
+        port.parse::<u16>().is_ok_and(|port| port > 0) && path == "oauth/introspect",
+        "server.oauth.introspection_url must be loopback http://127.0.0.1:<port>/oauth/introspect"
+    );
+
+    ensure!(
+        !oauth.required_scope.is_empty()
+            && oauth.required_scope.bytes().all(|byte| {
+                byte == 0x21 || (0x23..=0x5b).contains(&byte) || (0x5d..=0x7e).contains(&byte)
+            }),
+        "server.oauth.required_scope must be one valid OAuth scope token"
+    );
     Ok(())
 }
 
@@ -250,6 +292,32 @@ mod tests {
 
         let error = validate_backend_url("http://127.0.0.1:not-a-port/mcp").expect_err("bad port");
         assert!(error.to_string().contains("loopback"));
+    }
+
+    #[test]
+    fn validates_northbound_oauth_urls_and_scope() {
+        let valid = NorthboundOAuthConfig {
+            resource_url: "https://example.test/mcp".to_string(),
+            introspection_url: "http://127.0.0.1:7677/oauth/introspect".to_string(),
+            required_scope: "devspace".to_string(),
+        };
+        validate_northbound_oauth(&valid).expect("valid oauth config");
+
+        let mut invalid = valid.clone();
+        invalid.resource_url = "http://example.test/mcp".to_string();
+        assert!(validate_northbound_oauth(&invalid).is_err());
+
+        let mut invalid = valid.clone();
+        invalid.resource_url = "https://example.test/other".to_string();
+        assert!(validate_northbound_oauth(&invalid).is_err());
+
+        let mut invalid = valid.clone();
+        invalid.introspection_url = "http://192.168.1.2:7677/oauth/introspect".to_string();
+        assert!(validate_northbound_oauth(&invalid).is_err());
+
+        let mut invalid = valid;
+        invalid.required_scope = "two scopes".to_string();
+        assert!(validate_northbound_oauth(&invalid).is_err());
     }
 
     #[test]
