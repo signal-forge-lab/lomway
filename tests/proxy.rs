@@ -588,6 +588,75 @@ max_argument_size = 1048576
 }
 
 #[tokio::test]
+async fn backend_skipped_at_startup_recovers_without_gateway_restart() {
+    let (healthy_addr, healthy_task) = spawn_status_backend("healthy").await;
+    let offline_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve offline backend address");
+    let offline_addr = offline_listener
+        .local_addr()
+        .expect("offline backend address");
+    drop(offline_listener);
+
+    let config = format!(
+        r#"
+[proxy]
+name = "lomway"
+version = "0.1.0"
+separator = "_"
+tool_exposure = "direct"
+
+[proxy.listen]
+host = "127.0.0.1"
+port = 17777
+
+[[backends]]
+name = "healthy"
+transport = "http"
+url = "http://{healthy_addr}/mcp"
+[backends.timeout]
+seconds = 5
+
+[[backends]]
+name = "offline"
+transport = "http"
+url = "http://{offline_addr}/mcp"
+[backends.timeout]
+seconds = 1
+
+[security]
+max_argument_size = 1048576
+"#
+    );
+    let (gateway_addr, gateway_task, _dir) = spawn_gateway_router(config).await;
+    let client = connect_client(gateway_addr).await;
+
+    let tools = client
+        .list_tools()
+        .await
+        .expect("list tools while backend is skipped");
+    let names: Vec<_> = tools.tools.iter().map(|tool| tool.name.as_str()).collect();
+    assert_eq!(names, vec!["healthy_status"]);
+
+    let listener = tokio::net::TcpListener::bind(offline_addr)
+        .await
+        .expect("start previously skipped backend");
+    let recovered_task = spawn_status_backend_on(listener, "recovered");
+
+    wait_for_tool_text(
+        &client,
+        "offline_status",
+        "recovered",
+        Duration::from_secs(5),
+    )
+    .await;
+
+    gateway_task.abort();
+    healthy_task.abort();
+    recovered_task.abort();
+}
+
+#[tokio::test]
 async fn timeout_does_not_retry_a_mutating_tool() {
     let calls = Arc::new(AtomicUsize::new(0));
     let (slow_addr, slow_task) = spawn_slow_mutation_backend(Arc::clone(&calls)).await;

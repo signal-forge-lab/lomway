@@ -64,22 +64,24 @@ pub(super) fn specs(config: &ProxyConfig) -> Vec<BackendReconnectSpec> {
 
 pub(super) fn spawn(proxy: McpProxy, specs: Vec<BackendReconnectSpec>) {
     let active = proxy.backend_namespaces();
-    let specs: Vec<_> = specs
-        .into_iter()
-        .filter(|spec| active.iter().any(|name| name == &spec.name))
-        .collect();
     if specs.is_empty() {
         return;
     }
     tokio::spawn(async move {
-        monitor(proxy, specs).await;
+        monitor(proxy, specs, active).await;
     });
 }
 
-async fn monitor(proxy: McpProxy, specs: Vec<BackendReconnectSpec>) {
+async fn monitor(proxy: McpProxy, specs: Vec<BackendReconnectSpec>, active: Vec<String>) {
     let mut states: HashMap<String, BackendReconnectState> = specs
         .iter()
-        .map(|spec| (spec.name.clone(), BackendReconnectState::default()))
+        .map(|spec| {
+            let state = BackendReconnectState {
+                observed_down: !active.iter().any(|name| name == &spec.name),
+                ..BackendReconnectState::default()
+            };
+            (spec.name.clone(), state)
+        })
         .collect();
 
     loop {
