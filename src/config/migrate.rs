@@ -68,6 +68,7 @@ pub fn to_public(legacy: &ProxyConfig) -> Result<GatewayConfig> {
             port: legacy.proxy.listen.port,
             instructions: legacy.proxy.instructions.clone(),
             shutdown_timeout_seconds: legacy.proxy.shutdown_timeout_seconds,
+            oauth: None,
         },
         policy: PolicyConfig {
             allow_non_loopback_listener: false,

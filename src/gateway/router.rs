@@ -23,16 +23,29 @@ use axum::{
 use mcp_proxy::Proxy;
 use tower_mcp::proxy::McpProxy;
 
+use crate::config::model::NorthboundOAuthConfig;
+
 /// Build the externally served router.
 ///
 /// Readiness is evaluated against the live backend transports rather than a
 /// startup snapshot, so backend restarts correctly drive `/readyz` from 200
 /// to 503 and back to 200 without restarting Lomway.
 pub fn gateway_router(proxy: Proxy) -> Router {
+    gateway_router_with_oauth(proxy, None)
+}
+
+pub(crate) fn gateway_router_with_oauth(
+    proxy: Proxy,
+    oauth: Option<NorthboundOAuthConfig>,
+) -> Router {
     let readiness_proxy = proxy.mcp_proxy().clone();
     let expected_backends = readiness_proxy.backend_count();
     let (upstream, _sessions) = proxy.into_router();
     let upstream = upstream.layer(middleware::from_fn(block_upstream_admin));
+    let (upstream, metadata) = match oauth {
+        Some(oauth) => crate::gateway::auth::protect_mcp_router(upstream, oauth),
+        None => (upstream, Router::new()),
+    };
     Router::new()
         .route("/healthz", get(|| async { StatusCode::OK }))
         .route(
@@ -42,6 +55,7 @@ pub fn gateway_router(proxy: Proxy) -> Router {
                 async move { backend_readiness(proxy, expected_backends).await }
             }),
         )
+        .merge(metadata)
         .nest("/mcp", upstream)
         .fallback(|| async { StatusCode::NOT_FOUND })
 }

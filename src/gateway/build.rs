@@ -88,10 +88,11 @@ impl Gateway {
         // keeps backend restart recovery and live readiness semantics. The
         // legacy mapping runs after startup validation and re-validates the
         // public model.
+        let oauth = public.server.oauth.clone();
         let legacy = migrate::to_legacy(&public)?;
         let proxy = build_proxy(legacy).await?;
         let namespaces = proxy.mcp_proxy().backend_namespaces();
-        let router = crate::gateway::router::gateway_router(proxy);
+        let router = crate::gateway::router::gateway_router_with_oauth(proxy, oauth);
         Ok(Self {
             router,
             listen_host,
