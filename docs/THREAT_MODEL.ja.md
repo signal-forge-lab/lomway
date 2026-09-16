@@ -83,35 +83,28 @@ E 権限昇格。
 | ID | STRIDE | 脅威 | 緩和策(実施箇所) | 証拠 |
 |---|---|---|---|---|
 | T-01 | I, E | リスナーが非ループバックアドレス(LAN/`0.0.0.0`)にバインドされ、認証なしツールサーフェスがリモートから到達可能になる。 | `server.host` は厳密に `127.0.0.1` でなければならない(`src/config/validate.rs` `validate_listener`);`policy.allow_non_loopback_listener = true` は本リリースでは明示的に拒否される;既定リッスンホストは `127.0.0.1`(`src/config/model.rs` `DEFAULT_LISTEN_HOST`)。 | `tests/policy.rs` `rejects_non_loopback_listener`;`src/config/validate.rs` `rejects_non_loopback_listener_and_backends` |
-| T-02 | I, E | バックエンド URL がマシン外を指し、ゲートウェイがツール引数をリモートホストへ中継する踏み台になる。 | すべてのバックエンド URL は厳密に `http://127.0.0.1:<port>/mcp` に一致しなければならない。HTTP のみ、ネストパス禁止、TLS ホスト変種禁止(`src/config/validate.rs` `is_exact_loopback_mcp_url`);`policy.allow_non_loopback_backends = true` も明示的に拒否。 | `tests/policy.rs` `rejects_non_http_or_non_loopback_backends`;`src/backend/descriptor.rs` ユニットテスト |
+| T-02 | I, E | バックエンド URL がマシン外を指し、ゲートウェイがツール引数を意図しないリモートホストへ中継する踏み台になる。 | loopback HTTP が既定。remote southbound は `policy.allow_non_loopback_backends = true` の明示opt-inが必要で、その場合も既定TLS portの厳密な `https://<machine>.<tailnet>.ts.net/mcp` のみ許可する。任意Internet host、非TLS、userinfo、query、fragment、custom port、別pathは拒否(`src/config/validate.rs`)。 | `src/config/validate.rs` `tailnet_https_backends_require_explicit_policy_and_stay_narrow`;`src/backend/registry.rs` `explicit_policy_allows_tailnet_https_backend` |
 | T-03 | S, E, I | 別のローカルプロセス(または別 OS ユーザーセッション)が認証なし北向き境界に到達し、ツールを呼び出す。 | **受容済みの残存リスク、設計により制約:** リスナーはループバックのみ(T-01)のため、境界は構成上マシンローカルに限定される。HTTP サーフェスは `POST/GET/DELETE /mcp`、`GET /healthz`、`GET /readyz` に最小化(`src/gateway/router.rs`)。管理プレーンもメトリクスもない。管理トークンは提供されないため設定も不要。マルチテナント強化(ローカル認証)は v1 の対象外であり、新たなセキュリティプロファイルを要する。 | `tests/proxy.rs` `external_http_surface_exposes_mcp_and_health_but_not_admin`;`src/gateway/policy.rs` の北向き認証拒否;`docs/SECURITY.ja.md` §3 |
 | T-04 | S, E | リモート攻撃者が認証なしで正規クライアントになりすます。 | ゲートウェイは構成上リモートから到達不能(T-01);リモート侵入はゲートウェイ手前で認証を終端する統合経由のみ;ゲートウェイ自身による北向き MCP 認証や認証情報転送の設定は拒否される(`src/gateway/policy.rs` が空でない認証設定を失敗させる)。 | `tests/policy.rs` `rejects_admin_token_when_admin_plane_is_not_served`、`rejects_schema_rewriting_and_auth_forwarding` |
 | T-05 | E | 上流 `mcp-proxy` の管理プレーン(`proxy` MCP バックエンドの設定/登録ツール、`/admin/*` ルート)がクライアントに露出する。 | 起動時に上流 `proxy` コントロールプレーンバックエンドを削除し、削除を証明できなければ**フェイルクローズ**(`src/lib.rs`);プロジェクト所有ルーターは `/mcp`、`/healthz`、`/readyz` のみ提供。トップレベル `/admin/*` はルートなし、ネストした `/mcp/admin/*` は上流ディスパッチ前にミドルウェアが拒否(`Authorization` ヘッダの有無に依存しない)。 | `tests/proxy.rs` `build_removes_upstream_proxy_control_plane_backend`、`external_http_surface_exposes_mcp_and_health_but_not_admin`;`src/lib.rs`、`src/gateway/router.rs` |
 | T-06 | T | ミューテーション系ツール呼び出しが複数回実行される(リトライ・ヘッジ・フェイルオーバー・コアレッシング・レスポンスキャッシュによる副作用の重複)。 | ゲートウェイはリトライ・ヘッジ・ファンアウト・フェイルオーバー・キャッシュを**一切**実装しない。呼び出し単位のラッパーはタイムアウトのみ。これらを有効化する設定はバックエンド単位で検証に失敗する。ツールレベルの冪等性がモデル化・テストされない限り自動リトライは禁止のまま。 | `tests/policy.rs` `rejects_retry_hedging_and_cache_per_backend`、`rejects_fanout_failover_and_request_coalescing`;`tests/proxy.rs` `timeout_does_not_retry_a_mutating_tool` |
 | T-07 | S | 名前空間の混乱: ツール名が誤ったバックエンドに解決される(プレフィックス衝突、曖昧な正規化、`proxy_` などの予約プレフィックス偽装)。 | バックエンド `id` と `prefix` は一意かつ小文字制約。`_` 区切りは固定。最終ツール名は事前計算され、衝突は起動時に**フェイルファスト**し両ソースを特定。予約プレフィックス(`proxy_`、`lomway_`、旧 `lmg_`)はポリシー管理。 | `src/namespace/collision.rs`;`tests/policy.rs` `rejects_wrong_namespace_separator`;`tests/proxy.rs` `same_named_backend_tools_are_namespaced_without_collision` |
 | T-08 | D | クライアントが過大な引数や長時間呼び出しでゲートウェイを飽和させる。 | ツール引数サイズは上限付き(既定 1 MiB、`security.max_argument_size`);バックエンドごとにタイムアウト設定。リクエストは複製されないためファンアウト増幅も存在しない(T-06)。 | `docs/SECURITY.ja.md` §5;ポリシー検証(`src/gateway/policy.rs`) |
-| T-09 | T, E | 改ざんされた設定がセキュリティ姿勢を拡大する(ループバックフラグ、ホットリロード、未知キーの既定値すり抜け)。 | トップ・`[server]`・バックエンド各レベルで `deny_unknown_fields`;`schema_version` ゲート;`allow_non_loopback_listener` / `allow_non_loopback_backends` は明示設定時でも拒否;ホットリロードは無効。有効化すると本プロジェクトのより厳格なポリシー検証を通過していない設定を受け入れる恐れがあるため。 | `tests/policy.rs` `rejects_hot_reload_until_gateway_policy_is_revalidated_on_reload`;`src/config/model.rs` 厳密パースのテスト;`src/config/validate.rs` |
+| T-09 | T, E | 改ざんされた設定がセキュリティ姿勢を拡大する(listener escape hatch、remote backend scope、hot reload、未知キーの既定値すり抜け)。 | トップ・`[server]`・backend各レベルで `deny_unknown_fields`;`schema_version` gate;`allow_non_loopback_listener` は常に拒否;`allow_non_loopback_backends` はT-02の狭いTailscale HTTPS profileだけを開く;hot reloadは無効でstartup policy validationを迂回できない。 | `src/config/validate.rs`;`tests/policy.rs` `rejects_hot_reload_until_gateway_policy_is_revalidated_on_reload`;`src/config/model.rs` 厳密パースのテスト |
 | T-10 | I | シークレットがログ・設定ファイル・プロセス環境から公開成果物へ漏えいする。 | ゲートウェイ実行時にシークレットは不要;`${VAR}` 参照は起動時にプロセス環境のみへ解決;バックエンドへの認証情報転送なし;構造化ログはシークレット値を除外;公開リリースのハイジーンテストが私的トンネルパスとローカルビルド成果物を阻止。 | `tests/policy.rs` `public_release_hygiene_excludes_private_tunnel_paths_and_local_build_artifacts`;`src/config/load.rs` 環境変数解決のテスト |
 | T-11 | T, S | サプライチェーン侵害: 依存クレート(またはその新解決)がコントロールプレーンや挙動変化を持ち込む。 | `mcp-proxy` は厳密ピン留め(`=0.4.3`)かつ `default-features = false` でプロトコル機能のみ;`tower-mcp` も厳密ピン留め(`=0.18.2`);`Cargo.lock` は追跡対象。解決変更には設定/スキーマレビュー、コントロールプレーン抑止リグレッション、全テストゲートを要求。 | `Cargo.toml`、`Cargo.lock`;`docs/SECURITY.ja.md` §7 |
-| T-12 | S, T | 悪意あるローカルプロセスがバックエンドのループバックポートを捕捉し、信頼されたバックエンドになりすます(南向き境界は認証なし)。 | **受容済みの残存リスク:** 南向き境界はループバックのみで、パスはオペレーターが明示設定した厳密な `/mcp`;動的バックエンド登録は存在しない(T-05)ため、なりすましには設定ファイルレベルのアクセスが必要。バックエンド再起動は再接続で回復し、ツール呼び出しのリトライでは回復させない。 | `tests/proxy.rs` のバックエンド再起動回復テスト;§4 前提 2 |
+| T-12 | S, T | 悪意あるローカルプロセスがloopback backend portを捕捉する、または侵害されたtrusted tailnet peerが設定済みremote MCP hostnameをserveする。 | **受容済みの残存リスク、明示設定で制約:** loopback endpointは厳密な固定 `/mcp`;remote endpointは狭いTailscale HTTPS profileとoperator選択のmachine/tailnet hostnameが必要。dynamic backend登録は存在しない(T-05)。backend回復はtransport再接続で行い、tool call自体はretryしない。 | `tests/proxy.rs` のbackend再起動回復テスト;`src/gateway/reconnect.rs`;§4 前提 2 |
 | T-13 | S, D | `/mcp` におけるセッション悪用(期限切れ・他者のセッション ID、想定外メソッド)。 | Streamable HTTP のセマンティクスはピン留めされた上流スタックが所有。期限切れ初期セッションはプロキシクライアント経路で拒否。未知ルートは 404。 | `tests/proxy.rs` `reject_expired_initial_session`、`external_http_surface_exposes_mcp_and_health_but_not_admin` |
 
-## 6. ループバック分離モデル
+## 6. Listener / southbound分離モデル
 
-ループバック分離は**独立した 3 層**で強制されるため、単一の誤りでは
-ゲートウェイが露出しない:
+listenerはloopback-onlyを維持し、southbound remote accessは別の明示trust profileとして扱う。強制は複数層で行う:
 
-1. **既定値:** `DEFAULT_LISTEN_HOST = "127.0.0.1"`。例示設定はループバック
-   ホストと `${VAR}` 注入のループバック URL を使用。
-2. **スキーマ検証:** すべてのバックエンド URL は厳密な
-   `http://127.0.0.1:<port>/mcp` に一致。リスナーホストは厳密に
-   `127.0.0.1` と一致しなければならない。
-3. **ポリシー検証:** 脱出口(`allow_non_loopback_listener`、
-   `allow_non_loopback_backends`)は明示設定時でも拒否。本リリースに
-   非ループバックバインドへの文書化・テスト済み経路は存在しない。
+1. **既定値:** `DEFAULT_LISTEN_HOST = "127.0.0.1"`。backend URLもremote policyを明示有効化しない限りloopback。
+2. **スキーマ検証:** listener hostは厳密に `127.0.0.1`。backend URLは厳密な `http://127.0.0.1:<port>/mcp`、または明示opt-in後だけ既定portの `https://<machine>.<tailnet>.ts.net/mcp`。
+3. **ポリシー検証:** `allow_non_loopback_listener` は拒否継続。`allow_non_loopback_backends` は任意hostを許可せず、T-02のTailscale HTTPS shapeだけを有効化。hot reloadも無効。
 
-非ループバック運用には、将来の明示的セキュリティプロファイルと
-**本脅威モデルの改訂**が必要(T-03/T-04 の受容済みリスク声明が成立しなくなる)。
+非loopback **listener** 運用は今後も将来の明示security profileが必要。対応済みの非loopback **southbound** は上記Tailscale HTTPS profileだけ。
 
 ## 7. 認証なしローカル境界の根拠
 

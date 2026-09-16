@@ -85,7 +85,8 @@ pub struct NorthboundOAuthConfig {
     pub required_scope: String,
 }
 
-/// Policy switches. Every non-default value fails closed in v1.
+/// Policy switches. Listener and hot-reload escape hatches still fail
+/// closed; remote backends have one narrow Tailscale HTTPS profile.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
@@ -93,7 +94,9 @@ pub struct PolicyConfig {
     /// profile and threat model.
     #[serde(default)]
     pub allow_non_loopback_listener: bool,
-    /// Must remain `false`; backends must stay on loopback in v1.
+    /// When `false` (default), backends must stay on loopback. When `true`,
+    /// exact `https://<machine>.<tailnet>.ts.net/mcp` endpoints are also
+    /// accepted; arbitrary remote hosts remain forbidden.
     #[serde(default)]
     pub allow_non_loopback_backends: bool,
     /// Must remain `false`; gateway policy is only validated at startup.
@@ -128,7 +131,8 @@ pub struct BackendEntry {
     /// Namespace prefix applied to every tool of this backend. Must be
     /// non-empty, end with `_`, and use only the allowed prefix charset.
     pub prefix: String,
-    /// Loopback HTTP Streamable MCP endpoint (`http://127.0.0.1:<port>/mcp`).
+    /// Streamable MCP endpoint. Loopback HTTP is always accepted; the narrow
+    /// Tailscale HTTPS form is accepted only when the policy flag enables it.
     /// Supports `${ENV_VAR}` references resolved at load time.
     pub url: String,
     /// Required backends fail startup when unreachable; optional backends

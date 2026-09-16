@@ -84,7 +84,7 @@ aggregation互換のために変更した箇所はowner project側でも確認�
 ## 3. Required negative coverage
 
 - non-loopback gateway listener
-- non-loopback/non-HTTP backend URL
+- HTTP以外のloopback backend URL、および明示Tailscale HTTPS profile外のremote backend URL
 - wrong namespace separator
 - `hot_reload = true`
 - search/discovery exposure
@@ -101,10 +101,10 @@ v1はadmin plane自体を公開せずadmin tokenも不要なので、「missing/
 
 - Rust fmt: PASS
 - Rust clippy `-D warnings`: PASS
-- lib: 45/45 PASS
+- lib: 54/54 PASS
 - fixture: 5/5 PASS
 - policy: 11/11 PASS
-- proxy E2E/fault: 13/13 PASS
+- proxy E2E/fault: 14/14 PASS
 - real backend integration: 1/1 PASS、6 backend inventory確認
 - real backend observation: baseline 6 namespaceを維持し、追加Chrome toolsはbaseline必須にはしません
 - isolated release artifact build + clean-machine smoke: PASS

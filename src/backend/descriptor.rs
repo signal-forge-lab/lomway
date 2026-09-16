@@ -24,10 +24,19 @@ pub struct BackendDescriptor {
 impl BackendDescriptor {
     /// Construct a descriptor from a configuration entry, re-running every
     /// public validator. Unvalidated entries are rejected here.
+    #[cfg(test)]
     pub fn try_from_entry(entry: &BackendEntry) -> Result<Self> {
+        Self::try_from_entry_with_policy(entry, false)
+    }
+
+    /// Construct a descriptor using the already-selected southbound policy.
+    pub fn try_from_entry_with_policy(
+        entry: &BackendEntry,
+        allow_non_loopback_backends: bool,
+    ) -> Result<Self> {
         validate::validate_backend_id(&entry.id)?;
         validate::validate_backend_prefix(&entry.prefix)?;
-        validate::validate_backend_url(&entry.url)?;
+        validate::validate_backend_url_for_policy(&entry.url, allow_non_loopback_backends)?;
         anyhow::ensure!(
             (1..=validate::MAX_BACKEND_TIMEOUT_SECONDS).contains(&entry.timeout_seconds),
             "backend '{}' timeout_seconds must be between 1 and {}",
@@ -60,7 +69,7 @@ impl BackendDescriptor {
         &self.prefix
     }
 
-    /// Loopback Streamable HTTP MCP endpoint.
+    /// Validated Streamable HTTP MCP endpoint.
     pub fn url(&self) -> &str {
         &self.url
     }

@@ -17,7 +17,7 @@ Google Driveは独立connectorとしてこの境界外です。
 
 - Gateway listenerは `127.0.0.1` 固定。
 - v1はLAN / `0.0.0.0` / Tailscale / public bindをreject。
-- southbound backend URLもloopback HTTP `/mcp` に限定。
+- southbound backend URLは既定でloopback HTTP `/mcp`。公開schemaで明示opt-inした場合のみ、trusted Tailscale peerの既定port `https://<machine>.<tailnet>.ts.net/mcp` を追加許可。
 - remote ingressはSecure MCP Tunnelだけ。
 
 ## 3. Upstream control plane除去
