@@ -41,7 +41,7 @@ shutdown_timeout_seconds = 30
 
 [policy]
 allow_non_loopback_listener = false # must remain false
-allow_non_loopback_backends = false # default false; true admits exact Tailscale HTTPS /mcp URLs only
+allow_non_loopback_backends = false # must remain false
 hot_reload = false                  # must remain false
 max_argument_size_bytes = 1048576   # <= 1 MiB
 
@@ -53,7 +53,7 @@ json_logs = false
 [[backends]]
 id = "filesystem"                   # unique, lowercase, no ambiguous forms
 prefix = "fs_"                      # the namespace contract: <prefix><tool>
-url = "http://127.0.0.1:8001/mcp"   # loopback by default; ${VAR} supported
+url = "http://127.0.0.1:8001/mcp"   # loopback only; ${VAR} supported
 required = true                     # default true; false = degrade-on-outage
 timeout_seconds = 30                # default 30
 ```
@@ -61,8 +61,6 @@ timeout_seconds = 30                # default 30
 Defaults: `[server]` listens on `127.0.0.1:17777`; `[policy]`, `[observability]`, and `backends` may be omitted entirely (the public schema accepts zero backends, while the deployment gate keeps requiring at least one). Unknown keys fail validation at every level.
 
 Namespace prefix rules: non-empty lowercase stem + `_`, unique across backends, never normalized; reserved prefixes (`proxy_`, `lomway_`, legacy `lmg_`) are rejected.
-
-Southbound remote backends are opt-in. With `allow_non_loopback_backends = true`, the only additional accepted URL form is exact `https://<machine>.<tailnet>.ts.net/mcp` on the default TLS port. Userinfo, query strings, fragments, custom ports, arbitrary Internet hosts, and non-TLS remote URLs remain rejected. This profile is intended for Tailscale Serve endpoints owned by trusted tailnet peers.
 
 ## 4. CLI reference
 
@@ -104,7 +102,7 @@ XMIND_WORKBOARD_MCP_URL
 PRAXIOM_MCP_URL
 ```
 
-The default production policy requires every resolved backend URL to be `http://127.0.0.1:<port>/mcp`. A public-schema deployment may explicitly opt into the narrow Tailscale HTTPS backend profile described above; legacy deployment files remain loopback-only.
+The production policy requires every resolved backend URL to be `http://127.0.0.1:<port>/mcp`.
 
 The gateway itself has no application/admin secret because no admin surface is served. SOPS is used by the Secure Tunnel scripts only; they read `OPENAI_ADMIN_KEY` for one-time tunnel creation and `CONTROL_PLANE_API_KEY` for runtime connection.
 
@@ -157,7 +155,7 @@ These are single-call bounds, not retry windows.
 Startup rejects configuration that enables or changes any of the following:
 
 - non-loopback listener;
-- non-HTTP loopback backends and any remote backend outside the explicit Tailscale HTTPS profile;
+- non-HTTP or non-loopback backends;
 - namespace separator other than `_`;
 - `hot_reload = true`;
 - search/discovery exposure;

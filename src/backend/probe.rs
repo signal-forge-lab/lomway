@@ -14,8 +14,6 @@ use tower_mcp::client::{HttpClientTransport, McpClient};
 use crate::backend::descriptor::BackendDescriptor;
 use crate::backend::registry::BackendRegistry;
 
-const REMOTE_STARTUP_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
-
 /// One tool as reported by the upstream backend during the probe.
 #[derive(Debug, Clone)]
 pub struct UpstreamTool {
@@ -155,12 +153,7 @@ pub async fn probe_backend(descriptor: &BackendDescriptor) -> Result<Vec<Upstrea
 }
 
 fn probe_timeout(descriptor: &BackendDescriptor) -> Duration {
-    let configured = descriptor.timeout().max(Duration::from_secs(1));
-    if crate::config::validate::is_exact_tailnet_https_mcp_url(descriptor.url()) {
-        configured.min(REMOTE_STARTUP_PROBE_TIMEOUT)
-    } else {
-        configured
-    }
+    descriptor.timeout().max(Duration::from_secs(1))
 }
 
 #[cfg(test)]
@@ -177,29 +170,6 @@ mod tests {
             timeout_seconds: 2,
         })
         .expect("valid descriptor")
-    }
-
-    fn remote_descriptor(id: &str, url: &str, timeout_seconds: u64) -> BackendDescriptor {
-        BackendDescriptor::try_from_entry_with_policy(
-            &BackendEntry {
-                id: id.to_string(),
-                prefix: format!("{id}_"),
-                url: url.to_string(),
-                required: false,
-                timeout_seconds,
-            },
-            true,
-        )
-        .expect("valid remote descriptor")
-    }
-
-    #[test]
-    fn remote_startup_probe_is_bounded_independently_from_tool_timeout() {
-        let remote = remote_descriptor("mac", "https://mac.example-tailnet.ts.net/mcp", 300);
-        assert_eq!(probe_timeout(&remote), Duration::from_secs(3));
-
-        let local = descriptor("local", "http://127.0.0.1:19001/mcp", false);
-        assert_eq!(probe_timeout(&local), Duration::from_secs(2));
     }
 
     fn registry(backends: Vec<BackendDescriptor>) -> BackendRegistry {

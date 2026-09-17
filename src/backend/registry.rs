@@ -23,12 +23,7 @@ impl BackendRegistry {
         let backends = config
             .backends
             .iter()
-            .map(|entry| {
-                BackendDescriptor::try_from_entry_with_policy(
-                    entry,
-                    config.policy.allow_non_loopback_backends,
-                )
-            })
+            .map(BackendDescriptor::try_from_entry)
             .collect::<Result<Vec<_>>>()?;
         Ok(Self { backends })
     }
@@ -126,22 +121,6 @@ mod tests {
         assert_eq!(registry.get("memory").expect("found").prefix(), "memory_");
         assert!(registry.get("mem").is_none(), "lookup is exact, not fuzzy");
         assert!(registry.get("Memory").is_none(), "ids are never normalized");
-    }
-
-    #[test]
-    fn explicit_policy_allows_tailnet_https_backend() {
-        let mut public = config(vec![entry(
-            "workbridge_mac",
-            "workbridge_mac_",
-            "https://workbridge-mac.example-tailnet.ts.net/mcp",
-        )]);
-        public.policy.allow_non_loopback_backends = true;
-        let registry = BackendRegistry::from_config(&public).expect("tailnet backend registry");
-        assert_eq!(registry.len(), 1);
-        assert_eq!(
-            registry.get("workbridge_mac").expect("mac backend").url(),
-            "https://workbridge-mac.example-tailnet.ts.net/mcp"
-        );
     }
 
     #[test]

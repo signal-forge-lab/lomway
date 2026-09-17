@@ -17,7 +17,7 @@ Google Drive remains outside this boundary as its own connector.
 
 - gateway listener is exactly `127.0.0.1`;
 - v1 rejects LAN, `0.0.0.0`, Tailscale or public binds;
-- southbound backend URLs are loopback HTTP `/mcp` by default; an explicit public-schema opt-in admits only exact default-port `https://<machine>.<tailnet>.ts.net/mcp` endpoints for trusted Tailscale peers;
+- every southbound backend URL must also be loopback HTTP `/mcp`;
 - the Secure Tunnel is the only remote ingress path.
 
 ## 3. Upstream control plane removal

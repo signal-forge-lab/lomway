@@ -15,18 +15,9 @@ use crate::config::validate::MAX_ARGUMENT_SIZE_BYTES;
 /// configuration.
 ///
 /// Upstream supports many routing/middleware features. This gateway does not:
-/// arbitrary retries, fan-out, schema rewriting, dynamic reload, arbitrary
-/// remote backends, or northbound auth belong outside this thin boundary.
+/// arbitrary retries, fan-out, schema rewriting, dynamic reload, remote
+/// backends, or northbound auth belong outside this thin local boundary.
 pub fn validate_proxy_policy(config: &ProxyConfig) -> Result<()> {
-    validate_proxy_policy_with_remote_backends(config, false)
-}
-
-/// Validate the legacy-shaped runtime config after a validated public config
-/// explicitly opted into the narrow Tailscale HTTPS backend profile.
-pub(crate) fn validate_proxy_policy_with_remote_backends(
-    config: &ProxyConfig,
-    allow_non_loopback_backends: bool,
-) -> Result<()> {
     validate_listener(config)?;
     validate_namespace_contract(config)?;
     validate_exposure_features(config)?;
@@ -36,7 +27,7 @@ pub(crate) fn validate_proxy_policy_with_remote_backends(
     validate_backend_population(config)?;
     for backend in &config.backends {
         validate_backend_transport(backend)?;
-        validate_backend_endpoint(backend, allow_non_loopback_backends)?;
+        validate_backend_endpoint(backend)?;
         validate_backend_resilience(backend)?;
         validate_backend_surface(backend)?;
     }
@@ -141,16 +132,11 @@ fn validate_backend_transport(backend: &mcp_proxy::config::BackendConfig) -> Res
     Ok(())
 }
 
-fn validate_backend_endpoint(
-    backend: &mcp_proxy::config::BackendConfig,
-    allow_non_loopback_backends: bool,
-) -> Result<()> {
+fn validate_backend_endpoint(backend: &mcp_proxy::config::BackendConfig) -> Result<()> {
     let url = backend.url.as_deref().unwrap_or_default();
     ensure!(
-        crate::config::validate::is_exact_loopback_mcp_url(url)
-            || (allow_non_loopback_backends
-                && crate::config::validate::is_exact_tailnet_https_mcp_url(url)),
-        "backend '{}' URL must be loopback HTTP or an explicitly allowed Tailscale HTTPS /mcp endpoint",
+        crate::config::validate::is_exact_loopback_mcp_url(url),
+        "backend '{}' URL must be a loopback http://127.0.0.1:<port>/mcp endpoint",
         backend.name
     );
     ensure!(
@@ -238,32 +224,5 @@ mod tests {
         assert!(legacy.backends.is_empty());
         let error = validate_proxy_policy(&legacy).expect_err("legacy gate keeps >=1 backend");
         assert!(error.to_string().contains("at least one backend"));
-    }
-
-    #[test]
-    fn public_policy_can_explicitly_enable_tailnet_https_backend() {
-        let public: crate::config::model::GatewayConfig = toml::from_str(
-            r#"
-schema_version = 1
-
-[policy]
-allow_non_loopback_backends = true
-
-[[backends]]
-id = "workbridge_mac"
-prefix = "workbridge_mac_"
-url = "https://workbridge-mac.example-tailnet.ts.net/mcp"
-required = false
-timeout_seconds = 30
-"#,
-        )
-        .expect("parse public config");
-        let legacy = crate::config::migrate::to_legacy(&public).expect("map to runtime config");
-        assert!(
-            validate_proxy_policy(&legacy).is_err(),
-            "legacy entry point remains loopback-only"
-        );
-        validate_proxy_policy_with_remote_backends(&legacy, true)
-            .expect("public opt-in admits the narrow Tailscale HTTPS form");
     }
 }

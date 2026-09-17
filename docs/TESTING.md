@@ -86,7 +86,7 @@ Compatibility changes made only to support aggregation are tested in their ownin
 ## 3. Required negative coverage
 
 - non-loopback gateway listener;
-- non-HTTP loopback backend URL and remote backend URLs outside the explicit Tailscale HTTPS profile;
+- non-loopback/non-HTTP backend URL;
 - wrong namespace separator;
 - `hot_reload = true`;
 - search/discovery exposure;
@@ -103,10 +103,10 @@ There are no “missing/wrong gateway admin token” tests because v1 serves no 
 
 - Rust fmt: PASS
 - Rust clippy `-D warnings`: PASS
-- lib tests: 54/54 PASS
+- lib tests: 45/45 PASS
 - fixture tests: 5/5 PASS
 - policy tests: 11/11 PASS
-- proxy E2E/fault tests: 14/14 PASS
+- proxy E2E/fault tests: 13/13 PASS
 - real backend integration: 1/1 PASS, six backend inventories present
 - real backend observation: baseline six namespaces remain present; extra Chrome tools are allowed and not baseline-required
 - isolated release artifact build + clean-machine smoke: PASS

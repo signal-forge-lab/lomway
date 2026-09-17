@@ -14,12 +14,11 @@
 use anyhow::{Result, ensure};
 use axum::Router;
 use mcp_proxy::{Proxy, ProxyConfig};
-use std::collections::HashSet;
 
 use crate::backend::registry::BackendRegistry;
 use crate::config::migrate;
 use crate::config::model::GatewayConfig;
-use crate::gateway::policy::{validate_proxy_policy, validate_proxy_policy_with_remote_backends};
+use crate::gateway::policy::validate_proxy_policy;
 use crate::gateway::reconnect;
 use crate::namespace::collision::plan_tools;
 
@@ -31,18 +30,7 @@ use crate::namespace::collision::plan_tools;
 /// tool calls.
 pub async fn build_proxy(config: ProxyConfig) -> Result<Proxy> {
     validate_proxy_policy(&config)?;
-    build_proxy_after_policy(config).await
-}
-
-async fn build_proxy_after_policy(config: ProxyConfig) -> Result<Proxy> {
     let reconnect_specs = reconnect::specs(&config);
-    build_proxy_after_policy_with_specs(config, reconnect_specs).await
-}
-
-async fn build_proxy_after_policy_with_specs(
-    config: ProxyConfig,
-    reconnect_specs: Vec<reconnect::BackendReconnectSpec>,
-) -> Result<Proxy> {
     let proxy = Proxy::from_config(config).await?;
     ensure!(
         proxy.mcp_proxy().remove_backend("proxy").await,
@@ -101,29 +89,8 @@ impl Gateway {
         // legacy mapping runs after startup validation and re-validates the
         // public model.
         let oauth = public.server.oauth.clone();
-        let full_legacy = migrate::to_legacy(&public)?;
-        let reconnect_specs = reconnect::specs(&full_legacy);
-
-        // Optional backends that failed the bounded startup probe are not
-        // handed to the upstream builder. This keeps an offline remote peer
-        // from extending startup with a second connection attempt. The full
-        // reconnect spec list is retained so those backends can appear later
-        // without a Lomway restart.
-        let healthy_ids: HashSet<&str> = report
-            .healthy
-            .iter()
-            .map(|backend| backend.descriptor.id())
-            .collect();
-        let mut runtime_public = public.clone();
-        runtime_public
-            .backends
-            .retain(|backend| healthy_ids.contains(backend.id.as_str()));
-        let runtime_legacy = migrate::to_legacy(&runtime_public)?;
-        validate_proxy_policy_with_remote_backends(
-            &runtime_legacy,
-            public.policy.allow_non_loopback_backends,
-        )?;
-        let proxy = build_proxy_after_policy_with_specs(runtime_legacy, reconnect_specs).await?;
+        let legacy = migrate::to_legacy(&public)?;
+        let proxy = build_proxy(legacy).await?;
         let namespaces = proxy.mcp_proxy().backend_namespaces();
         let router = crate::gateway::router::gateway_router_with_oauth(proxy, oauth);
         Ok(Self {

@@ -1,9 +1,8 @@
 //! Policy validation for the public configuration model.
 //!
 //! Validation is fail-closed: unsupported or unsafe values are hard errors,
-//! never warnings, and nothing is silently normalized. Loopback remains the
-//! default southbound posture; one explicit policy flag admits only the
-//! constrained Tailscale HTTPS backend shape.
+//! never warnings, and nothing is silently normalized. The v1 safety posture
+//! is identical to the pre-generalization deployment posture.
 //!
 //! One deliberate generalization: the public schema aggregates 0..N
 //! backends, so an empty backend list is a valid configuration. Every entry
@@ -42,7 +41,7 @@ pub fn validate(config: &GatewayConfig) -> Result<()> {
     for backend in &config.backends {
         validate_backend_id(&backend.id)?;
         validate_backend_prefix(&backend.prefix)?;
-        validate_backend_url_for_policy(&backend.url, config.policy.allow_non_loopback_backends)
+        validate_backend_url(&backend.url)
             .with_context(|| format!("backend '{}' has an invalid URL", backend.id))?;
         ensure!(
             (1..=MAX_BACKEND_TIMEOUT_SECONDS).contains(&backend.timeout_seconds),
@@ -117,6 +116,10 @@ fn validate_policy_flags(config: &GatewayConfig) -> Result<()> {
     ensure!(
         !config.policy.allow_non_loopback_listener,
         "policy.allow_non_loopback_listener is not permitted in this release"
+    );
+    ensure!(
+        !config.policy.allow_non_loopback_backends,
+        "policy.allow_non_loopback_backends is not permitted in this release"
     );
     ensure!(
         !config.policy.hot_reload,
@@ -221,28 +224,6 @@ pub(crate) fn validate_backend_url(url: &str) -> Result<()> {
     Ok(())
 }
 
-/// Validate a backend URL against the selected southbound trust boundary.
-/// Loopback HTTP remains the default. When the explicit escape hatch is
-/// enabled, the only additional accepted form is Tailscale HTTPS on the
-/// default TLS port with the exact `/mcp` path.
-pub(crate) fn validate_backend_url_for_policy(
-    url: &str,
-    allow_non_loopback_backends: bool,
-) -> Result<()> {
-    if is_exact_loopback_mcp_url(url) {
-        return Ok(());
-    }
-    ensure!(
-        allow_non_loopback_backends,
-        "backend URL must be loopback unless policy.allow_non_loopback_backends = true, got {url:?}"
-    );
-    ensure!(
-        is_exact_tailnet_https_mcp_url(url),
-        "non-loopback backend URL must be an exact Tailscale HTTPS endpoint https://<machine>.<tailnet>.ts.net/mcp on the default TLS port, got {url:?}"
-    );
-    Ok(())
-}
-
 /// Shared strict URL rule for both the public model and the legacy adapter.
 pub(crate) fn is_exact_loopback_mcp_url(url: &str) -> bool {
     const LOOPBACK_PREFIX: &str = "http://127.0.0.1:";
@@ -253,37 +234,6 @@ pub(crate) fn is_exact_loopback_mcp_url(url: &str) -> bool {
         return false;
     };
     path == "mcp" && port.parse::<u16>().is_ok_and(|port| port > 0)
-}
-
-/// Narrow remote-backend profile used for trusted tailnet peers.
-pub(crate) fn is_exact_tailnet_https_mcp_url(url: &str) -> bool {
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        return false;
-    };
-    if parsed.scheme() != "https"
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.port().is_some()
-        || parsed.path() != "/mcp"
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-    {
-        return false;
-    }
-    let Some(host) = parsed.host_str() else {
-        return false;
-    };
-    let Some(prefix) = host.strip_suffix(".ts.net") else {
-        return false;
-    };
-    let mut labels = prefix.split('.');
-    let Some(machine) = labels.next() else {
-        return false;
-    };
-    let Some(tailnet) = labels.next() else {
-        return false;
-    };
-    !machine.is_empty() && !tailnet.is_empty() && labels.next().is_none()
 }
 
 #[cfg(test)]
@@ -345,36 +295,6 @@ mod tests {
     }
 
     #[test]
-    fn tailnet_https_backends_require_explicit_policy_and_stay_narrow() {
-        let tailnet = "https://workbridge-mac.example-tailnet.ts.net/mcp";
-
-        let mut raw = config(vec![entry("mac", "mac_", tailnet)]);
-        let error = validate(&raw).expect_err("remote backend stays disabled by default");
-        assert!(format!("{error:#}").contains("allow_non_loopback_backends"));
-
-        raw.policy.allow_non_loopback_backends = true;
-        validate(&raw).expect("explicit policy accepts exact Tailscale HTTPS MCP URL");
-
-        for rejected in [
-            "http://workbridge-mac.example-tailnet.ts.net/mcp",
-            "https://example.com/mcp",
-            "https://workbridge-mac.example-tailnet.ts.net:8443/mcp",
-            "https://user@workbridge-mac.example-tailnet.ts.net/mcp",
-            "https://workbridge-mac.example-tailnet.ts.net/mcp?x=1",
-            "https://workbridge-mac.example-tailnet.ts.net/mcp#fragment",
-            "https://workbridge-mac.example-tailnet.ts.net/nested/mcp",
-        ] {
-            let mut candidate = config(vec![entry("mac", "mac_", rejected)]);
-            candidate.policy.allow_non_loopback_backends = true;
-            let error = validate(&candidate).expect_err("remote backend shape must fail closed");
-            assert!(
-                format!("{error:#}").contains("Tailscale HTTPS"),
-                "{rejected}: {error:#}"
-            );
-        }
-    }
-
-    #[test]
     fn validates_northbound_oauth_urls_and_scope() {
         let valid = NorthboundOAuthConfig {
             resource_url: "https://example.test/mcp".to_string(),
@@ -407,7 +327,8 @@ mod tests {
         assert!(validate(&raw).is_err());
         raw.policy.hot_reload = false;
         raw.policy.allow_non_loopback_backends = true;
-        validate(&raw).expect("remote-backend policy is inert for loopback-only configs");
+        assert!(validate(&raw).is_err());
+        raw.policy.allow_non_loopback_backends = false;
         raw.policy.max_argument_size_bytes = MAX_ARGUMENT_SIZE_BYTES + 1;
         assert!(validate(&raw).is_err());
         raw.policy.max_argument_size_bytes = 0;

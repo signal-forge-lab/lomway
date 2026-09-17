@@ -41,7 +41,7 @@ shutdown_timeout_seconds = 30
 
 [policy]
 allow_non_loopback_listener = false # false固定
-allow_non_loopback_backends = false # 既定false。trueでもTailscale HTTPSの厳密な/mcp URLのみ許可
+allow_non_loopback_backends = false # false固定
 hot_reload = false                  # false固定
 max_argument_size_bytes = 1048576   # 1 MiB以下
 
@@ -53,7 +53,7 @@ json_logs = false
 [[backends]]
 id = "filesystem"                   # 一意・小文字・ambiguous形は不可
 prefix = "fs_"                      # namespace契約: <prefix><tool>
-url = "http://127.0.0.1:8001/mcp"   # 既定はloopbackのみ。${VAR} 可
+url = "http://127.0.0.1:8001/mcp"   # loopbackのみ。${VAR} 可
 required = true                     # 既定true。falseはdegrade-on-outage
 timeout_seconds = 30                # 既定30
 ```
@@ -61,8 +61,6 @@ timeout_seconds = 30                # 既定30
 既定値: `[server]` は `127.0.0.1:17777` でlisten。`[policy]` / `[observability]` / `backends` は完全に省略可能です（公開schemaは0 backendを受け入れますが、デプロイゲートは1つ以上のbackendを要求し続けます）。未知のkeyは全レベルで検証に失敗します。
 
 namespace prefix規則: 空でない小文字stem + `_`、backend間で一意、暗黙の正規化なし。reserved prefix（`proxy_`、`lomway_`、旧 `lmg_`）は拒否されます。
-
-southboundのremote backendは明示opt-inです。`allow_non_loopback_backends = true` の場合でも、追加で許可されるのは既定TLS port上の厳密な `https://<machine>.<tailnet>.ts.net/mcp` だけです。userinfo、query、fragment、custom port、任意Internet host、非TLS remote URLは引き続き拒否します。trusted tailnet peer上のTailscale Serve endpointを想定しています。
 
 ## 4. CLIリファレンス
 
@@ -91,7 +89,7 @@ XMIND_WORKBOARD_MCP_URL
 PRAXIOM_MCP_URL
 ```
 
-既定production policyでは、解決後の全backend URLを `http://127.0.0.1:<port>/mcp` に限定します。公開schemaのデプロイだけは、上記の狭いTailscale HTTPS backend profileへ明示opt-inできます。legacy deployment fileはloopback-onlyのままです。
+production policyでは、解決後の全backend URLを `http://127.0.0.1:<port>/mcp` に限定します。
 
 Gatewayはadmin surfaceを公開しないため、Gateway本体用secretはありません。SOPSを使うのはSecure Tunnel scriptsだけで、one-time作成時に `OPENAI_ADMIN_KEY`、runtime接続に `CONTROL_PLANE_API_KEY` をprocess内へ読み込みます。
 
@@ -144,7 +142,7 @@ retry windowではなく1 callの上限です。
 起動時に以下をrejectします。
 
 - loopback以外へのlisten
-- HTTP以外のloopback backend、および明示Tailscale HTTPS profile外のremote backend
+- HTTP以外またはloopback以外のbackend
 - `_` 以外のnamespace separator
 - `hot_reload = true`
 - search/discovery exposure
