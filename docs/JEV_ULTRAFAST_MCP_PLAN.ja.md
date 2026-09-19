@@ -64,7 +64,7 @@ Browser Harness / CDP
                 HANDOFF_REQUIRED
                         |
                         v
-                別の直接操作Browser MCP
+              最終fallback先は後で決定
 ```
 
 Recovery LLMはselector、座標、任意JavaScript、直接のbrowser mutationを返してはいけません。返せるのは原因説明、修正subgoal、Jev loop向けの限定的な回避指示までです。
@@ -82,21 +82,23 @@ Recovery LLMはselector、座標、任意JavaScript、直接のbrowser mutation�
 
 ## 別Browser MCPへの引継ぎ契約
 
-直接操作へ切り替える際、URLから推測せず対象タブを一意に特定できる必要があります。
+最終fallbackに使うBrowser MCPは、**初期実装では決定しません**。候補としてBrowser Harness MCP、Chrome DevTools MCP、Stealth Browser MCP、その他の直接操作backendを後から比較して決めます。
 
-Jev UltrafastはBrowser HarnessのCDP `targetId` を内部の `Browser.target` に保持しています。Browser Harness MCP側にも `browser_list_tabs` と `browser_switch_tab(targetId)` があります。
+ただしfallback先を後回しにしてもRecovery経路を作り直さなくて済むよう、Jev Ultrafast側は行き先に依存しない最低限のhandoff情報を返せるようにします。
 
-したがってRecoveryを使い切った場合、MCP backendは次のようなhandoff packetを返します。
+Jev UltrafastはBrowser HarnessのCDP `targetId` を内部の `Browser.target` に保持しています。最終的に選んだfallbackが同じbrowser instanceへattachできる場合、この値を対象tabの識別子として利用できます。
+
+したがってRecoveryを使い切った場合、MCP backendは次のような行き先非依存のhandoff packetを返します。
 
 ```json
 {
   "handoff": {
     "required": true,
     "reason": "repeated_block",
-    "browser_backend": "browser-harness",
+    "browser_backend": null,
     "browser_connection": {
-      "name": "default",
-      "mode": "default"
+      "kind": "browser-harness-cdp",
+      "name": "default"
     },
     "target_id": "<cdp targetId>",
     "url": "<current url>",
@@ -114,9 +116,10 @@ Jev UltrafastはBrowser HarnessのCDP `targetId` を内部の `Browser.target` �
 - タブの主識別子は `target_id`。
 - 同一URLの複数タブがあり得るためURLだけで引き継がない。
 - raw CDP WebSocket URLはデフォルトでは返さない。
-- fallback MCPが同じbrowser instanceへ接続していることを確認できるよう、Browser Harnessのconnection name/modeを返す。
-- 両MCPが同じBrowser Harness/CDP endpointへ設定済みなら、portをMCP responseへ毎回返す必要はない。
-- 同じendpointである保証がない場合は、起動/config段階で接続先を一致させる必要がある。別Chrome instanceでは同じtargetIdを利用できない。
+- 将来のfallbackが同じbrowser instanceへ接続していることを確認できるよう、connection identityのヒントを返す。
+- この段階では具体的なfallback MCPやport契約までは決めない。
+- 最終fallbackが同じBrowser Harness/CDP endpointを共有すると保証できるなら、portを毎回返す必要はない。
+- 同じendpointを共有できない場合は、後のfallback設計でconnection identityの解決方法を決める。別Chrome instanceでは同じtargetIdを利用できない。
 - CDP `sessionId` はconnection scopeなのでportableなhandoff IDとして扱わない。
 
 ## 文字入力の2モード
@@ -254,13 +257,14 @@ Jevが `TYPE_TEXT` を選んだら、別LLMを内部から呼ばず、MCP結果�
 - 同等blockのデフォルト上限2回。
 - total recovery budget。
 - `HANDOFF_REQUIRED`。
-- Browser Harness connection identity + `target_id` を含むhandoff packet。
+- browser connection identity + `target_id` を含む、行き先非依存のhandoff packet。
 
 完了条件:
 
-- Browser Harness MCPから返却 `target_id` をlist/switchできる。
-- 同一URLの複数tabでも曖昧にならない。
+- `HANDOFF_REQUIRED` がURL推測なしで安定したtarget identityを返す。
+- 同一URLの複数tabでもpacketが曖昧にならない。
 - raw WebSocket credentialをデフォルトで公開しない。
+- 実際に使用するfallback MCPの選定・接続検証は明示的に後回しとする。
 
 ### M5 — Lomway統合
 
@@ -286,7 +290,7 @@ Jevが `TYPE_TEXT` を選んだら、別LLMを内部から呼ばず、MCP結果�
 - caller text handshake。
 - 1回目block -> Recovery LLM -> 成功。
 - 1回目block -> recovery -> 同等2回目block -> handoff。
-- fallback Browser Harness MCPが同じtargetを直接操作。
+- `HANDOFF_REQUIRED` が将来のfallbackに必要な正確なtarget/connection情報を返す。
 - stale handoff/freshnessはfail closed。
 - close後にowned targetを残さない。
 
@@ -302,6 +306,8 @@ Jevが `TYPE_TEXT` を選んだら、別LLMを内部から呼ばず、MCP結果�
 - 新しいtransition log database。
 - screenshotを常時使うRecovery。
 - 新履歴構造が必要な高度なA/B/A/B semantic cycle検出。
+- 最終fallback Browser MCPの選定（Browser Harness MCP / Chrome DevTools MCP / Stealth Browser MCP / その他）。
+- port等のconnection locatorを返す必要があるかを含む、具体的なfallback attach方式。
 - 複数fallback browser MCPの自動選択。
 - JevによるLomway tool routing。
 - Jev backendからの任意raw CDP公開。
@@ -325,8 +331,11 @@ signal-forge-lab/lomway
   - browser ownership / cleanup
 
 browser-use/browser-harness
-  - 基礎CDP/browser helpers
-  - 別の直接操作Browser MCP fallback
+  - Jev Ultrafastが利用する基礎CDP/browser helpers
+
+将来のfallback browser backend（未決定）
+  - HANDOFF_REQUIRED後の直接browser takeover
+  - backend選定と具体的なattach契約は後で決定
 ```
 
 この分離により、backend domain logicをLomway本体へ移さないという既存方針を維持します。
