@@ -98,7 +98,7 @@ Therefore the MCP backend should expose a destination-neutral handoff packet whe
     "browser_backend": null,
     "browser_connection": {
       "kind": "browser-harness-cdp",
-      "name": "default"
+      "name": "<actual Browser Harness connection name>"
     },
     "target_id": "<cdp targetId>",
     "url": "<current url>",
