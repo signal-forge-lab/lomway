@@ -36,6 +36,10 @@ CHECKS = (
     ("live workspace id", re.compile(r"\bws_[0-9a-f]{8,}\b", re.I)),
 )
 
+# Public URL-userinfo fixture retained in history; exact-match only so real
+# email addresses remain release blockers.
+ALLOWLISTED_MATCHES = {("email address", "user@workbridge-mac.example-tailnet.ts.net")}
+
 
 def candidate_files() -> list[Path]:
     raw = subprocess.check_output(
@@ -60,6 +64,8 @@ def scan_text(text: str, source: str) -> list[str]:
     findings: list[str] = []
     for label, pattern in CHECKS:
         for match in pattern.finditer(text):
+            if (label, match.group()) in ALLOWLISTED_MATCHES:
+                continue
             line = text.count("\n", 0, match.start()) + 1
             findings.append(f"{source}:{line}: {label}")
     return findings
