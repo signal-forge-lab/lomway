@@ -98,7 +98,7 @@ Jev UltrafastはBrowser HarnessのCDP `targetId` を内部の `Browser.target` �
     "browser_backend": null,
     "browser_connection": {
       "kind": "browser-harness-cdp",
-      "name": "default"
+      "name": "<actual Browser Harness connection name>"
     },
     "target_id": "<cdp targetId>",
     "url": "<current url>",
