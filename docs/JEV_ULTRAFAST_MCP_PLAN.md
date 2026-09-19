@@ -64,7 +64,7 @@ Browser Harness / CDP
                 HANDOFF_REQUIRED
                         |
                         v
-                direct browser MCP
+            fallback destination deferred
 ```
 
 The recovery LLM must not emit selectors, coordinates, arbitrary JavaScript, or direct browser mutations. It may only return a revised subgoal, diagnosis, and bounded guidance for the Jev loop.
@@ -82,21 +82,23 @@ Milestone 1 recovery must use these existing structures. Do not add a new persis
 
 ## Browser handoff contract
 
-A direct-browser fallback must be able to identify the exact target without guessing by URL.
+The final fallback browser MCP is deliberately **not selected in the first implementation**. Candidate destinations can be evaluated later, including Browser Harness MCP, Chrome DevTools MCP, Stealth Browser MCP, or another direct-control backend.
 
-Jev Ultrafast already stores the Browser Harness CDP `targetId` internally as `Browser.target`. Browser Harness also exposes `browser_list_tabs` and `browser_switch_tab(targetId)`.
+Even though the destination is deferred, Jev Ultrafast should still return enough neutral handoff metadata so the final choice does not require redesigning the recovery path.
 
-Therefore the MCP backend must expose a handoff packet when recovery is exhausted:
+Jev Ultrafast already stores the Browser Harness CDP `targetId` internally as `Browser.target`. This is useful as a target identity when the selected fallback can attach to the same underlying browser instance.
+
+Therefore the MCP backend should expose a destination-neutral handoff packet when recovery is exhausted:
 
 ```json
 {
   "handoff": {
     "required": true,
     "reason": "repeated_block",
-    "browser_backend": "browser-harness",
+    "browser_backend": null,
     "browser_connection": {
-      "name": "default",
-      "mode": "default"
+      "kind": "browser-harness-cdp",
+      "name": "default"
     },
     "target_id": "<cdp targetId>",
     "url": "<current url>",
@@ -114,9 +116,10 @@ Rules:
 - `target_id` is the primary tab identity.
 - Do not use URL alone because duplicate URLs/tabs are possible.
 - Do not expose a raw CDP WebSocket URL by default.
-- Include the Browser Harness connection name/mode so a fallback MCP can verify it is attached to the same browser instance.
-- If both MCP backends are already configured to the same Browser Harness/CDP endpoint, a port does not need to be returned.
-- If they are not guaranteed to share the same endpoint, startup/configuration must establish that relationship. A target ID from one Chrome instance is meaningless in another.
+- Include a connection identity hint so the eventual fallback can verify that it is attached to the same browser instance.
+- Do not commit to a specific fallback MCP or port contract yet.
+- If the eventual fallback is guaranteed to share the same Browser Harness/CDP endpoint, a port does not need to be returned.
+- If it is not guaranteed to share the same endpoint, the later fallback design must establish how connection identity is resolved. A target ID from one Chrome instance is meaningless in another.
 - A connection-scoped CDP `sessionId` is not a portable handoff identifier and should not be treated as one.
 
 ## Text modes
@@ -256,13 +259,14 @@ Deliverables:
 - default equivalent-block limit of 2;
 - bounded total recovery budget;
 - `HANDOFF_REQUIRED` state;
-- handoff packet containing Browser Harness connection identity and `target_id`.
+- destination-neutral handoff packet containing browser connection identity and `target_id`.
 
 Gate:
 
-- Browser Harness MCP can list and switch to the exact returned `target_id`;
-- duplicate URLs do not cause ambiguous takeover;
-- no raw WebSocket credential is exposed by default.
+- `HANDOFF_REQUIRED` returns stable target identity without guessing by URL;
+- duplicate URLs do not make the packet ambiguous;
+- no raw WebSocket credential is exposed by default;
+- selection and validation of the concrete fallback MCP remain explicitly deferred.
 
 ### M5 — Lomway integration
 
@@ -288,7 +292,7 @@ Scenarios:
 - caller text handshake;
 - first block -> Recovery LLM -> success;
 - first block -> recovery -> equivalent second block -> handoff;
-- fallback Browser Harness MCP takes over the exact target;
+- `HANDOFF_REQUIRED` exposes the exact target/connection metadata needed for a future fallback;
 - stale handoff/freshness cases fail closed;
 - close/cleanup leaves no orphaned owned target.
 
@@ -304,6 +308,8 @@ Do not include these in the first implementation:
 - a new transition-log database;
 - screenshot-driven recovery by default;
 - semantic A/B/A/B cycle detection requiring new history structures;
+- selection of the final fallback browser MCP (Browser Harness MCP / Chrome DevTools MCP / Stealth Browser MCP / other);
+- exact fallback attachment method, including whether a port or other connection locator must be exposed;
 - automatic selection among multiple fallback browser MCPs;
 - Jev-based Lomway tool routing;
 - direct arbitrary CDP exposure from the Jev backend.
@@ -327,8 +333,11 @@ future signal-forge-lab/jev-ultrafast fork
   - browser ownership / cleanup
 
 browser-use/browser-harness
-  - underlying CDP/browser helpers
-  - separate direct-browser MCP fallback
+  - underlying CDP/browser helpers used by Jev Ultrafast
+
+future fallback browser backend (TBD)
+  - direct browser takeover after HANDOFF_REQUIRED
+  - concrete backend and attachment contract intentionally deferred
 ```
 
 This split preserves Lomway's rule that backend domain logic remains outside the gateway.
