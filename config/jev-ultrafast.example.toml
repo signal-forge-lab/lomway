@@ -1,0 +1,25 @@
+schema_version = 1
+
+[server]
+host = "127.0.0.1"
+port = 17777
+instructions = "Aggregates the independently supervised Jev Ultrafast MCP backend."
+shutdown_timeout_seconds = 30
+
+[policy]
+allow_non_loopback_listener = false
+allow_non_loopback_backends = false
+hot_reload = false
+max_argument_size_bytes = 1048576
+
+[observability]
+audit = true
+log_level = "info"
+json_logs = false
+
+[[backends]]
+id = "jev-ultrafast"
+prefix = "jev_"
+url = "http://127.0.0.1:18766/mcp"
+required = false
+timeout_seconds = 300

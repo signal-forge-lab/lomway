@@ -14,10 +14,11 @@ Japanese: [INTEGRATIONS.ja.md](INTEGRATIONS.ja.md)
 | Swibo | [`integrations/swibo/`](../integrations/swibo/README.md) ([ja](../integrations/swibo/README.ja.md)) | External process supervision. Owns start/stop/restart of the gateway, tunnel, and backend targets; the template contains placeholders only. |
 | SOPS | [`integrations/sops/`](../integrations/sops/README.md) ([ja](../integrations/sops/README.ja.md)) | Resolves named secrets from the canonical SOPS store into process environment variables at launch. Secret values never enter the repository or the gateway's files. |
 | PowerShell wrappers | [`integrations/powershell/`](../integrations/powershell/README.md) ([ja](../integrations/powershell/README.ja.md)) | Thin `scripts/` conveniences around the core CLI and public HTTP endpoints. No duplicated policy, routing, or namespace logic. |
+| Jev Ultrafast MCP | [`integrations/jev-ultrafast/`](../integrations/jev-ultrafast/README.md) ([ja](../integrations/jev-ultrafast/README.ja.md)) | Independently supervised browser backend with caller/internal text modes, bounded recovery, and destination-neutral handoff metadata. |
 
-## Planned backend integration design
+## Backend integration design
 
-- [Jev Ultrafast MCP integration and recovery plan](JEV_ULTRAFAST_MCP_PLAN.md) — design-only milestone plan for an independently managed Jev browser backend, dual text modes, bounded Recovery LLM escalation, and exact Browser Harness target handoff. The backend logic remains outside Lomway core.
+- [Jev Ultrafast MCP integration and recovery plan](JEV_ULTRAFAST_MCP_PLAN.md) — implementation contract for an independently managed Jev browser backend, dual text modes, bounded Recovery LLM escalation, and exact Browser Harness target handoff. The backend logic remains outside Lomway core.
 
 ## Why the core stays independent
 

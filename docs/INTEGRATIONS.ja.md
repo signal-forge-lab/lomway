@@ -14,10 +14,11 @@ English: [INTEGRATIONS.md](INTEGRATIONS.md)
 | Swibo | [`integrations/swibo/`](../integrations/swibo/README.ja.md) ([en](../integrations/swibo/README.md)) | 外部process監督。gateway・tunnel・backendのstart/stop/restartを宣言的に担当します。テンプレートはplaceholderのみを含みます。 |
 | SOPS | [`integrations/sops/`](../integrations/sops/README.ja.md) ([en](../integrations/sops/README.md)) | 正本SOPS storeから指定されたsecretを起動時にprocess環境変数へ解決します。secret値がrepositoryやgatewayのファイルに入ることはありません。 |
 | PowerShellラッパー | [`integrations/powershell/`](../integrations/powershell/README.ja.md) ([en](../integrations/powershell/README.md)) | core CLIと公開HTTP endpointを包む `scripts/` のthinな利便ラッパー。policy・routing・namespaceロジックは複製しません。 |
+| Jev Ultrafast MCP | [`integrations/jev-ultrafast/`](../integrations/jev-ultrafast/README.ja.md) ([en](../integrations/jev-ultrafast/README.md)) | 独立監督されるbrowser backend。caller/internal text mode、上限付きRecovery、行き先非依存handoff metadataを提供します。 |
 
-## 計画中のbackend統合設計
+## backend統合設計
 
-- [Jev Ultrafast MCP統合・リカバリ計画](JEV_ULTRAFAST_MCP_PLAN.ja.md) — 独立管理するJev browser backend、2つのtext mode、上限付きRecovery LLM、Browser Harnessの正確なtarget引継ぎについての設計・マイルストーンです。backend固有ロジックはLomway coreの外に置きます。
+- [Jev Ultrafast MCP統合・リカバリ計画](JEV_ULTRAFAST_MCP_PLAN.ja.md) — 独立管理するJev browser backend、2つのtext mode、上限付きRecovery LLM、Browser Harnessの正確なtarget引継ぎについての実装contractです。backend固有ロジックはLomway coreの外に置きます。
 
 ## coreを独立させ続ける理由
 
