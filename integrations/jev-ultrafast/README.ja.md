@@ -34,8 +34,9 @@ Lomwayの `jev_` namespaceにより、例えばbackendの `jev_browser_start` �
 ## model設定
 
 通常のJev判断には `TYPESAFE_API_KEY` を使います。internal text modeは `TEXT_MODEL_*`、
-Recoveryはprovider-neutralな `RECOVERY_MODEL_*` を使い、未設定時は対応する
-`TEXT_MODEL_*` へfallbackします。実値は既存の外部SOPS/supervisor経路から注入し、
+Recoveryはprovider-neutralな `RECOVERY_MODEL_*` を使います。Recovery専用設定を1つでも使う場合は
+`RECOVERY_MODEL_API_KEY` / `RECOVERY_MODEL_BASE_URL` / `RECOVERY_MODEL` を一式で必須とし、
+3項目がすべて未設定の場合だけ `TEXT_MODEL_*` 一式へfallbackします。実値は既存の外部SOPS/supervisor経路から注入し、
 Lomway/Jev repositoryへ書きません。
 
 ## 検証
