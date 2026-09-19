@@ -15,6 +15,10 @@ English: [INTEGRATIONS.md](INTEGRATIONS.md)
 | SOPS | [`integrations/sops/`](../integrations/sops/README.ja.md) ([en](../integrations/sops/README.md)) | 正本SOPS storeから指定されたsecretを起動時にprocess環境変数へ解決します。secret値がrepositoryやgatewayのファイルに入ることはありません。 |
 | PowerShellラッパー | [`integrations/powershell/`](../integrations/powershell/README.ja.md) ([en](../integrations/powershell/README.md)) | core CLIと公開HTTP endpointを包む `scripts/` のthinな利便ラッパー。policy・routing・namespaceロジックは複製しません。 |
 
+## 計画中のbackend統合設計
+
+- [Jev Ultrafast MCP統合・リカバリ計画](JEV_ULTRAFAST_MCP_PLAN.ja.md) — 独立管理するJev browser backend、2つのtext mode、上限付きRecovery LLM、Browser Harnessの正確なtarget引継ぎについての設計・マイルストーンです。backend固有ロジックはLomway coreの外に置きます。
+
 ## coreを独立させ続ける理由
 
 - coreは通常のprocess環境変数と構成ファイルだけを読みます。secret解決はSOPS統合側の起動時の関心事です。
