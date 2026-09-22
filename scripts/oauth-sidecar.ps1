@@ -35,12 +35,10 @@ function Get-SidecarProcess {
         return $null
     }
 
-    try {
-        $commandLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $processId").CommandLine
-    } catch {
-        return $null
-    }
-    if ($commandLine -notmatch 'dist[\\/]src[\\/]server\.js') {
+    $listener = Get-NetTCPConnection -State Listen -LocalPort 7677 -ErrorAction SilentlyContinue |
+        Where-Object { $_.OwningProcess -eq $processId } |
+        Select-Object -First 1
+    if (-not $listener) {
         return $null
     }
     return $process
@@ -51,12 +49,6 @@ function Test-SidecarReady {
         [System.Diagnostics.Process]$Process
     )
     if (-not $Process) {
-        return $false
-    }
-    $listener = Get-NetTCPConnection -State Listen -LocalPort 7677 -ErrorAction SilentlyContinue |
-        Where-Object { $_.OwningProcess -eq $Process.Id } |
-        Select-Object -First 1
-    if (-not $listener) {
         return $false
     }
     try {
