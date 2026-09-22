@@ -4,14 +4,19 @@ Updated: 2026-09-13
 
 ## 1. Ownership
 
-The six backend MCP services remain independent Swibo targets. `Lomway` is one Swibo target whose lifecycle contains two ordered components:
+The backend MCP services remain independent Swibo targets. `Lomway` owns the
+gateway plus its OAuth authority sidecar. Swibo supervises the sidecar as a
+separate `OAuth` component so its health is visible independently from the
+gateway.
 
 ```text
-start: gateway -> Secure MCP Tunnel
-stop:  Secure MCP Tunnel -> gateway
+start: OAuth sidecar -> gateway -> Secure MCP Tunnel
+stop:  Secure MCP Tunnel -> gateway -> OAuth sidecar
 ```
 
 The gateway never starts/stops backend MCP processes.
+The OAuth sidecar binds directly to `127.0.0.1:7677`; no forwarding process is
+part of the steady-state topology.
 
 ## 2. Normal status
 
@@ -36,6 +41,7 @@ These are useful for diagnosis or initial setup; normal lifecycle can be operate
 
 ```powershell
 pwsh -NoProfile -File scripts/check.ps1
+pwsh -NoProfile -File scripts/oauth-sidecar.ps1 -Action status
 pwsh -NoProfile -File scripts/start.ps1
 pwsh -NoProfile -File scripts/status.ps1
 pwsh -NoProfile -File scripts/integration-smoke.ps1
@@ -54,10 +60,10 @@ Before starting the aggregate target, the six backend services should normally b
 
 ```text
 Start:
-  backend services -> gateway -> Secure MCP Tunnel
+  backend services -> OAuth sidecar -> gateway -> Secure MCP Tunnel
 
 Stop aggregate target only:
-  Secure MCP Tunnel -> gateway
+  Secure MCP Tunnel -> gateway -> OAuth sidecar
 ```
 
 Stopping the aggregate target does not stop any backend.
@@ -113,6 +119,9 @@ Old individual connector removal is a separate migration decision and is not req
 ## 8. Logs and state
 
 - gateway logs/runtime PID live under ignored local directories;
+- OAuth sidecar logs/PID/state live under `%LOCALAPPDATA%\Lomway\oauth-sidecar`;
+- OAuth signing material, cookie keys, and the owner credential are read only
+  from `~/.config/sops/secrets/global.sops.json` at process launch;
 - Tunnel profile/health/logs are stored outside the repository by `tunnel-client`;
 - do not commit either set;
 - do not enable argument dumps or secret-bearing config dumps for routine diagnosis.
@@ -129,3 +138,33 @@ For any `mcp-proxy`, `tower-mcp`, FastMCP interoperability, or protocol change:
 6. verify Secure Tunnel READY/MCP probe;
 7. verify Swibo lifecycle;
 8. rerun public-repository hygiene review.
+
+## 10. OAuth sidecar cutover (offline-prepared, live-gated)
+
+The Lomway-owned authorization sidecar is loopback-only, binds
+`127.0.0.1:7677` directly, and is supervised by Swibo. Do not start a second
+authority or forwarding process for the same public issuer.
+
+Before cutover, validate the sidecar with synthetic state only, confirm the
+stable public issuer and endpoint mapping, and run the repository's offline
+fmt, clippy, test, build, and diff checks. Keep owner credentials, tokens,
+state files, and SOPS material outside the repository.
+
+During the later live cutover:
+
+1. Stop or disable the Workbridge authority route while keeping Workbridge's
+   optional MCP backend route available if needed.
+2. Start the sidecar through Swibo on its loopback listener and verify its
+   metadata, CIMD/DCR registration, PKCE S256 authorization, resource-bound
+   token, refresh rotation, revocation, and loopback introspection behavior.
+3. Route the existing public `/authorize`, `/token`, `/register`, and
+   `/revoke` paths to the sidecar without changing the public issuer.
+4. Verify Lomway returns `401` with its protected-resource challenge for
+   missing/invalid credentials and `403` with `insufficient_scope` for an
+   otherwise valid token missing the required scope.
+5. Prove an authenticated non-Workbridge backend call, then perform the
+   real-client refresh and tunnel checks. These live checks are not performed
+   by the repository test suite.
+
+Rollback is one authority only: restore the prior Workbridge route before
+restarting it, and do not run both authorities for the same issuer.

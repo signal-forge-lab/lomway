@@ -93,6 +93,24 @@ production policyでは、解決後の全backend URLを `http://127.0.0.1:<port>
 
 Gatewayはadmin surfaceを公開しないため、Gateway本体用secretはありません。SOPSを使うのはSecure Tunnel scriptsだけで、one-time作成時に `OPENAI_ADMIN_KEY`、runtime接続に `CONTROL_PLANE_API_KEY` をprocess内へ読み込みます。
 
+## 5a. Lomway OAuth authority boundary
+
+northbound OAuthを有効にする場合、`[server.oauth]` はLomway-owned
+Authorization sidecarのloopback-only RFC 7662 endpointを参照します。
+
+```toml
+[server.oauth]
+resource_url = "https://mcp.example.test/mcp" # 安定した公開resource URL
+introspection_url = "http://127.0.0.1:7677/oauth/introspect" # sidecar専用
+required_scope = "devspace"
+```
+
+GatewayはResource Serverのままです。owner credentialやtoken stateを保存せず、
+introspection URLも公開しません。sidecarがAuthorization Server metadata、CIMD優先
+（DCR互換fallback）、PKCE S256、resource binding、approval、永続化、rotation、
+revocation、rate limitを所有します。Workbridgeは通常のbackendに過ぎず、他backendの
+OAuth保護に必須ではありません。同じ公開issuerに対してactive authorityは常に1つだけにします。
+
 ## 6. Listener
 
 ```toml

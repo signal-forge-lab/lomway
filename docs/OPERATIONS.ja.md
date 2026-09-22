@@ -4,14 +4,17 @@
 
 ## 1. Ownership
 
-6つのbackend MCPはそれぞれ独立したSwibo targetのままです。`Lomway` は1つのSwibo targetとして、内部lifecycleで次の順序を管理します。
+backend MCPはそれぞれ独立したSwibo targetのままです。`Lomway` はGatewayに加えて
+OAuth authority sidecarを所有します。Swiboではsidecarを独立した `OAuth` componentとして
+監視し、Gatewayとは別にhealthを確認できます。
 
 ```text
-start: Gateway -> Secure MCP Tunnel
-stop:  Secure MCP Tunnel -> Gateway
+start: OAuth sidecar -> Gateway -> Secure MCP Tunnel
+stop:  Secure MCP Tunnel -> Gateway -> OAuth sidecar
 ```
 
 Gatewayがbackend MCP processをstart/stopすることはありません。
+OAuth sidecarは `127.0.0.1:7677` へ直接bindし、定常構成ではforwarderを使用しません。
 
 ## 2. 正常状態
 
@@ -36,6 +39,7 @@ READY -> restart -> READY -> stop -> STOPPED -> start -> READY
 
 ```powershell
 pwsh -NoProfile -File scripts/check.ps1
+pwsh -NoProfile -File scripts/oauth-sidecar.ps1 -Action status
 pwsh -NoProfile -File scripts/start.ps1
 pwsh -NoProfile -File scripts/status.ps1
 pwsh -NoProfile -File scripts/integration-smoke.ps1
@@ -54,10 +58,10 @@ pwsh -NoProfile -File integrations/openai-secure-tunnel/configure-tunnel.ps1 -Wo
 
 ```text
 Start:
-  backend services -> Gateway -> Secure MCP Tunnel
+  backend services -> OAuth sidecar -> Gateway -> Secure MCP Tunnel
 
 Stop aggregate target only:
-  Secure MCP Tunnel -> Gateway
+  Secure MCP Tunnel -> Gateway -> OAuth sidecar
 ```
 
 aggregate target停止でbackendは停止しません。
@@ -113,6 +117,9 @@ aggregation導入自体はbackend domain state/sourceを変更しません。agg
 ## 8. Logs / state
 
 - Gateway logs/PIDはGit ignored local directory。
+- OAuth sidecarのlogs/PID/stateは `%LOCALAPPDATA%\Lomway\oauth-sidecar`。
+- OAuth signing material、cookie key、owner credentialはprocess起動時に
+  `~/.config/sops/secrets/global.sops.json` からのみ読み込みます。
 - Tunnel profile/health/logは`tunnel-client`がrepository外へ保存。
 - どちらもcommitしない。
 - 通常診断でtool argument全面dumpやsecret-bearing config dumpを有効にしない。
@@ -128,4 +135,29 @@ aggregation導入自体はbackend domain state/sourceを変更しません。agg
 5. aggregate integration smoke
 6. Secure Tunnel READY/MCP probe
 7. Swibo lifecycle
+
 8. public repository hygiene review
+
+## 10. OAuth sidecar cutover（offline準備済み・live gateあり）
+
+Lomway-owned Authorization sidecarはloopback-onlyで `127.0.0.1:7677` へ直接bindし、
+lifecycleはSwiboがsuperviseします。
+同じ公開issuerに対してsidecarを二重起動しません。
+同じissuer向けforwarderも定常構成では起動しません。
+
+cutover前はsynthetic stateだけでsidecarを検証し、公開issuerとendpoint mappingが安定して
+いることを確認します。repositoryのoffline fmt、clippy、test、build、diff gateも実行し、
+owner credential、token、state、SOPS materialはrepository外に置きます。
+
+後日のlive cutover手順:
+
+1. Workbridgeのauthority routeをstop/disableします。必要ならWorkbridgeのMCP backend routeは残します。
+2. Swibo経由でsidecarをloopback listenerに起動し、metadata、CIMD/DCR registration、PKCE S256、
+   resource-bound token、refresh rotation、revocation、loopback introspectionを確認します。
+3. 公開issuerを変更せず、公開 `/authorize`、`/token`、`/register`、`/revoke` をsidecarへrouteします。
+4. Lomwayがmissing/invalid credentialにprotected-resource challenge付き`401`、required scope不足の
+   有効tokenに`insufficient_scope`付き`403`を返すことを確認します。
+5. 非Workbridge backendへの認証済みcallを確認し、その後real clientのrefreshとTunnelをlive検証します。
+   これらのlive gateはrepository test suiteでは実施しません。
+
+rollbackもauthorityは1つだけです。旧Workbridge routeを先に戻してからrestartし、同じissuerで両方を動かしません。

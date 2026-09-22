@@ -94,6 +94,9 @@ async fn require_oauth(State(state): State<OAuthState>, request: Request, next: 
     if !token_is_authorized(&state, &introspection) {
         return unauthorized(&state);
     }
+    if !token_has_required_scope(&state, &introspection) {
+        return insufficient_scope(&state);
+    }
     next.run(request).await
 }
 
@@ -111,17 +114,18 @@ fn token_is_authorized(state: &OAuthState, token: &IntrospectionResponse) -> boo
     if !token.active || !audience_matches(token.aud.as_ref(), &state.config.resource_url) {
         return false;
     }
-    if !token.scope.as_deref().is_some_and(|scopes| {
-        scopes
-            .split_ascii_whitespace()
-            .any(|scope| scope == state.config.required_scope)
-    }) {
-        return false;
-    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(u64::MAX, |duration| duration.as_secs());
     token.exp.is_some_and(|exp| exp > now)
+}
+
+fn token_has_required_scope(state: &OAuthState, token: &IntrospectionResponse) -> bool {
+    token.scope.as_deref().is_some_and(|scopes| {
+        scopes
+            .split_ascii_whitespace()
+            .any(|scope| scope == state.config.required_scope)
+    })
 }
 
 fn audience_matches(audience: Option<&Value>, expected: &str) -> bool {
@@ -136,6 +140,20 @@ fn unauthorized(state: &OAuthState) -> Response {
     let mut response = StatusCode::UNAUTHORIZED.into_response();
     let challenge = format!(
         "Bearer resource_metadata=\"{}\", scope=\"{}\"",
+        state.metadata_url, state.config.required_scope
+    );
+    if let Ok(value) = HeaderValue::from_str(&challenge) {
+        response
+            .headers_mut()
+            .insert(header::WWW_AUTHENTICATE, value);
+    }
+    response
+}
+
+fn insufficient_scope(state: &OAuthState) -> Response {
+    let mut response = StatusCode::FORBIDDEN.into_response();
+    let challenge = format!(
+        "Bearer resource_metadata=\"{}\", scope=\"{}\", error=\"insufficient_scope\"",
         state.metadata_url, state.config.required_scope
     );
     if let Ok(value) = HeaderValue::from_str(&challenge) {
@@ -267,7 +285,7 @@ mod tests {
             ("valid", reqwest::StatusCode::OK),
             ("invalid", reqwest::StatusCode::UNAUTHORIZED),
             ("wrong-aud", reqwest::StatusCode::UNAUTHORIZED),
-            ("wrong-scope", reqwest::StatusCode::UNAUTHORIZED),
+            ("wrong-scope", reqwest::StatusCode::FORBIDDEN),
             ("expired", reqwest::StatusCode::UNAUTHORIZED),
         ] {
             let response = client
@@ -278,5 +296,22 @@ mod tests {
                 .expect("protected request");
             assert_eq!(response.status(), expected, "token {token}");
         }
+
+        let response = client
+            .post(format!("http://{addr}/mcp"))
+            .bearer_auth("wrong-scope")
+            .send()
+            .await
+            .expect("insufficient-scope request");
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        assert_eq!(
+            response
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .expect("insufficient-scope challenge")
+                .to_str()
+                .expect("challenge text"),
+            "Bearer resource_metadata=\"https://lomway.example/.well-known/oauth-protected-resource/mcp\", scope=\"devspace\", error=\"insufficient_scope\""
+        );
     }
 }

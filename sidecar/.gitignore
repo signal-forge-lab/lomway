@@ -1,0 +1,13 @@
+node_modules/
+dist/
+runtime/
+state/
+logs/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.state.json
+.env
+.env.*
+!.env.example

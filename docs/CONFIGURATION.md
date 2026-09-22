@@ -106,6 +106,26 @@ The production policy requires every resolved backend URL to be `http://127.0.0.
 
 The gateway itself has no application/admin secret because no admin surface is served. SOPS is used by the Secure Tunnel scripts only; they read `OPENAI_ADMIN_KEY` for one-time tunnel creation and `CONTROL_PLANE_API_KEY` for runtime connection.
 
+## 5a. Lomway OAuth authority boundary
+
+When northbound OAuth is enabled, `[server.oauth]` points Lomway at the
+Lomway-owned authorization sidecar's loopback RFC 7662 endpoint:
+
+```toml
+[server.oauth]
+resource_url = "https://mcp.example.test/mcp" # stable public resource URL
+introspection_url = "http://127.0.0.1:7677/oauth/introspect" # sidecar only
+required_scope = "devspace"
+```
+
+The gateway remains a resource server: it never stores owner credentials or
+token state, and it never exposes the introspection URL. The sidecar owns
+authorization-server metadata, CIMD-first client identification with DCR
+compatibility, PKCE S256, resource binding, approval, persistence, rotation,
+revocation, and rate limiting. Workbridge is only a configured backend and is
+not required for OAuth to protect other backends. Keep exactly one authority
+active for the stable public issuer.
+
 ## 6. Listener
 
 ```toml
