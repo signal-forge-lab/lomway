@@ -35,10 +35,19 @@ function Get-SidecarProcess {
         return $null
     }
 
-    $listener = Get-NetTCPConnection -State Listen -LocalPort 7677 -ErrorAction SilentlyContinue |
-        Where-Object { $_.OwningProcess -eq $processId } |
-        Select-Object -First 1
-    if (-not $listener) {
+    $netstat = Join-Path $env:SystemRoot 'System32\netstat.exe'
+    $ownsPort = $false
+    foreach ($line in & $netstat -ano -p tcp 2>$null) {
+        $parts = @($line.Trim() -split '\s+')
+        if ($parts.Count -lt 4 -or $parts[0] -ne 'TCP') {
+            continue
+        }
+        if ($parts[1].EndsWith(':7677') -and $parts[-1] -eq [string]$processId) {
+            $ownsPort = $true
+            break
+        }
+    }
+    if (-not $ownsPort) {
         return $null
     }
     return $process
