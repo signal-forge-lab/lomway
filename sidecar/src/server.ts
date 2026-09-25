@@ -1,5 +1,6 @@
+import { realpathSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type Provider from "oidc-provider";
 
@@ -288,7 +289,16 @@ async function readForm(request: IncomingMessage): Promise<string | undefined> {
   });
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+export function isMainEntrypoint(entry = process.argv[1]): boolean {
+  if (!entry) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(entry);
+  } catch {
+    return import.meta.url === pathToFileURL(entry).href;
+  }
+}
+
+if (isMainEntrypoint()) {
   await createLomwaySidecar(loadConfig(process.env)).start();
 }
 // Internal resource-server introspection is handled here before oidc-provider delegation.

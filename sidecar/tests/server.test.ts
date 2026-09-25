@@ -1,18 +1,32 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import type { SidecarConfig } from "../src/config.js";
-import { createLomwaySidecar } from "../src/server.js";
+import { createLomwaySidecar, isMainEntrypoint } from "../src/server.js";
 
 const ISSUER = "https://issuer.example.test";
 const RESOURCE = "https://mcp.example.test/mcp";
 const OWNER_PASSWORD = "synthetic-owner-password";
 const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+
+test("recognizes the main entrypoint through a symlink or junction alias", async () => {
+  const runtimeDir = await mkdtemp(join(tmpdir(), "lomway-entrypoint-"));
+  const serverPath = fileURLToPath(new URL("../src/server.js", import.meta.url));
+  const aliasDir = join(runtimeDir, "alias");
+
+  try {
+    await symlink(dirname(serverPath), aliasDir, process.platform === "win32" ? "junction" : "dir");
+    assert.equal(isMainEntrypoint(join(aliasDir, basename(serverPath))), true);
+  } finally {
+    await rm(runtimeDir, { recursive: true, force: true });
+  }
+});
 
 async function withSidecar(
   run: (
