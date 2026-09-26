@@ -47,6 +47,7 @@ config load（フォーマット自動判定。legacyはメモリ内で移行）
   -> startup acceptance（required backendはhealthy必須、optionalはdegrade可、最低1 backendはhealthy必須）
   -> Proxy::from_config(...)
   -> remove_backend("proxy") 成功を必須化
+  -> Lomway-ownedのdeferred search/describe/call backendを登録
   -> upstream routerの/admin拒否
   -> loopbackへ/mcpと/healthzと/readyzだけ公開
 ```
@@ -65,7 +66,7 @@ upstream `/admin/*` は公開しません。top-level `/admin/*` と nested `/mc
 
 ## 4. Namespace contract
 
-separatorは `_` 固定です。最終tool名は `<prefix><upstream tool名>` で、起動時に事前計算され、衝突時は両sourceを特定してfail fastします。prefix規則: 空でない小文字stem + `_`、backend間で一意、暗黙の正規化はしない — ambiguousな入力は拒否します。reserved prefix（`proxy_`、`lomway_`、旧 `lmg_`）はpolicy管理下にあり、backendはclaimできません。
+separatorは `_` 固定です。最終tool名は `<prefix><upstream tool名>` で、起動時に事前計算され、衝突時は両sourceを特定してfail fastします。prefix規則: 空でない小文字stem + `_`、backend間で一意かつ非包含、暗黙の正規化はしない — ambiguousな入力は拒否します。reserved prefix（`proxy_`、`lomway_`、旧 `lmg_`）はpolicy管理下にあり、backendはclaimできません。
 
 元の6-backend regression baseline（公開製品の上限ではありません）:
 
@@ -78,7 +79,7 @@ separatorは `_` 固定です。最終tool名は `<prefix><upstream tool名>` �
 | XMind Workboard | `xmind_` | 21 |
 | Praxiom | `praxiom_` | 2 |
 
-元のbaseline集約数は183 toolsです。2026-09-14の再reviewでは、workstationに任意追加のChrome DevTools 30 toolsがあり、合計213 toolsでした。どちらの件数も公開contractではなく、Lomwayは検証済みpublic 0..N構成modelをsupportします。prefix変更はbreaking changeです。backendのtool descriptionとinput schemaはそのまま通ります。
+元のbaseline集約数は183 toolsです。2026-09-14の再reviewでは、workstationに任意追加のChrome DevTools 30 toolsがあり、合計213 toolsでした。その後workstation上のChatGPT可視toolは259件まで増え、ADR-0006のHybrid Exposure採用につながりました。これらの件数は公開contractではなく、Lomwayは検証済みpublic 0..N構成modelをsupportします。prefix変更はbreaking changeです。Direct backendではtool descriptionとinput schemaをそのまま通し、Deferredのdescribe/searchはraw proxyの現在catalogから正確なdefinitionを取得します。
 
 ## 5. Module map
 
@@ -105,8 +106,10 @@ src/
 1. clientが `/mcp` でinitialize。
 2. `mcp-proxy` がinitialize成功backendから取得済みcapabilityを集約。
 3. backend namespaceを付与。
-4. `proxy` control-plane backendは削除済みなのでtoolを提供しない。
-5. namespace以外は意味変更せずcatalogを返す。
+4. Direct backend toolは通常どおり一覧へ残す。
+5. Deferred backend toolは内部生成したhide-all capability filterで通常一覧から除外。
+6. `proxy` control-plane backendは削除済みなのでtoolを提供しない。
+7. Lomway-ownedの `lomway_search_tools` / `lomway_describe_tool` / `lomway_call_tool` は常時一覧へ残す。
 
 ### `tools/call`
 
@@ -115,6 +118,14 @@ src/
 3. backendごとのtimeoutだけ適用。
 4. retry / hedging / failover / cacheは行わない。
 5. backend result/errorをsemantic rewriteせず返す。
+
+### Deferred tool flow
+
+1. `lomway_search_tools` で検索し、必要ならbackend idで絞り込む。
+2. `lomway_describe_tool` で現在の正確なschemaを取得。
+3. `lomway_call_tool` で実行。
+4. Lomwayがexact tool名が現在catalogに存在し、そのprefixが設定上のdeferred allowlistに属することを検証。
+5. raw proxyが元backendへ1回だけdispatch。retry / hedge / cache / control-plane accessは追加しない。
 
 ## 7. Protocol動作
 
@@ -131,6 +142,7 @@ XMind Workboardは公式upstream capability fingerprint変化時にfail closed�
 - **call中に1 backend失敗:** そのcallだけ失敗し、他namespaceは継続利用可能。
 - **起動時にrequired backendが到達不能:** fail closedで起動失敗。
 - **起動時にoptional backendが到達不能:** 起動はdegradeし、healthyなbackendだけでserve。
+- **起動時にskipされたoptional backendが後から到達可能:** reconnect monitorがprocessを起動することなく再採用し、Deferred meta-toolはGateway restartなしで現在catalogを参照。
 - **起動時に全backend失敗:** startup probeが失敗し、fail closedで起動失敗。
 - **起動後にbackendがダウンし、その後復旧:** 再起動復旧monitorが自動で再接続します（port probe + 安定性ヒステリシス、その後transport置換）。Gateway再起動は不要。短時間のrestartと持続的なoutageの両方をE2Eで確認済み。
 - **Gateway失敗:** backend processは生存したまま。SwiboがGateway/Tunnel targetだけ復旧。

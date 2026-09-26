@@ -588,6 +588,110 @@ max_argument_size = 1048576
 }
 
 #[tokio::test]
+async fn deferred_backend_started_after_gateway_start_becomes_searchable_without_restart() {
+    let (direct_addr, direct_task) = spawn_status_backend("direct").await;
+    let reserved = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve late deferred backend port");
+    let deferred_addr = reserved
+        .local_addr()
+        .expect("late deferred backend address");
+    drop(reserved);
+
+    let config = parse_public_config(format!(
+        r#"
+schema_version = 1
+
+[[backends]]
+id = "direct"
+prefix = "direct_"
+url = "http://{direct_addr}/mcp"
+timeout_seconds = 5
+
+[[backends]]
+id = "browser"
+prefix = "browser_"
+url = "http://{deferred_addr}/mcp"
+required = false
+timeout_seconds = 5
+exposure = "deferred"
+"#
+    ));
+
+    let gateway = Gateway::build(config)
+        .await
+        .expect("build with offline optional deferred backend");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind late-deferred gateway listener");
+    let gateway_addr = listener
+        .local_addr()
+        .expect("late-deferred gateway address");
+    let gateway_task = tokio::spawn(async move {
+        axum::serve(listener, gateway.router())
+            .await
+            .expect("serve late-deferred gateway router");
+    });
+    let client = connect_client(gateway_addr).await;
+
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    let listener = tokio::net::TcpListener::bind(deferred_addr)
+        .await
+        .expect("bind late deferred backend");
+    let deferred_task = spawn_status_backend_on(listener, "late");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    let search_text = loop {
+        let result = client
+            .call_tool(
+                "lomway_search_tools",
+                serde_json::json!({
+                    "query": "status",
+                    "backend": "browser",
+                    "limit": 5
+                }),
+            )
+            .await
+            .expect("search late deferred backend");
+        let text = result.all_text();
+        if text.contains("browser_status") {
+            break text;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "late deferred backend never became searchable: {text}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    assert!(search_text.contains("browser_status"));
+
+    let tools = client
+        .list_tools()
+        .await
+        .expect("list tools after late deferred recovery");
+    assert!(
+        tools.tools.iter().all(|tool| tool.name != "browser_status"),
+        "late deferred tool must remain hidden from direct tools/list"
+    );
+
+    let routed = client
+        .call_tool(
+            "lomway_call_tool",
+            serde_json::json!({
+                "name": "browser_status",
+                "arguments": {}
+            }),
+        )
+        .await
+        .expect("call late deferred tool");
+    assert_eq!(routed.all_text(), "late");
+
+    gateway_task.abort();
+    direct_task.abort();
+    deferred_task.abort();
+}
+
+#[tokio::test]
 async fn timeout_does_not_retry_a_mutating_tool() {
     let calls = Arc::new(AtomicUsize::new(0));
     let (slow_addr, slow_task) = spawn_slow_mutation_backend(Arc::clone(&calls)).await;
@@ -1030,6 +1134,139 @@ timeout_seconds = 5
     backend_task.abort();
 }
 
+#[tokio::test]
+async fn deferred_backend_is_hidden_but_searchable_describable_and_callable() {
+    let (direct_addr, direct_task) = spawn_status_backend("direct").await;
+    let (deferred_addr, deferred_task) =
+        spawn_named_tool_backend("navigate", "Navigate a browser page").await;
+    let config = parse_public_config(format!(
+        r#"
+schema_version = 1
+
+[[backends]]
+id = "direct"
+prefix = "direct_"
+url = "http://{direct_addr}/mcp"
+timeout_seconds = 5
+
+[[backends]]
+id = "browser"
+prefix = "browser_"
+url = "http://{deferred_addr}/mcp"
+timeout_seconds = 5
+exposure = "deferred"
+"#
+    ));
+
+    let gateway = Gateway::build(config)
+        .await
+        .expect("build mixed direct/deferred gateway");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mixed gateway listener");
+    let gateway_addr = listener.local_addr().expect("mixed gateway address");
+    let gateway_task = tokio::spawn(async move {
+        axum::serve(listener, gateway.router())
+            .await
+            .expect("serve mixed gateway router");
+    });
+
+    let client = connect_client(gateway_addr).await;
+    let tools = client.list_tools().await.expect("list mixed gateway tools");
+    let names: Vec<_> = tools.tools.iter().map(|tool| tool.name.as_str()).collect();
+
+    assert!(names.contains(&"direct_status"));
+    assert!(!names.contains(&"browser_navigate"));
+    assert!(names.contains(&"lomway_search_tools"));
+    assert!(names.contains(&"lomway_describe_tool"));
+    assert!(names.contains(&"lomway_call_tool"));
+    assert!(
+        names.iter().all(|name| !name.starts_with("proxy_")),
+        "upstream proxy control-plane tools must stay absent: {names:?}"
+    );
+
+    let direct = client
+        .call_tool("direct_status", serde_json::json!({}))
+        .await
+        .expect("direct tool remains normally callable");
+    assert_eq!(direct.all_text(), "direct");
+
+    let direct_deferred_error = client
+        .call_tool("browser_navigate", serde_json::json!({}))
+        .await
+        .expect_err("deferred tool must reject a direct call");
+    assert!(
+        direct_deferred_error
+            .to_string()
+            .contains("browser_navigate"),
+        "{direct_deferred_error}"
+    );
+
+    let search = client
+        .call_tool(
+            "lomway_search_tools",
+            serde_json::json!({
+                "query": "navigate browser",
+                "backend": "browser",
+                "limit": 5
+            }),
+        )
+        .await
+        .expect("search deferred tools");
+    assert!(search.all_text().contains("browser_navigate"));
+
+    let described = client
+        .call_tool(
+            "lomway_describe_tool",
+            serde_json::json!({"name": "browser_navigate"}),
+        )
+        .await
+        .expect("describe deferred tool");
+    let description = described.all_text();
+    assert!(description.contains("browser_navigate"), "{description}");
+    assert!(
+        description.contains("Navigate a browser page"),
+        "{description}"
+    );
+    assert!(description.contains("inputSchema"), "{description}");
+
+    let routed = client
+        .call_tool(
+            "lomway_call_tool",
+            serde_json::json!({
+                "name": "browser_navigate",
+                "arguments": {}
+            }),
+        )
+        .await
+        .expect("invoke deferred tool through safe meta-tool");
+    assert_eq!(routed.all_text(), "ok");
+
+    let direct_target_error = client
+        .call_tool(
+            "lomway_call_tool",
+            serde_json::json!({
+                "name": "direct_status",
+                "arguments": {}
+            }),
+        )
+        .await
+        .expect("meta-tool rejection is returned as an MCP tool error result");
+    assert!(
+        direct_target_error.is_error,
+        "meta-tool must reject direct targets"
+    );
+    assert!(
+        direct_target_error.all_text().contains("deferred"),
+        "{}",
+        direct_target_error.all_text()
+    );
+
+    gateway_task.abort();
+    direct_task.abort();
+    deferred_task.abort();
+}
+
 // ---------------------------------------------------------------------------
 // LMG-G7-01: public mock fixture E2E — required-failure and collision paths.
 // ---------------------------------------------------------------------------
@@ -1079,43 +1316,36 @@ timeout_seconds = 1
 }
 
 #[tokio::test]
-async fn cross_prefix_tool_collision_fails_gateway_startup() {
-    let (a_addr, a_task) = spawn_named_tool_backend("b_status", "Collision source A").await;
-    let (b_addr, b_task) = spawn_named_tool_backend("status", "Collision source B").await;
-    let config = parse_public_config(format!(
+async fn overlapping_prefixes_fail_before_cross_prefix_tool_ownership_can_be_ambiguous() {
+    let config = parse_public_config(
         r#"
 schema_version = 1
 
 [[backends]]
 id = "a"
 prefix = "a_"
-url = "http://{a_addr}/mcp"
+url = "http://127.0.0.1:19001/mcp"
 timeout_seconds = 5
 
 [[backends]]
 id = "a_b"
 prefix = "a_b_"
-url = "http://{b_addr}/mcp"
+url = "http://127.0.0.1:19002/mcp"
 timeout_seconds = 5
 "#
-    ));
+        .to_string(),
+    );
 
     let error = Gateway::build(config)
         .await
-        .expect_err("cross-prefix collision must fail startup before serving");
+        .expect_err("overlapping prefixes must fail before backend probing");
     let message = error.to_string();
-    assert!(message.contains("'a_b_status' collides"), "{message}");
     assert!(
-        message.contains("backend 'a' (upstream 'b_status')"),
+        message.contains("overlapping backend prefixes"),
         "{message}"
     );
-    assert!(
-        message.contains("backend 'a_b' (upstream 'status')"),
-        "{message}"
-    );
-
-    a_task.abort();
-    b_task.abort();
+    assert!(message.contains("a_"), "{message}");
+    assert!(message.contains("a_b_"), "{message}");
 }
 
 // ---------------------------------------------------------------------------

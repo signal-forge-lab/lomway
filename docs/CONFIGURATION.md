@@ -56,11 +56,34 @@ prefix = "fs_"                      # the namespace contract: <prefix><tool>
 url = "http://127.0.0.1:8001/mcp"   # loopback only; ${VAR} supported
 required = true                     # default true; false = degrade-on-outage
 timeout_seconds = 30                # default 30
+exposure = "direct"                 # direct (default) or deferred
 ```
 
 Defaults: `[server]` listens on `127.0.0.1:17777`; `[policy]`, `[observability]`, and `backends` may be omitted entirely (the public schema accepts zero backends, while the deployment gate keeps requiring at least one). Unknown keys fail validation at every level.
 
-Namespace prefix rules: non-empty lowercase stem + `_`, unique across backends, never normalized; reserved prefixes (`proxy_`, `lomway_`, legacy `lmg_`) are rejected.
+Namespace prefix rules: non-empty lowercase stem + `_`, unique and non-overlapping across backends (one prefix may not contain another), never normalized; reserved prefixes (`proxy_`, `lomway_`, legacy `lmg_`) are rejected.
+
+### 3a. Hybrid tool exposure
+
+`exposure = "direct"` keeps the backend's native tools in `tools/list` and
+allows normal direct calls. `exposure = "deferred"` hides those individual
+tools from the normal catalog and rejects direct calls. Deferred tools remain
+available through exactly three Lomway-owned meta-tools:
+
+- `lomway_search_tools` — search deferred tool names, descriptions, and input schemas;
+- `lomway_describe_tool` — return the exact current definition for one registered deferred tool;
+- `lomway_call_tool` — invoke an exact deferred allowlisted tool with supplied arguments.
+
+This is designed for large, low-frequency namespaces such as browser/debug
+tooling. It does not rely on a client refreshing `tools/list` mid-response.
+The upstream `proxy/*` control-plane tools remain removed.
+If an optional deferred backend was down when Lomway started, its tools are
+absent until the external supervisor starts it. Lomway's reconnect monitor
+then adopts the reachable backend automatically; the next meta-tool call sees
+its current catalog without a gateway restart.
+Discovery reports tools registered in the raw proxy, not a separate health
+guarantee. If a registered backend goes offline after registration, its call
+can fail normally until the external supervisor restores it.
 
 ## 4. CLI reference
 
@@ -178,12 +201,12 @@ Startup rejects configuration that enables or changes any of the following:
 - non-HTTP or non-loopback backends;
 - namespace separator other than `_`;
 - `hot_reload = true`;
-- search/discovery exposure;
+- upstream global search/discovery exposure and hot-added proxy admin tools;
 - northbound auth inside the gateway;
 - retry, hedging, tool-call cache;
 - rate limit/concurrency/circuit-breaker/outlier middleware;
 - mirror/canary/failover/composite tools/request coalescing;
-- backend aliases, injected/default args, parameter overrides, expose/hide filtering, read-only/destructive rewriting;
+- backend aliases, injected/default args, parameter overrides, arbitrary expose/hide filtering, read-only/destructive rewriting; the internally generated deferred hide-all filter is the only allowed visibility filter;
 - argument-size limit above 1 MiB.
 
 This keeps v1 as a thin timeout-only routing boundary.

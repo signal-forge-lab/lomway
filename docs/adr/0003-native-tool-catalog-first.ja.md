@@ -1,6 +1,6 @@
 # ADR-0003: v1はnative full tool catalogを優先する
 
-- Status: Accepted
+- Status: ADR-0006 によりSuperseded
 - Date: 2026-09-13
 
 ## Context

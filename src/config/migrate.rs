@@ -16,7 +16,7 @@ use mcp_proxy::config::{
 
 use crate::DEFAULT_SERVER_NAME;
 use crate::config::model::{
-    BackendEntry, GatewayConfig, ObservabilityConfig, PolicyConfig, ServerConfig,
+    BackendEntry, BackendExposure, GatewayConfig, ObservabilityConfig, PolicyConfig, ServerConfig,
 };
 use crate::config::validate::{self, MAX_ARGUMENT_SIZE_BYTES, SCHEMA_VERSION};
 use crate::namespace::NAMESPACE_SEPARATOR;
@@ -57,6 +57,11 @@ pub fn to_public(legacy: &ProxyConfig) -> Result<GatewayConfig> {
                     .as_ref()
                     .map(|timeout| timeout.seconds)
                     .unwrap_or(crate::config::model::DEFAULT_BACKEND_TIMEOUT_SECONDS),
+                exposure: if backend.hide_tools.as_slice() == ["*"] {
+                    BackendExposure::Deferred
+                } else {
+                    BackendExposure::Direct
+                },
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -134,7 +139,10 @@ pub fn to_legacy(public: &GatewayConfig) -> Result<ProxyConfig> {
                 inject_args: Vec::new(),
                 param_overrides: Vec::new(),
                 expose_tools: Vec::new(),
-                hide_tools: Vec::new(),
+                hide_tools: match entry.exposure {
+                    BackendExposure::Direct => Vec::new(),
+                    BackendExposure::Deferred => vec!["*".to_string()],
+                },
                 expose_resources: Vec::new(),
                 hide_resources: Vec::new(),
                 expose_prompts: Vec::new(),
@@ -188,6 +196,7 @@ pub fn to_legacy(public: &GatewayConfig) -> Result<ProxyConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gateway::validate_proxy_policy;
 
     fn legacy_six_style() -> ProxyConfig {
         let text = r#"
@@ -318,5 +327,29 @@ url = "http://127.0.0.1:18702/mcp"
         legacy.backends[0].url = None;
         let error = to_public(&legacy).expect_err("stdio cannot migrate");
         assert!(error.to_string().contains("must use HTTP"));
+    }
+
+    #[test]
+    fn deferred_exposure_maps_to_and_from_hide_all_filter() {
+        let public: GatewayConfig = toml::from_str(
+            r#"
+schema_version = 1
+
+[[backends]]
+id = "browser"
+prefix = "browser_"
+url = "http://127.0.0.1:7691/mcp"
+required = false
+exposure = "deferred"
+"#,
+        )
+        .expect("parse deferred public config");
+
+        let legacy = to_legacy(&public).expect("map deferred public config");
+        assert_eq!(legacy.backends[0].hide_tools, vec!["*"]);
+        validate_proxy_policy(&legacy).expect("generated hide-all filter is policy-safe");
+
+        let round_trip = to_public(&legacy).expect("map generated legacy config back");
+        assert_eq!(round_trip.backends[0].exposure, BackendExposure::Deferred);
     }
 }

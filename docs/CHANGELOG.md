@@ -2,6 +2,20 @@
 
 All notable changes to Lomway are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project follows [Semantic Versioning](https://semver.org/). This changelog is curated for consumers and is intentionally not a commit log. The changelog is maintained in English; behavior documentation exists in English and Japanese under `docs/`.
 
+## [Unreleased]
+
+### Added
+
+- Hybrid per-backend tool exposure: frequent backends stay native/direct while low-frequency backends can use `exposure = "deferred"`.
+- Three Lomway-owned safe meta-tools for deferred capabilities: `lomway_search_tools`, `lomway_describe_tool`, and `lomway_call_tool`.
+
+### Security
+
+- Deferred direct calls are denied by the existing capability-filter layer, and generic invocation accepts only exact currently listed tool names under configured deferred prefixes.
+- Configured optional backends skipped at startup remain reconnect candidates, so a later supervisor start can be adopted without restarting Lomway.
+- Backend namespace prefixes must now be non-overlapping as well as unique, preventing prefix-based ownership ambiguity in direct and deferred routing.
+- Upstream `proxy/*` administrative tools remain removed; hybrid exposure does not re-enable dynamic backend/config management.
+
 ## [0.1.0] - 2026-09-13
 
 Initial public release of the local MCP aggregation gateway.

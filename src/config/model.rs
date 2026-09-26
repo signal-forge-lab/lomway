@@ -30,6 +30,18 @@ pub const DEFAULT_LISTEN_HOST: &str = "127.0.0.1";
 pub const DEFAULT_LISTEN_PORT: u16 = 17777;
 pub const DEFAULT_BACKEND_TIMEOUT_SECONDS: u64 = 30;
 
+/// How a backend's tools are presented to northbound MCP clients.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendExposure {
+    /// Tools are listed and invoked directly with their normal Lomway prefix.
+    #[default]
+    Direct,
+    /// Tools are hidden from the normal list/direct-call surface and are
+    /// available only through Lomway's safe discovery meta-tools.
+    Deferred,
+}
+
 /// Top-level public configuration. Unknown keys are rejected.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -138,6 +150,9 @@ pub struct BackendEntry {
     /// Per-backend request and startup-probe timeout in seconds.
     #[serde(default = "default_timeout_seconds")]
     pub timeout_seconds: u64,
+    /// Client exposure mode for this backend.
+    #[serde(default)]
+    pub exposure: BackendExposure,
 }
 
 fn default_host() -> String {
@@ -184,6 +199,7 @@ impl Default for BackendEntry {
             url: String::new(),
             required: default_required(),
             timeout_seconds: default_timeout_seconds(),
+            exposure: BackendExposure::Direct,
         }
     }
 }
@@ -272,6 +288,25 @@ url = "http://127.0.0.1:18701/mcp"
         assert_eq!(many.backends.len(), 2);
         assert!(!many.backends[1].required);
         assert_eq!(many.backends[1].timeout_seconds, 5);
+        assert_eq!(many.backends[0].exposure, BackendExposure::Direct);
+    }
+
+    #[test]
+    fn parses_deferred_backend_exposure() {
+        let config = parse(
+            r#"
+schema_version = 1
+
+[[backends]]
+id = "browser"
+prefix = "browser_"
+url = "http://127.0.0.1:7691/mcp"
+exposure = "deferred"
+"#,
+        )
+        .expect("deferred exposure should be part of the public schema");
+        assert_eq!(config.backends.len(), 1);
+        assert_eq!(config.backends[0].exposure, BackendExposure::Deferred);
     }
 
     #[test]

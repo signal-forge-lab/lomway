@@ -190,20 +190,22 @@ fn validate_backend_resilience(backend: &mcp_proxy::config::BackendConfig) -> Re
 }
 
 fn validate_backend_surface(backend: &mcp_proxy::config::BackendConfig) -> Result<()> {
+    let safe_deferred_filter = backend.hide_tools.is_empty()
+        || (backend.hide_tools.len() == 1 && backend.hide_tools[0] == "*");
     ensure!(
         backend.aliases.is_empty()
             && backend.default_args.is_empty()
             && backend.inject_args.is_empty()
             && backend.param_overrides.is_empty()
             && backend.expose_tools.is_empty()
-            && backend.hide_tools.is_empty()
+            && safe_deferred_filter
             && backend.expose_resources.is_empty()
             && backend.hide_resources.is_empty()
             && backend.expose_prompts.is_empty()
             && backend.hide_prompts.is_empty()
             && !backend.hide_destructive
             && !backend.read_only_only,
-        "backend '{}' configures schema/capability rewriting; v1 preserves backend surfaces",
+        "backend '{}' configures unsupported schema/capability rewriting; only the Lomway deferred hide-all filter is permitted",
         backend.name
     );
     Ok(())
@@ -212,6 +214,25 @@ fn validate_backend_surface(backend: &mcp_proxy::config::BackendConfig) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config_with_hide_tools(hide_tools: Vec<&str>) -> ProxyConfig {
+        let mut config = crate::config::migrate::to_legacy(
+            &toml::from_str(
+                r#"
+schema_version = 1
+
+[[backends]]
+id = "browser"
+prefix = "browser_"
+url = "http://127.0.0.1:7691/mcp"
+"#,
+            )
+            .expect("parse public config"),
+        )
+        .expect("map to legacy config");
+        config.backends[0].hide_tools = hide_tools.into_iter().map(String::from).collect();
+        config
+    }
 
     #[test]
     fn legacy_policy_keeps_the_single_backend_population_rule() {
@@ -224,5 +245,19 @@ mod tests {
         assert!(legacy.backends.is_empty());
         let error = validate_proxy_policy(&legacy).expect_err("legacy gate keeps >=1 backend");
         assert!(error.to_string().contains("at least one backend"));
+    }
+
+    #[test]
+    fn legacy_policy_allows_only_the_generated_deferred_hide_all_filter() {
+        validate_proxy_policy(&config_with_hide_tools(vec!["*"]))
+            .expect("hide-all is the only allowed capability filter");
+
+        let error = validate_proxy_policy(&config_with_hide_tools(vec!["dangerous_*"]))
+            .expect_err("arbitrary capability rewriting remains forbidden");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported schema/capability rewriting")
+        );
     }
 }

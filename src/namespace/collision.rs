@@ -65,6 +65,7 @@ mod tests {
             url: url.to_string(),
             required: true,
             timeout_seconds: 5,
+            exposure: Default::default(),
         })
         .expect("valid descriptor")
     }

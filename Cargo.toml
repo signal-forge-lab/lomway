@@ -25,7 +25,7 @@ tower-mcp = { version = "=0.18.2", features = ["http", "http-client", "proxy", "
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "form", "json"] }
+schemars = "1"
 
 [dev-dependencies]
-schemars = "1"
 tempfile = "3"

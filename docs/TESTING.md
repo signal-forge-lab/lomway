@@ -15,7 +15,7 @@ cargo build --release --locked
 
 ### Production-policy tests
 
-11 policy tests cover loopback-only networking, HTTP-only local backends, stable namespace, hot-reload rejection, direct tool exposure, no auth-forwarding/schema rewriting, no retry/hedge/cache, no fan-out/failover/coalescing, public-release hygiene, and bounded argument size.
+Policy coverage includes loopback-only networking, HTTP-only local backends, stable namespace, hot-reload rejection, hybrid exposure constraints, no auth-forwarding/arbitrary schema rewriting, no retry/hedge/cache, no fan-out/failover/coalescing, public-release hygiene, and bounded argument size.
 
 ### Mock MCP E2E
 
@@ -26,6 +26,7 @@ cargo build --release --locked
 - same-name tool namespace collision;
 - failed startup backend isolation;
 - timed-out mutation dispatched exactly once.
+- mixed direct/deferred exposure: deferred tools absent from normal `tools/list`, direct calls rejected, search/describe/call succeeds through the exact deferred allowlist, and upstream `proxy/*` remains absent.
 
 ### Portable fixture regression
 
@@ -89,7 +90,7 @@ Compatibility changes made only to support aggregation are tested in their ownin
 - non-loopback/non-HTTP backend URL;
 - wrong namespace separator;
 - `hot_reload = true`;
-- search/discovery exposure;
+- upstream global search/discovery exposure or arbitrary visibility filters;
 - retry/hedging/cache/fan-out/failover/coalescing configuration;
 - schema/argument/visibility rewriting;
 - upstream control-plane MCP tool exposure;

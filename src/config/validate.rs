@@ -147,13 +147,20 @@ fn validate_unique_ids(config: &GatewayConfig) -> Result<()> {
 
 fn validate_unique_prefixes(config: &GatewayConfig) -> Result<()> {
     for (index, backend) in config.backends.iter().enumerate() {
-        ensure!(
-            config.backends[index + 1..]
-                .iter()
-                .all(|other| other.prefix != backend.prefix),
-            "duplicate backend prefix '{}': prefixes must be unique",
-            backend.prefix
-        );
+        for other in &config.backends[index + 1..] {
+            ensure!(
+                other.prefix != backend.prefix,
+                "duplicate backend prefix '{}': prefixes must be unique",
+                backend.prefix
+            );
+            ensure!(
+                !other.prefix.starts_with(&backend.prefix)
+                    && !backend.prefix.starts_with(&other.prefix),
+                "overlapping backend prefixes {:?} and {:?}: one prefix must not contain another because tool ownership would be ambiguous",
+                backend.prefix,
+                other.prefix
+            );
+        }
     }
     Ok(())
 }
@@ -248,6 +255,7 @@ mod tests {
             url: url.to_string(),
             required: true,
             timeout_seconds: 30,
+            exposure: Default::default(),
         }
     }
 
@@ -384,6 +392,16 @@ mod tests {
         ]))
         .expect_err("duplicate prefix");
         assert!(error.to_string().contains("duplicate backend prefix"));
+    }
+
+    #[test]
+    fn rejects_overlapping_prefixes_that_make_tool_ownership_ambiguous() {
+        let error = validate(&config(vec![
+            entry("a", "a_", "http://127.0.0.1:19001/mcp"),
+            entry("ab", "a_b_", "http://127.0.0.1:19002/mcp"),
+        ]))
+        .expect_err("prefix-of-prefix namespaces must fail closed");
+        assert!(error.to_string().contains("overlapping backend prefixes"));
     }
 
     #[test]

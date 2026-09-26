@@ -56,11 +56,32 @@ prefix = "fs_"                      # namespace契約: <prefix><tool>
 url = "http://127.0.0.1:8001/mcp"   # loopbackのみ。${VAR} 可
 required = true                     # 既定true。falseはdegrade-on-outage
 timeout_seconds = 30                # 既定30
+exposure = "direct"                 # direct（既定）またはdeferred
 ```
 
 既定値: `[server]` は `127.0.0.1:17777` でlisten。`[policy]` / `[observability]` / `backends` は完全に省略可能です（公開schemaは0 backendを受け入れますが、デプロイゲートは1つ以上のbackendを要求し続けます）。未知のkeyは全レベルで検証に失敗します。
 
-namespace prefix規則: 空でない小文字stem + `_`、backend間で一意、暗黙の正規化なし。reserved prefix（`proxy_`、`lomway_`、旧 `lmg_`）は拒否されます。
+namespace prefix規則: 空でない小文字stem + `_`、backend間で一意かつ非包含（あるprefixが別prefixを内包しない）、暗黙の正規化なし。reserved prefix（`proxy_`、`lomway_`、旧 `lmg_`）は拒否されます。
+
+### 3a. Hybrid tool exposure
+
+`exposure = "direct"` はbackendのnative toolを `tools/list` に残し、通常の
+direct callを許可します。`exposure = "deferred"` は個別toolを通常catalogから隠し、
+direct callも拒否します。Deferred toolはLomway-ownedの次の3 meta-toolだけから利用できます。
+
+- `lomway_search_tools` — deferred toolの名前・説明・input schemaを検索
+- `lomway_describe_tool` — 現在raw proxyへ登録済みの1 toolの正確なdefinitionを返す
+- `lomway_call_tool` — deferred allowlist中の正確なtool名だけを引数付きで実行
+
+Browser/debug系のような低頻度・大規模namespace向けです。clientが同じ応答中に
+`tools/list` をrefreshすることには依存しません。upstream `proxy/*` control-plane
+toolは引き続き削除されたままです。
+optional deferred backendがLomway起動時に停止していた場合、そのtoolは外部Supervisorが
+backendを起動するまで検索対象になりません。起動後はLomwayのreconnect monitorが
+到達可能なbackendを自動採用し、Gateway restartなしで次のmeta-tool callから現在catalogを
+参照できます。
+Discoveryはraw proxyへの登録状態を示すもので、独立したhealth保証ではありません。
+登録後にbackendが停止した場合、そのcallは外部Supervisorが復旧するまで通常どおり失敗し得ます。
 
 ## 4. CLIリファレンス
 
@@ -163,12 +184,12 @@ retry windowではなく1 callの上限です。
 - HTTP以外またはloopback以外のbackend
 - `_` 以外のnamespace separator
 - `hot_reload = true`
-- search/discovery exposure
+- upstream global search/discovery exposureおよびproxy admin toolの動的追加
 - Gateway内northbound auth
 - retry / hedging / tool-call cache
 - rate limit / concurrency / circuit-breaker / outlier middleware
 - mirror / canary / failover / composite / request coalescing
-- backend alias / injected/default args / parameter override / expose-hide filtering / read-only-destructive rewrite
+- backend alias / injected/default args / parameter override / 任意のexpose-hide filtering / read-only-destructive rewrite（deferred用に内部生成するhide-all filterだけ例外）
 - 1 MiBを超えるargument-size limit
 
 v1をtimeout-onlyの薄いrouting boundaryに固定するためです。

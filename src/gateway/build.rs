@@ -75,6 +75,7 @@ impl Gateway {
         let registry = BackendRegistry::from_config(&public)?;
         let report = crate::backend::probe::probe_registry(&registry).await?;
         let plan = plan_tools(&report)?;
+        let deferred_catalog = crate::gateway::deferred::DeferredCatalog::from_config(&public);
         tracing::info!(
             backends = report.healthy.len(),
             degraded = report.unavailable.len(),
@@ -91,6 +92,7 @@ impl Gateway {
         let oauth = public.server.oauth.clone();
         let legacy = migrate::to_legacy(&public)?;
         let proxy = build_proxy(legacy).await?;
+        crate::gateway::deferred::register(proxy.mcp_proxy(), deferred_catalog).await?;
         let namespaces = proxy.mcp_proxy().backend_namespaces();
         let router = crate::gateway::router::gateway_router_with_oauth(proxy, oauth);
         Ok(Self {

@@ -15,7 +15,7 @@ cargo build --release --locked
 
 ### Production-policy tests
 
-11 policy testsでloopback-only、HTTP local backend限定、stable namespace、hot reload拒否、direct exposure、auth-forwarding/schema rewrite禁止、retry/hedge/cache禁止、fan-out/failover/coalescing禁止、public-release hygiene、argument-size境界を検証します。
+policy coverageではloopback-only、HTTP local backend限定、stable namespace、hot reload拒否、Hybrid Exposure制約、auth-forwarding/任意schema rewrite禁止、retry/hedge/cache禁止、fan-out/failover/coalescing禁止、public-release hygiene、argument-size境界を検証します。
 
 ### Mock MCP E2E
 
@@ -26,6 +26,7 @@ cargo build --release --locked
 - 同名tool namespace collision
 - startup failed backend isolation
 - timeoutしたmutationのbackend受信回数が正確に1回
+- direct/deferred混在: deferred toolが通常 `tools/list` から消えること、direct callが拒否されること、search/describe/callでexact allowlist経由の実行が成功すること、upstream `proxy/*` が引き続き非公開であること
 
 ### Portable fixture regression
 
@@ -87,7 +88,7 @@ aggregation互換のために変更した箇所はowner project側でも確認�
 - non-loopback/non-HTTP backend URL
 - wrong namespace separator
 - `hot_reload = true`
-- search/discovery exposure
+- upstream global search/discovery exposureまたは任意visibility filter
 - retry/hedging/cache/fan-out/failover/coalescing
 - schema/argument/visibility rewrite
 - upstream control-plane MCP tool exposure

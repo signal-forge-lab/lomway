@@ -47,6 +47,7 @@ load config (format auto-detected; legacy migrated in memory)
   -> startup acceptance (required backends healthy; optional backends may degrade; at least one backend healthy)
   -> Proxy::from_config(...)
   -> remove_backend("proxy") and require success
+  -> register Lomway-owned deferred search/describe/call backend
   -> wrap upstream router with /admin rejection
   -> expose /mcp, /healthz, /readyz on loopback
 ```
@@ -65,7 +66,7 @@ It does **not** expose upstream `/admin/*`. Both top-level `/admin/*` and nested
 
 ## 4. Namespace contract
 
-The stable separator is `_`. Final tool names are `<prefix><upstream tool name>`; they are precomputed at startup and a collision fails fast while naming both sources. Prefix rules: non-empty lowercase stem followed by `_`, unique across backends, never silently normalized — ambiguous inputs are rejected. Reserved prefixes (`proxy_`, `lomway_`, and the legacy `lmg_`) are policy-controlled and cannot be claimed by a backend.
+The stable separator is `_`. Final tool names are `<prefix><upstream tool name>`; they are precomputed at startup and a collision fails fast while naming both sources. Prefix rules: non-empty lowercase stem followed by `_`, unique and non-overlapping across backends, never silently normalized — ambiguous inputs are rejected. Reserved prefixes (`proxy_`, `lomway_`, and the legacy `lmg_`) are policy-controlled and cannot be claimed by a backend.
 
 The original six-backend regression baseline (not a public product limit):
 
@@ -78,7 +79,7 @@ The original six-backend regression baseline (not a public product limit):
 | XMind Workboard | `xmind_` | 21 |
 | Praxiom | `praxiom_` | 2 |
 
-The original baseline aggregate count is 183. At the 2026-09-14 re-review, the workstation also had an optional 30-tool Chrome DevTools namespace, producing 213 tools total. Neither count is a public contract: Lomway supports the validated public 0..N configuration model. Prefix changes are breaking changes. Backend tool descriptions and input schemas pass through verbatim.
+The original baseline aggregate count is 183. At the 2026-09-14 re-review, the workstation also had an optional 30-tool Chrome DevTools namespace, producing 213 tools total. Later workstation growth reached 259 ChatGPT-visible tools and motivated ADR-0006. Neither count is a public contract: Lomway supports the validated public 0..N configuration model. Prefix changes are breaking changes. Direct backend tool descriptions and input schemas pass through verbatim; deferred describe/search reads the exact current definitions from the raw proxy catalog.
 
 ## 5. Module map
 
@@ -107,8 +108,10 @@ src/
 1. The client initializes through `/mcp`.
 2. `mcp-proxy` returns the cached capabilities discovered from successfully initialized backends.
 3. Backend namespaces are applied.
-4. The removed `proxy` control-plane backend contributes no tools.
-5. The aggregate catalog is returned unchanged apart from namespace qualification.
+4. Direct backend tools remain in the list.
+5. Deferred backend tools are removed by the generated hide-all capability filter.
+6. The removed `proxy` control-plane backend contributes no tools.
+7. The Lomway-owned `lomway_search_tools`, `lomway_describe_tool`, and `lomway_call_tool` remain visible.
 
 ### `tools/call`
 
@@ -117,6 +120,14 @@ src/
 3. Apply only that backend's configured timeout.
 4. Never retry, hedge, fail over or cache the tool call.
 5. Return the backend result/error without semantic rewriting.
+
+### Deferred tool flow
+
+1. Search with `lomway_search_tools`, optionally restricted to one backend id.
+2. Fetch the exact current schema with `lomway_describe_tool`.
+3. Invoke through `lomway_call_tool`.
+4. Lomway verifies the exact name is currently listed by a backend whose configured prefix is in the deferred allowlist.
+5. The raw proxy dispatches once to the original backend; no retry, hedge, cache, or control-plane access is added.
 
 ## 7. Protocol behavior
 
@@ -133,6 +144,7 @@ XMind Workboard intentionally fails closed when the official upstream capability
 - **Backend fails during a routed call:** that call fails; unrelated namespaces remain available.
 - **One required backend is unreachable at startup:** startup fails closed.
 - **One optional backend is unreachable at startup:** startup degrades and the gateway serves the healthy set.
+- **An optional backend skipped at startup later becomes reachable:** the reconnect monitor adopts it without starting the process itself; deferred meta-tools then see its current catalog without a gateway restart.
 - **Every backend fails at startup:** the startup probe fails, so startup fails closed.
 - **A backend goes down after startup, then recovers:** the restart recovery monitor re-adopts it automatically (port probe + stability hysteresis, then transport replacement). No gateway restart is required; this is covered by E2E for brief restarts and sustained outages.
 - **Gateway fails:** backend processes stay alive; Swibo restarts only the gateway/tunnel target.

@@ -2,6 +2,7 @@
 
 mod auth;
 pub mod build;
+mod deferred;
 pub mod policy;
 mod reconnect;
 pub mod router;

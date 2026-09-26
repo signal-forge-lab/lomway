@@ -63,11 +63,6 @@ pub(super) fn specs(config: &ProxyConfig) -> Vec<BackendReconnectSpec> {
 }
 
 pub(super) fn spawn(proxy: McpProxy, specs: Vec<BackendReconnectSpec>) {
-    let active = proxy.backend_namespaces();
-    let specs: Vec<_> = specs
-        .into_iter()
-        .filter(|spec| active.iter().any(|name| name == &spec.name))
-        .collect();
     if specs.is_empty() {
         return;
     }
