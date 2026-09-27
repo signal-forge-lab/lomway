@@ -11,7 +11,6 @@ use mcp_proxy::ProxyConfig;
 use tower::timeout::TimeoutLayer;
 use tower_mcp::{client::HttpClientTransport, proxy::McpProxy};
 
-const LOOPBACK_PREFIX: &str = "http://127.0.0.1:";
 const RECONNECT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const RECONNECT_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 const RECONNECT_HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
@@ -36,12 +35,7 @@ struct BackendReconnectState {
 }
 
 fn loopback_port(url: &str) -> Option<u16> {
-    let rest = url.strip_prefix(LOOPBACK_PREFIX)?;
-    let (port, path) = rest.split_once('/')?;
-    if path != "mcp" {
-        return None;
-    }
-    port.parse::<u16>().ok().filter(|port| *port > 0)
+    crate::config::validate::loopback_mcp_port(url)
 }
 
 pub(super) fn specs(config: &ProxyConfig) -> Vec<BackendReconnectSpec> {

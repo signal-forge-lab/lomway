@@ -221,26 +221,35 @@ pub(crate) fn validate_backend_prefix(prefix: &str) -> Result<()> {
     Ok(())
 }
 
-/// Backend URLs must be exact loopback Streamable HTTP MCP endpoints:
-/// `http://127.0.0.1:<port>/mcp`.
+/// Backend URLs must be loopback Streamable HTTP MCP endpoints rooted at
+/// `/mcp`, for example `http://127.0.0.1:<port>/mcp` or a backend-defined
+/// scoped endpoint such as `http://127.0.0.1:<port>/mcp/<scope>/`.
 pub(crate) fn validate_backend_url(url: &str) -> Result<()> {
     ensure!(
-        is_exact_loopback_mcp_url(url),
-        "backend URL must be a loopback http://127.0.0.1:<port>/mcp endpoint, got {url:?}"
+        is_loopback_mcp_url(url),
+        "backend URL must be a loopback http://127.0.0.1:<port>/mcp or /mcp/... endpoint, got {url:?}"
     );
     Ok(())
 }
 
 /// Shared strict URL rule for both the public model and the legacy adapter.
-pub(crate) fn is_exact_loopback_mcp_url(url: &str) -> bool {
-    const LOOPBACK_PREFIX: &str = "http://127.0.0.1:";
-    let Some(rest) = url.strip_prefix(LOOPBACK_PREFIX) else {
-        return false;
-    };
-    let Some((port, path)) = rest.split_once('/') else {
-        return false;
-    };
-    path == "mcp" && port.parse::<u16>().is_ok_and(|port| port > 0)
+pub(crate) fn is_loopback_mcp_url(url: &str) -> bool {
+    loopback_mcp_port(url).is_some()
+}
+
+/// Return the loopback MCP port when the URL satisfies the backend endpoint
+/// policy. Paths may be exactly `/mcp` or scoped beneath `/mcp/`.
+pub(crate) fn loopback_mcp_port(url: &str) -> Option<u16> {
+    let uri: axum::http::Uri = url.parse().ok()?;
+    let authority = uri.authority()?;
+    let port = authority.port_u16()?;
+    let path = uri.path();
+    (uri.scheme_str() == Some("http")
+        && authority.host() == "127.0.0.1"
+        && port > 0
+        && uri.query().is_none()
+        && (path == "/mcp" || path.starts_with("/mcp/")))
+    .then_some(port)
 }
 
 #[cfg(test)]
@@ -296,6 +305,16 @@ mod tests {
 
         let error =
             validate_backend_url("http://127.0.0.1:8001/nested/mcp").expect_err("nested path");
+        assert!(error.to_string().contains("loopback"));
+
+        validate_backend_url("http://127.0.0.1:8001/mcp/personal/").expect("scoped MCP endpoint");
+
+        let error =
+            validate_backend_url("http://127.0.0.1:8001/mcpish").expect_err("lookalike path");
+        assert!(error.to_string().contains("loopback"));
+
+        let error = validate_backend_url("http://127.0.0.1:8001/mcp?bank=personal")
+            .expect_err("query-bearing endpoint");
         assert!(error.to_string().contains("loopback"));
 
         let error = validate_backend_url("http://127.0.0.1:not-a-port/mcp").expect_err("bad port");

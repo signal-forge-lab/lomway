@@ -140,7 +140,8 @@ pub struct BackendEntry {
     /// Namespace prefix applied to every tool of this backend. Must be
     /// non-empty, end with `_`, and use only the allowed prefix charset.
     pub prefix: String,
-    /// Loopback HTTP Streamable MCP endpoint (`http://127.0.0.1:<port>/mcp`).
+    /// Loopback HTTP Streamable MCP endpoint rooted at `/mcp`
+    /// (`http://127.0.0.1:<port>/mcp` or `/mcp/<scope>/`).
     /// Supports `${ENV_VAR}` references resolved at load time.
     pub url: String,
     /// Required backends fail startup when unreachable; optional backends

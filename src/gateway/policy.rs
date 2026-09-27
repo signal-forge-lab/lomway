@@ -135,8 +135,8 @@ fn validate_backend_transport(backend: &mcp_proxy::config::BackendConfig) -> Res
 fn validate_backend_endpoint(backend: &mcp_proxy::config::BackendConfig) -> Result<()> {
     let url = backend.url.as_deref().unwrap_or_default();
     ensure!(
-        crate::config::validate::is_exact_loopback_mcp_url(url),
-        "backend '{}' URL must be a loopback http://127.0.0.1:<port>/mcp endpoint",
+        crate::config::validate::is_loopback_mcp_url(url),
+        "backend '{}' URL must be a loopback http://127.0.0.1:<port>/mcp or /mcp/... endpoint",
         backend.name
     );
     ensure!(
