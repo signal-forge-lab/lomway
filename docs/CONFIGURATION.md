@@ -74,6 +74,13 @@ available through exactly three Lomway-owned meta-tools:
 - `lomway_describe_tool` — return the exact current definition for one registered deferred tool;
 - `lomway_call_tool` — invoke an exact deferred allowlisted tool with supplied arguments.
 
+The intended agent flow is **search -> describe -> call**. If the agent does
+not know which deferred backend owns a capability, it should omit the
+`backend` filter and search all currently available deferred backends. The
+deployment's `server.instructions` should describe backend-specific routing
+preferences, such as preferring browser-native automation for web pages and
+reserving desktop GUI automation for native OS surfaces or browser fallback.
+
 This is designed for large, low-frequency namespaces such as browser/debug
 tooling. It does not rely on a client refreshing `tools/list` mid-response.
 The upstream `proxy/*` control-plane tools remain removed.
@@ -125,7 +132,10 @@ XMIND_WORKBOARD_MCP_URL
 PRAXIOM_MCP_URL
 ```
 
-The production policy requires every resolved backend URL to be `http://127.0.0.1:<port>/mcp`.
+The production policy requires every resolved backend URL to be loopback HTTP
+rooted at `/mcp`: either `http://127.0.0.1:<port>/mcp` or a backend-defined
+scoped path beneath it such as `/mcp/<scope>/`. Query-bearing URLs and
+unrelated paths remain rejected.
 
 The gateway itself has no application/admin secret because no admin surface is served. SOPS is used by the Secure Tunnel scripts only; they read `OPENAI_ADMIN_KEY` for one-time tunnel creation and `CONTROL_PLANE_API_KEY` for runtime connection.
 

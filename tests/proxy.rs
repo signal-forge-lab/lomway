@@ -1143,6 +1143,9 @@ async fn deferred_backend_is_hidden_but_searchable_describable_and_callable() {
         r#"
 schema_version = 1
 
+[server]
+instructions = "Use the browser deferred backend for web-page automation."
+
 [[backends]]
 id = "direct"
 prefix = "direct_"
@@ -1180,6 +1183,32 @@ exposure = "deferred"
     assert!(names.contains(&"lomway_search_tools"));
     assert!(names.contains(&"lomway_describe_tool"));
     assert!(names.contains(&"lomway_call_tool"));
+    let search_tool = tools
+        .tools
+        .iter()
+        .find(|tool| tool.name == "lomway_search_tools")
+        .expect("search meta-tool is exposed");
+    let search_description = search_tool
+        .description
+        .as_deref()
+        .expect("search meta-tool has routing guidance");
+    assert!(
+        search_description.contains("browser"),
+        "configured deferred backend ids must be visible to the agent: {search_description}"
+    );
+    assert!(
+        search_description.contains("Omit backend when unsure"),
+        "agent should be told it can search all deferred backends: {search_description}"
+    );
+    assert!(
+        search_description.contains("lomway_describe_tool")
+            && search_description.contains("lomway_call_tool"),
+        "agent should be told the search -> describe -> call flow: {search_description}"
+    );
+    assert!(
+        search_description.contains("Use the browser deferred backend for web-page automation."),
+        "deployment routing guidance must be visible in the search tool description: {search_description}"
+    );
     assert!(
         names.iter().all(|name| !name.starts_with("proxy_")),
         "upstream proxy control-plane tools must stay absent: {names:?}"

@@ -73,6 +73,12 @@ direct callも拒否します。Deferred toolはLomway-ownedの次の3 meta-tool
 - `lomway_describe_tool` — 現在raw proxyへ登録済みの1 toolの正確なdefinitionを返す
 - `lomway_call_tool` — deferred allowlist中の正確なtool名だけを引数付きで実行
 
+Agentの基本flowは **search -> describe -> call** です。どのDeferred backendが
+目的の能力を持つか不明な場合は、`backend` filterを省略して現在利用可能な
+Deferred backend全体を検索します。deployment固有の優先順位、たとえばWebページ操作は
+browser-native backendを優先し、native OS surfaceやbrowser fallbackだけdesktop GUI
+automationへ回す、といった案内は `server.instructions` に記述します。
+
 Browser/debug系のような低頻度・大規模namespace向けです。clientが同じ応答中に
 `tools/list` をrefreshすることには依存しません。upstream `proxy/*` control-plane
 toolは引き続き削除されたままです。
@@ -110,7 +116,9 @@ XMIND_WORKBOARD_MCP_URL
 PRAXIOM_MCP_URL
 ```
 
-production policyでは、解決後の全backend URLを `http://127.0.0.1:<port>/mcp` に限定します。
+production policyでは、解決後の全backend URLをloopback HTTPかつ `/mcp`
+rootに限定します。`http://127.0.0.1:<port>/mcp` またはbackend固有scopeを持つ
+`/mcp/<scope>/` を許可し、query付きURLや無関係なpathは引き続き拒否します。
 
 Gatewayはadmin surfaceを公開しないため、Gateway本体用secretはありません。SOPSを使うのはSecure Tunnel scriptsだけで、one-time作成時に `OPENAI_ADMIN_KEY`、runtime接続に `CONTROL_PLANE_API_KEY` をprocess内へ読み込みます。
 

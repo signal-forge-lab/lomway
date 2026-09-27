@@ -16,7 +16,7 @@
 
 ## Phase 3 - Production profile and documentation
 
-- [x] T009 Mark Browser, Chrome DevTools, UFO, Jev, and XMind deferred in the local production config.
+- [x] T009 Mark Browser, CUA Windows, Chrome DevTools, UFO, Jev, and XMind deferred in the local production config.
 - [x] T010 Update English/Japanese configuration, architecture, testing, ADR, and changelog documentation as applicable.
 
 ## Phase 4 - Verification

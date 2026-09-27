@@ -39,6 +39,7 @@ struct DeferredTool {
 #[derive(Debug, Clone, Default)]
 pub(super) struct DeferredCatalog {
     backends: Arc<Vec<DeferredBackend>>,
+    routing_guidance: Arc<Option<String>>,
 }
 
 impl DeferredCatalog {
@@ -54,6 +55,7 @@ impl DeferredCatalog {
             .collect();
         Self {
             backends: Arc::new(backends),
+            routing_guidance: Arc::new(config.server.instructions.clone()),
         }
     }
 
@@ -65,6 +67,17 @@ impl DeferredCatalog {
 
     fn backend_is_deferred(&self, id: &str) -> bool {
         self.backends.iter().any(|backend| backend.id == id)
+    }
+
+    fn backend_ids(&self) -> Vec<String> {
+        self.backends
+            .iter()
+            .map(|backend| backend.id.clone())
+            .collect()
+    }
+
+    fn routing_guidance(&self) -> Option<&str> {
+        self.routing_guidance.as_deref()
     }
 
     fn filter_tools(&self, definitions: Vec<ToolDefinition>) -> Vec<DeferredTool> {
@@ -161,9 +174,10 @@ async fn current_deferred_tools(
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SearchInput {
-    /// Terms describing the capability needed.
+    /// Natural-language description of the capability or action needed.
     query: String,
-    /// Optional exact backend id, for example browser.
+    /// Optional exact deferred backend id. Omit when unsure to search all
+    /// currently available deferred backends.
     backend: Option<String>,
     /// Maximum results, capped at 20.
     limit: Option<usize>,
@@ -195,10 +209,15 @@ struct CallInput {
 pub(super) async fn register(proxy: &McpProxy, catalog: DeferredCatalog) -> Result<()> {
     let search_catalog = catalog.clone();
     let search_proxy = proxy.clone();
+    let deferred_ids = catalog.backend_ids().join(", ");
+    let routing_guidance = catalog
+        .routing_guidance()
+        .map(|guidance| format!(" Deployment routing guidance: {guidance}"))
+        .unwrap_or_default();
     let search = ToolBuilder::new("search_tools")
-        .description(
-            "Search currently registered low-frequency Lomway tools that are intentionally hidden from the normal tool list.",
-        )
+        .description(format!(
+            "Use this first when the requested capability is not available as a normal direct tool. Search currently available tools hidden behind Lomway deferred exposure. Omit backend when unsure and search all deferred backends. Configured deferred backend ids: {deferred_ids}. After choosing a tool, use lomway_describe_tool for its exact schema, then lomway_call_tool to invoke it.{routing_guidance}"
+        ))
         .handler(move |input: SearchInput| {
             let catalog = search_catalog.clone();
             let proxy = search_proxy.clone();
@@ -229,7 +248,7 @@ pub(super) async fn register(proxy: &McpProxy, catalog: DeferredCatalog) -> Resu
     let describe_proxy = proxy.clone();
     let describe = ToolBuilder::new("describe_tool")
         .description(
-            "Return the exact currently registered MCP definition for one deferred Lomway tool.",
+            "Use after lomway_search_tools, or whenever arguments are uncertain. Return the exact current MCP description and input/output schema for one deferred Lomway tool before invoking it.",
         )
         .handler(move |input: DescribeInput| {
             let catalog = describe_catalog.clone();
@@ -259,7 +278,7 @@ pub(super) async fn register(proxy: &McpProxy, catalog: DeferredCatalog) -> Resu
     let call_proxy = proxy.clone();
     let call = ToolBuilder::new("call_tool")
         .description(
-            "Invoke one exact currently registered deferred Lomway tool. Direct/control-plane tools are rejected.",
+            "Invoke one exact currently available deferred Lomway tool using arguments that match the schema returned by lomway_describe_tool. Normally use after lomway_search_tools and lomway_describe_tool. Direct/control-plane tools are rejected.",
         )
         .handler(move |input: CallInput| {
             let catalog = call_catalog.clone();

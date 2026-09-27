@@ -74,7 +74,7 @@ As the gateway owner, I want discovery to expose only safe invocation metadata a
 - **SC-003**: Search + describe is sufficient for an MCP client that never receives the deferred schema in its normal `tools/list`.
 - **SC-004**: An optional deferred backend started after the gateway is already serving becomes searchable and callable without restarting the gateway.
 - **SC-005**: Existing repository verification remains green and no upstream admin tool is reintroduced.
-- **SC-006**: Production configuration can move Browser, Chrome DevTools, UFO, Jev, and XMind to deferred exposure without changing their backend URLs or lifecycle ownership.
+- **SC-006**: Production configuration can move Browser, CUA Windows, Chrome DevTools, UFO, Jev, and XMind to deferred exposure without changing their backend URLs or lifecycle ownership.
 
 ## Assumptions
 
