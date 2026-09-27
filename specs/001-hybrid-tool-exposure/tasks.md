@@ -23,6 +23,6 @@
 
 - [x] T011 Focused tests pass after RED/GREEN cycle, including late-started deferred backend adoption.
 - [x] T012 `scripts/check.ps1`, `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked --all-targets` pass.
-- [x] T013 Live Lomway `tools/list` shows 57 direct/meta tools after CUA Windows moved to deferred exposure: Workbridge 16, Hindsight 36, Praxiom 2, and three `lomway_*` meta-tools; deferred namespaces contribute zero direct schemas.
+- [x] T013 Live Lomway `tools/list` shows 60 direct/meta tools after CUA Windows moved to deferred exposure: Workbridge 16, Hindsight 39, Praxiom 2, and three `lomway_*` meta-tools; deferred namespaces contribute zero direct schemas.
 - [x] T014 Live search/describe/call smoke succeeds for `browser_list_instances`; the Browser namespace remains absent from normal `tools/list`. E2E also proves a deferred backend started after gateway startup is adopted without a gateway restart.
 - [x] T015 Feature diff/hygiene review passes and the existing unrelated `Cargo.lock` working-tree change remains unstaged and untouched. Repository-wide release privacy/dependency gates still report pre-existing sidecar test-email/history findings and the pre-existing rustls advisory; no public push is performed by this task.
