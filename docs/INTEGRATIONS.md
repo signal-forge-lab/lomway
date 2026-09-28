@@ -34,6 +34,14 @@ This separation is enforced, not aspirational: repository hygiene tests scan `sr
 
 Integrations compose: the tunnel wrappers automatically consult the SOPS helper only when required keys are absent from the environment, and Swibo can supervise the whole stack.
 
+## Non-MCP local tools
+
+A local tool does not become a Lomway backend merely because an agent needs to use it. Lomway backends speak MCP over loopback HTTP; CLI/daemon products should keep their native interface and lifecycle ownership.
+
+BrowserSkill is one example. Its `bsk` CLI talks to a local daemon and browser extension rather than exposing an MCP endpoint. In a deployment that already has Workbridge, agents can invoke the installed BrowserSkill skill or `bsk` CLI through Workbridge while Swibo owns the daemon lifecycle. This preserves the existing boundaries instead of creating a product-specific proxy solely to make BrowserSkill look like MCP.
+
+A deployment may document routing such as: use BrowserSkill for an existing authenticated Chrome/Edge profile, an MCP browser backend for isolated/general browser automation, and a desktop automation backend when browser-level control is insufficient. The routing policy belongs in deployment configuration; BrowserSkill itself must not be added to `[[backends]]` unless it actually exposes a reviewed MCP endpoint.
+
 ## Migration and rollback
 
 For moving an existing legacy `[proxy]` deployment to the public schema (and rolling back), see [MIGRATION.md](MIGRATION.md).

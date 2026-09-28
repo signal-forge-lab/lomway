@@ -34,6 +34,14 @@ English: [INTEGRATIONS.md](INTEGRATIONS.md)
 
 統合は組み合わせられます: tunnelラッパーは必須キーが環境変数に無いときだけSOPSヘルパーを呼び、Swiboはスタック全体を監督できます。
 
+## MCPではないローカルツール
+
+Agentが利用するローカルツールだからといって、そのツールをLomway backendにする必要はありません。Lomway backendはloopback HTTP上のMCPを話すものに限定し、CLI / daemon製品は本来のinterfaceとlifecycle ownershipを維持します。
+
+BrowserSkillはその一例です。`bsk` CLIはMCP endpointではなく、ローカルdaemonとbrowser extensionへ接続します。Workbridgeを既に持つdeploymentでは、AgentはWorkbridge経由でインストール済みBrowserSkill Skillまたは`bsk` CLIを実行し、daemon lifecycleはSwiboに担当させられます。BrowserSkillをMCPに見せるためだけの製品固有proxyを増やさず、既存の責務境界を維持できます。
+
+deployment側では、既存の認証済みChrome / Edge profileを使う処理はBrowserSkill、隔離された一般的なbrowser automationはMCP browser backend、browser-level controlで足りない場合はdesktop automation backend、というroutingを明記できます。このrouting policyはdeployment configurationの責務です。BrowserSkillが実際にreview済みMCP endpointを公開しない限り、`[[backends]]` へ追加してはいけません。
+
 ## 移行とロールバック
 
 既存のlegacy `[proxy]` デプロイを公開schemaへ移行する手順とロールバックは [MIGRATION.ja.md](MIGRATION.ja.md) を参照してください。
