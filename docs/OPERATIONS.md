@@ -18,6 +18,20 @@ The gateway never starts/stops backend MCP processes.
 The OAuth sidecar binds directly to `127.0.0.1:7677`; no forwarding process is
 part of the steady-state topology.
 
+### Windows / macOS workstation parity
+
+The workstation deployment keeps the same responsibility boundary on Windows and macOS even though the OS-specific service/supervisor mechanisms differ:
+
+    7676  Workbridge MCP
+    7677  Lomway-owned OAuth sidecar
+    7678  Workbridge monitor
+    17777 Lomway public/web gateway (OAuth protected)
+    17778 Lomway local desktop gateway (loopback-only, no OAuth)
+
+On macOS, the compatibility OAuth runtime lives in `sidecar-mac/`; the TypeScript `sidecar/` directory is the Windows authority and must not be overwritten. The OAuth sidecar is separate from the Workbridge process. At process startup it resolves lomway.oauth.owner_credential and lomway.oauth.client_registration_key from the user's external SOPS store. The default macOS store is ~/.config/sops/secrets/global.sops.json.
+
+On macOS the Swibo Lomway target owns the ordered lifecycle of the OAuth sidecar plus the 17777 gateway and reports READY only when both are healthy. Lomway Desktop owns the separate 17778 local endpoint.
+
 ## 2. Normal status
 
 Swibo should report the gateway target as:
@@ -53,6 +67,18 @@ One-time Tunnel creation/reuse (optional integration):
 ```powershell
 pwsh -NoProfile -File integrations/openai-secure-tunnel/configure-tunnel.ps1 -WorkspaceId <workspace-id>
 ```
+
+macOS OAuth-sidecar diagnostics:
+
+    node scripts/oauth-sidecar.mjs status
+    node scripts/oauth-sidecar.mjs start
+    node scripts/oauth-sidecar.mjs stop
+
+One-time migration/helper for seeding the macOS SOPS store from the existing Workbridge Owner token:
+
+    node scripts/bootstrap-oauth-secrets.mjs
+
+The helper never prints secret values and only updates the lomway.oauth subtree.
 
 ## 4. Start / stop ordering
 
@@ -122,6 +148,8 @@ Old individual connector removal is a separate migration decision and is not req
 - OAuth sidecar logs/PID/state live under `%LOCALAPPDATA%\Lomway\oauth-sidecar`;
 - OAuth signing material, cookie keys, and the owner credential are read only
   from `~/.config/sops/secrets/global.sops.json` at process launch;
+- on macOS, OAuth-sidecar database/log/PID state lives under ~/Library/Application Support/Lomway/oauth-sidecar/ and is never committed;
+- the repository-external SOPS store is the canonical source for Lomway public OAuth credentials; Workbridge auth.json is not the Lomway public-OAuth secret source;
 - Tunnel profile/health/logs are stored outside the repository by `tunnel-client`;
 - do not commit either set;
 - do not enable argument dumps or secret-bearing config dumps for routine diagnosis.

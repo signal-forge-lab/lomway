@@ -30,6 +30,7 @@ tmp/
 # Local dependency / investigation scratch trees
 /.tmp_vendor/
 /.tmp_tower_mcp/
+/sidecar/node_modules/
 
 # Editors / OS
 .vscode/

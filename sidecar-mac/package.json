@@ -1,0 +1,14 @@
+{
+  "name": "@lomway/oauth-sidecar",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "start": "node src/server.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "better-sqlite3": "12.10.0",
+    "express": "5.2.1"
+  }
+}

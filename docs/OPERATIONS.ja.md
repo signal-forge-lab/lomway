@@ -16,6 +16,20 @@ stop:  Secure MCP Tunnel -> Gateway -> OAuth sidecar
 Gatewayがbackend MCP processをstart/stopすることはありません。
 OAuth sidecarは `127.0.0.1:7677` へ直接bindし、定常構成ではforwarderを使用しません。
 
+### Windows / macOS workstation parity
+
+workstation運用ではWindowsとmacOSで責務境界を揃えます。OS固有のsupervisor/service機構は異なりますが、loopback portとownershipは同じです。
+
+    7676  Workbridge MCP
+    7677  Lomway-owned OAuth sidecar
+    7678  Workbridge monitor
+    17777 Lomway public/web gateway (OAuth protected)
+    17778 Lomway local desktop gateway (loopback-only, OAuthなし)
+
+macOSの互換OAuth実装は `sidecar-mac/` に分離し、Windows用のTypeScript `sidecar/` は上書きしません。OAuth sidecarはWorkbridge processから分離し、lomway.oauth.owner_credential と lomway.oauth.client_registration_key をユーザー外部のSOPS storeから起動時だけ解決します。macOSの既定storeは ~/.config/sops/secrets/global.sops.json です。
+
+macOSのSwibo Lomway targetはOAuth sidecarと17777 gatewayをordered lifecycleとして管理し、両方がhealthyな場合だけREADYです。Lomway Desktop は17778を独立targetとして管理します。
+
 ## 2. 正常状態
 
 Swibo上の期待値:
@@ -51,6 +65,18 @@ Tunnel one-time作成/reuse（オプション統合）:
 ```powershell
 pwsh -NoProfile -File integrations/openai-secure-tunnel/configure-tunnel.ps1 -WorkspaceId <workspace-id>
 ```
+
+macOS OAuth sidecarの診断:
+
+    node scripts/oauth-sidecar.mjs status
+    node scripts/oauth-sidecar.mjs start
+    node scripts/oauth-sidecar.mjs stop
+
+既存Workbridge Owner tokenからmacOS SOPS正本を初期化/更新する移行helper:
+
+    node scripts/bootstrap-oauth-secrets.mjs
+
+helperはsecret valueを標準出力へ出さず、lomway.oauth 配下だけを更新します。
 
 ## 4. Start / Stop order
 
@@ -120,6 +146,8 @@ aggregation導入自体はbackend domain state/sourceを変更しません。agg
 - OAuth sidecarのlogs/PID/stateは `%LOCALAPPDATA%\Lomway\oauth-sidecar`。
 - OAuth signing material、cookie key、owner credentialはprocess起動時に
   `~/.config/sops/secrets/global.sops.json` からのみ読み込みます。
+- OAuth sidecarのruntime DB/log/PIDはmacOSでは ~/Library/Application Support/Lomway/oauth-sidecar/ に置き、Gitへcommitしない。
+- OAuth credentialの正本はrepository外のSOPS storeとし、auth.json をLomway公開OAuthの正本にしない。
 - Tunnel profile/health/logは`tunnel-client`がrepository外へ保存。
 - どちらもcommitしない。
 - 通常診断でtool argument全面dumpやsecret-bearing config dumpを有効にしない。

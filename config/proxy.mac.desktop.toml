@@ -1,0 +1,32 @@
+schema_version = 1
+
+[server]
+host = "127.0.0.1"
+port = 17778
+instructions = "Lomway Mac local desktop endpoint: aggregates trusted local MCP backends without public OAuth."
+shutdown_timeout_seconds = 30
+
+[policy]
+allow_non_loopback_listener = false
+allow_non_loopback_backends = false
+hot_reload = false
+max_argument_size_bytes = 1048576
+
+[observability]
+audit = true
+log_level = "info"
+json_logs = true
+
+[[backends]]
+id = "workbridge"
+prefix = "workbridge_"
+url = "http://127.0.0.1:7676/mcp"
+required = false
+timeout_seconds = 300
+
+[[backends]]
+id = "cua_mac"
+prefix = "cua_mac_"
+url = "http://127.0.0.1:17678/mcp"
+required = false
+timeout_seconds = 300
