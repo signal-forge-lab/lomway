@@ -47,6 +47,25 @@ test("removes expired records during lookup and persists the cleanup", async () 
   });
 });
 
+test("refresh token issuance extends its parent grant to the refresh expiry", async () => {
+  await withStateFile(async (statePath) => {
+    const grants = createPersistentAdapter(statePath)("Grant");
+    const refreshTokens = createPersistentAdapter(statePath)("RefreshToken");
+    const before = Math.floor(Date.now() / 1000);
+
+    await grants.upsert("grant-1", { kind: "Grant" }, 10);
+    await refreshTokens.upsert(
+      "refresh-1",
+      { kind: "RefreshToken", grantId: "grant-1" },
+      120,
+    );
+
+    const grant = await grants.find("grant-1");
+    assert.equal(typeof grant?.exp, "number");
+    assert.ok((grant?.exp as number) >= before + 119);
+  });
+});
+
 test("consume marks a record without exposing or logging its token value", async () => {
   await withStateFile(async (statePath) => {
     const adapter = createPersistentAdapter(statePath)("AuthorizationCode");

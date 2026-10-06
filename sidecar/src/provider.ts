@@ -10,6 +10,7 @@ import {
 } from "./policy.js";
 
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
+const GRANT_TTL_SECONDS = REFRESH_TOKEN_TTL_SECONDS;
 
 export function buildProviderConfiguration(
   config: SidecarConfig,
@@ -70,6 +71,7 @@ export function buildProviderConfiguration(
     issueRefreshToken: (_ctx, client) =>
       client.grantTypes?.includes("refresh_token") === true,
     ttl: {
+      Grant: GRANT_TTL_SECONDS,
       RefreshToken: REFRESH_TOKEN_TTL_SECONDS,
     },
     rotateRefreshToken: true,

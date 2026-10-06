@@ -51,6 +51,7 @@ export function createPersistentAdapter(statePath: string): (modelName: string) 
           record.exp = nowSeconds() + expiresIn;
         }
         modelBucket(state, modelName)[id] = record;
+        extendGrantThroughRefreshToken(state, modelName, record);
         await writeState(statePath, state);
       });
     },
@@ -121,6 +122,41 @@ export function createPersistentAdapter(statePath: string): (modelName: string) 
       return findFirstInModel(statePath, modelName, (record) => record.uid === uid);
     },
   });
+}
+
+function extendGrantThroughRefreshToken(
+  state: StateFile,
+  modelName: string,
+  record: AdapterPayload,
+): void {
+  if (modelName !== "RefreshToken") {
+    return;
+  }
+
+  const grantId = record.grantId;
+  const refreshExpiry = record.exp;
+  if (
+    typeof grantId !== "string" ||
+    grantId.length === 0 ||
+    typeof refreshExpiry !== "number" ||
+    !Number.isFinite(refreshExpiry)
+  ) {
+    return;
+  }
+
+  const grant = state.records.Grant?.[grantId];
+  if (grant === undefined) {
+    return;
+  }
+
+  const grantExpiry = grant.exp;
+  if (
+    typeof grantExpiry !== "number" ||
+    !Number.isFinite(grantExpiry) ||
+    grantExpiry < refreshExpiry
+  ) {
+    grant.exp = refreshExpiry;
+  }
 }
 
 async function findFirstInModel(

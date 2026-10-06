@@ -1,6 +1,6 @@
 # Operations
 
-Updated: 2026-09-13
+Updated: 2026-10-07
 
 ## 1. Ownership
 
@@ -144,6 +144,14 @@ For any `mcp-proxy`, `tower-mcp`, FastMCP interoperability, or protocol change:
 The Lomway-owned authorization sidecar is loopback-only, binds
 `127.0.0.1:7677` directly, and is supervised by Swibo. Do not start a second
 authority or forwarding process for the same public issuer.
+
+OAuth lifetime policy:
+
+- Access tokens are short-lived (normally one hour).
+- Refresh tokens have a 30-day lifetime and rotate on refresh.
+- Grants start at 30 days and are extended to the newly issued refresh token's expiry whenever a refresh token is issued or rotated.
+- Active clients therefore remain valid on a sliding basis, while clients unused for 30 days expire naturally.
+- A client whose grant has already expired and whose refresh token is gone is not resurrected; it must authenticate once again.
 
 Before cutover, validate the sidecar with synthetic state only, confirm the
 stable public issuer and endpoint mapping, and run the repository's offline

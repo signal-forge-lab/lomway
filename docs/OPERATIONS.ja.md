@@ -1,6 +1,6 @@
 # Operations
 
-更新日: 2026-09-13
+更新日: 2026-10-07
 
 ## 1. Ownership
 
@@ -144,6 +144,14 @@ Lomway-owned Authorization sidecarはloopback-onlyで `127.0.0.1:7677` へ直接
 lifecycleはSwiboがsuperviseします。
 同じ公開issuerに対してsidecarを二重起動しません。
 同じissuer向けforwarderも定常構成では起動しません。
+
+OAuth lifetime policy:
+
+- Access Tokenは短命（通常1時間）。
+- Refresh Tokenは30日で、refresh時にrotationします。
+- Grantも初期30日とし、Refresh Tokenが新規発行またはrotationされるたび、そのRefresh Tokenのexpiryまで自動延長します。
+- したがって利用が継続しているclientはslidingで維持され、30日以上利用されないclientは自然失効します。
+- 既にGrantが失効しRefresh Tokenも削除済みのclientは自動復活させず、1回だけ再認証します。
 
 cutover前はsynthetic stateだけでsidecarを検証し、公開issuerとendpoint mappingが安定して
 いることを確認します。repositoryのoffline fmt、clippy、test、build、diff gateも実行し、

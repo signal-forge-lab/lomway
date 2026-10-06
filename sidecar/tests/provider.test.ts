@@ -105,6 +105,7 @@ test("matches the legacy Workbridge token lifetime contract explicitly", async (
   await withConfig(async (config) => {
     const providerConfig = buildProviderConfiguration(config);
 
+    assert.equal(providerConfig.ttl?.Grant, 30 * 24 * 60 * 60);
     assert.equal(providerConfig.ttl?.RefreshToken, 30 * 24 * 60 * 60);
     assert.equal(providerConfig.rotateRefreshToken, true);
   });
