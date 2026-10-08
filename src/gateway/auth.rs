@@ -2,8 +2,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
+    body::{Body, to_bytes},
     extract::{Request, State},
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
@@ -30,6 +31,10 @@ struct IntrospectionResponse {
     scope: Option<String>,
     #[serde(default)]
     exp: Option<u64>,
+    #[serde(default)]
+    pat: bool,
+    #[serde(default)]
+    allowed_tools: Vec<String>,
 }
 
 pub(super) fn protect_mcp_router(
@@ -97,7 +102,144 @@ async fn require_oauth(State(state): State<OAuthState>, request: Request, next: 
     if !token_has_required_scope(&state, &introspection) {
         return insufficient_scope(&state);
     }
+    if introspection.pat {
+        return restricted_pat_request(request, next, &introspection.allowed_tools).await;
+    }
     next.run(request).await
+}
+
+/// PATs do not inherit the OAuth owner's unrestricted capability catalog.
+/// The MCP request and tools/list response are both enforced, including SSE.
+async fn restricted_pat_request(request: Request, next: Next, allowed: &[String]) -> Response {
+    if request.method() != Method::POST {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    let (parts, body) = request.into_parts();
+    let bytes = match to_bytes(body, 1_048_576).await {
+        Ok(bytes) => bytes,
+        Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+    };
+    let Ok(message) = serde_json::from_slice::<Value>(&bytes) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(method) = message.get("method").and_then(Value::as_str) else {
+        // Batch JSON-RPC and opaque calls are deliberately denied.
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let should_filter = match method {
+        "initialize" | "ping" | "notifications/initialized" | "notifications/cancelled" => false,
+        "tools/list" => true,
+        "tools/call" => {
+            let name = message.pointer("/params/name").and_then(Value::as_str);
+            if !name.is_some_and(|name| permitted_pat_call(name, &message, allowed)) {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+            false
+        }
+        _ => return StatusCode::FORBIDDEN.into_response(),
+    };
+    let response = next
+        .run(Request::from_parts(parts, Body::from(bytes)))
+        .await;
+    if should_filter {
+        filter_pat_tools_list(response, allowed).await
+    } else {
+        response
+    }
+}
+
+fn permitted_pat_call(name: &str, message: &Value, allowed: &[String]) -> bool {
+    if !allowed.iter().any(|tool| tool == name) {
+        return false;
+    }
+    if name == "lomway_call_tool" {
+        // No unrestricted deferred dispatch. The target itself must also be
+        // explicitly whitelisted, even though it is hidden from tools/list.
+        return message
+            .pointer("/params/arguments/name")
+            .and_then(Value::as_str)
+            .is_some_and(|target| {
+                target != "lomway_call_tool" && allowed.iter().any(|tool| tool == target)
+            });
+    }
+    true
+}
+
+fn restrict_tool_catalog(message: &mut Value, allowed: &[String]) -> bool {
+    let Some(tools) = message
+        .pointer_mut("/result/tools")
+        .and_then(Value::as_array_mut)
+    else {
+        return false;
+    };
+    tools.retain(|tool| {
+        tool.get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| allowed.iter().any(|item| item == name))
+    });
+    true
+}
+
+async fn filter_pat_tools_list(response: Response, allowed: &[String]) -> Response {
+    if !response.status().is_success() {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let content_type = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let bytes = match tokio::time::timeout(Duration::from_secs(10), to_bytes(body, 4_194_304)).await
+    {
+        Ok(Ok(bytes)) => bytes,
+        _ => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+    let encoded = if content_type.starts_with("application/json") {
+        let Ok(mut json) = serde_json::from_slice::<Value>(&bytes) else {
+            return StatusCode::BAD_GATEWAY.into_response();
+        };
+        if !restrict_tool_catalog(&mut json, allowed) {
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+        serde_json::to_vec(&json).ok()
+    } else if content_type.starts_with("text/event-stream") {
+        let Ok(sse) = std::str::from_utf8(&bytes) else {
+            return StatusCode::BAD_GATEWAY.into_response();
+        };
+        let mut found = false;
+        let mut output = String::new();
+        for line in sse.split_inclusive('\n') {
+            if let Some(data) = line.trim_end_matches(['\r', '\n']).strip_prefix("data:") {
+                let Ok(mut message) = serde_json::from_str::<Value>(data.trim_start()) else {
+                    return StatusCode::BAD_GATEWAY.into_response();
+                };
+                if restrict_tool_catalog(&mut message, allowed) {
+                    found = true;
+                }
+                output.push_str("data: ");
+                match serde_json::to_string(&message) {
+                    Ok(text) => output.push_str(&text),
+                    Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+                }
+                output.push('\n');
+            } else {
+                output.push_str(line);
+            }
+        }
+        if !found {
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+        Some(output.into_bytes())
+    } else {
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+    let Some(encoded) = encoded else {
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(encoded))
 }
 
 fn bearer_token(request: &Request) -> Option<&str> {
@@ -189,6 +331,14 @@ mod tests {
                             "aud": resource,
                             "scope": "devspace",
                             "exp": now + 3600
+                        }),
+                        Some("pat") => json!({
+                            "active": true,
+                            "aud": resource,
+                            "scope": "devspace",
+                            "exp": now + 3600,
+                            "pat": true,
+                            "allowed_tools": ["safe_status", "lomway_call_tool"]
                         }),
                         Some("wrong-aud") => json!({
                             "active": true,
@@ -312,6 +462,132 @@ mod tests {
                 .to_str()
                 .expect("challenge text"),
             "Bearer resource_metadata=\"https://lomway.example/.well-known/oauth-protected-resource/mcp\", scope=\"devspace\", error=\"insufficient_scope\""
+        );
+    }
+
+    #[tokio::test]
+    async fn pat_allows_only_approved_calls_and_hides_unapproved_tools() {
+        let resource = "https://lomway.example/mcp".to_string();
+        let introspection = spawn_introspection(resource.clone()).await;
+        let config = NorthboundOAuthConfig {
+            resource_url: resource,
+            introspection_url: format!("http://{introspection}/oauth/introspect"),
+            required_scope: "devspace".to_string(),
+        };
+        let all_tools = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "tools": [
+                { "name": "safe_status" },
+                { "name": "dangerous_mutation" },
+                { "name": "lomway_call_tool" }
+            ]}
+        });
+        let upstream = Router::new().fallback(move || {
+            let tools = all_tools.clone();
+            async move { Json(tools) }
+        });
+        let (upstream, _) = protect_mcp_router(upstream, config);
+        let app = Router::new().nest("/mcp", upstream);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}/mcp");
+        for method in [
+            "initialize",
+            "ping",
+            "notifications/initialized",
+            "tools/call",
+        ] {
+            let response = client.post(&base).bearer_auth("pat")
+                .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":{"name":"safe_status"}}))
+                .send().await.expect("allowed method");
+            assert_eq!(response.status(), reqwest::StatusCode::OK, "{method}");
+        }
+        let deferred_safe = client
+            .post(&base)
+            .bearer_auth("pat")
+            .json(
+                &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                    "name":"lomway_call_tool","arguments":{"name":"safe_status","arguments":{}}
+                }}),
+            )
+            .send()
+            .await
+            .expect("approved deferred invocation");
+        assert_eq!(deferred_safe.status(), reqwest::StatusCode::OK);
+        let deferred_forbidden = client.post(&base).bearer_auth("pat")
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                "name":"lomway_call_tool","arguments":{"name":"dangerous_mutation","arguments":{}}
+            }}))
+            .send().await.expect("unapproved deferred invocation");
+        assert_eq!(deferred_forbidden.status(), reqwest::StatusCode::FORBIDDEN);
+        for (method, name) in [
+            ("tools/call", "dangerous_mutation"),
+            ("tools/call", "lomway_call_tool"),
+            ("resources/list", ""),
+        ] {
+            let response = client
+                .post(&base)
+                .bearer_auth("pat")
+                .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":{"name":name}}))
+                .send()
+                .await
+                .expect("restricted method");
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::FORBIDDEN,
+                "{method} {name}"
+            );
+        }
+        let response = client.post(&base).bearer_auth("pat")
+            .json(&json!([{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"safe_status"}}]))
+            .send().await.expect("batch request");
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        let tools: Value = client
+            .post(&base)
+            .bearer_auth("pat")
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
+            .send()
+            .await
+            .expect("filtered list")
+            .json()
+            .await
+            .expect("json");
+        let names: Vec<&str> = tools["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["safe_status", "lomway_call_tool"]);
+    }
+
+    #[tokio::test]
+    async fn pat_filters_sse_tool_lists_fail_closed() {
+        let sse = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"safe_status\"},{\"name\":\"dangerous_mutation\"}]}}\n\n";
+        let response = Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(Body::from(sse))
+            .expect("response");
+        let filtered = filter_pat_tools_list(response, &["safe_status".into()]).await;
+        assert_eq!(filtered.status(), StatusCode::OK);
+        let bytes = to_bytes(filtered.into_body(), 4096).await.expect("body");
+        let text = String::from_utf8(bytes.to_vec()).expect("UTF-8");
+        assert!(text.contains("safe_status"));
+        assert!(!text.contains("dangerous_mutation"));
+        let unknown = Response::builder()
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(Body::from("unfiltered catalog"))
+            .expect("response");
+        assert_eq!(
+            filter_pat_tools_list(unknown, &[]).await.status(),
+            StatusCode::BAD_GATEWAY
         );
     }
 }

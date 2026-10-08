@@ -64,7 +64,7 @@ test("publishes the required OAuth and OpenID discovery metadata offline", async
       assert.equal(metadata.authorization_endpoint, `${ISSUER}/auth`);
       assert.equal(metadata.token_endpoint, `${ISSUER}/token`);
       assert.equal(metadata.revocation_endpoint, `${ISSUER}/token/revocation`);
-      assert.equal(metadata.introspection_endpoint, `${ISSUER}/token/introspection`);
+      assert.equal(metadata.introspection_endpoint, undefined);
       assert.equal(metadata.registration_endpoint, `${ISSUER}/reg`);
       assert.equal(metadata.authorization_response_iss_parameter_supported, true);
       assert.ok(
@@ -107,6 +107,8 @@ test("matches the legacy Workbridge token lifetime contract explicitly", async (
 
     assert.equal(providerConfig.ttl?.Grant, 30 * 24 * 60 * 60);
     assert.equal(providerConfig.ttl?.RefreshToken, 30 * 24 * 60 * 60);
+    assert.equal(providerConfig.ttl?.Session, 14 * 24 * 60 * 60);
+    assert.equal(providerConfig.expiresWithSession?.({} as never, {} as never), false);
     assert.equal(providerConfig.rotateRefreshToken, true);
   });
 });

@@ -1,6 +1,17 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
+
+function derivePassword(password: string, salt: Buffer): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    scrypt(password, salt, PASSWORD_KEY_BYTES, {
+      N: PASSWORD_COST,
+      r: 8,
+      p: 1,
+      maxmem: 32 * 1024 * 1024,
+    }, (error, key) => error ? reject(error) : resolve(key));
+  });
+}
 
 const PASSWORD_KEY_BYTES = 32;
 const PASSWORD_SALT_BYTES = 16;
@@ -73,12 +84,7 @@ export async function hashOwnerPassword(password: string): Promise<PasswordRecor
     throw new Error("owner password must not be empty");
   }
   const salt = randomBytes(PASSWORD_SALT_BYTES);
-  const hash = scryptSync(password, salt, PASSWORD_KEY_BYTES, {
-    N: PASSWORD_COST,
-    r: 8,
-    p: 1,
-    maxmem: 32 * 1024 * 1024,
-  });
+  const hash = await derivePassword(password, salt);
   return {
     salt: salt.toString("base64url"),
     hash: hash.toString("base64url"),
@@ -95,12 +101,7 @@ export async function verifyOwnerPassword(
     if (salt.length !== PASSWORD_SALT_BYTES || expected.length !== PASSWORD_KEY_BYTES) {
       return false;
     }
-    const actual = scryptSync(password, salt, PASSWORD_KEY_BYTES, {
-      N: PASSWORD_COST,
-      r: 8,
-      p: 1,
-      maxmem: 32 * 1024 * 1024,
-    });
+    const actual = await derivePassword(password, salt);
     return timingSafeEqual(actual, expected);
   } catch {
     return false;
@@ -144,6 +145,7 @@ export function isPublicAddress(address: string): boolean {
     return (
       normalized !== "::" &&
       normalized !== "::1" &&
+      !normalized.startsWith("::ffff:") &&
       !normalized.startsWith("fc") &&
       !normalized.startsWith("fd") &&
       !normalized.startsWith("fe8") &&

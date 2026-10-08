@@ -35,7 +35,9 @@ export function buildProviderConfiguration(
     acceptQueryParamAccessTokens: false,
     features: {
       devInteractions: { enabled: false },
-      introspection: { enabled: true },
+      // Resource server introspection is a separate loopback-only handler.
+      // Do not expose oidc-provider's public client introspection route.
+      introspection: { enabled: false },
       revocation: { enabled: true },
       resourceIndicators: {
         enabled: true,
@@ -70,9 +72,14 @@ export function buildProviderConfiguration(
     },
     issueRefreshToken: (_ctx, client) =>
       client.grantTypes?.includes("refresh_token") === true,
+    // Owner-authorized long-lived MCP connections must not expire merely
+    // because the browser login Session (default 14 days) ages out.
+    expiresWithSession: () => false,
     ttl: {
       Grant: GRANT_TTL_SECONDS,
       RefreshToken: REFRESH_TOKEN_TTL_SECONDS,
+      Session: 14 * 24 * 60 * 60,
+      Interaction: 60 * 60,
     },
     rotateRefreshToken: true,
     findAccount: async (_ctx, accountId) => {

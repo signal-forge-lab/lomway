@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync, randomBytes } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -8,6 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import type { SidecarConfig } from "../src/config.js";
+import { issuePat, patStorePath, revokePat } from "../src/pat.js";
 import { createLomwaySidecar, isMainEntrypoint } from "../src/server.js";
 
 const ISSUER = "https://issuer.example.test";
@@ -121,23 +122,117 @@ test("serves loopback RFC 7662 introspection without client authentication", asy
   });
 });
 
+test("introspection accepts scoped PATs and immediately observes revocation", async () => {
+  await withSidecar(async (baseUrl, config) => {
+    const { token, record } = await issuePat(patStorePath(config.runtimeDir), {
+      label: "synthetic-agent",
+      days: 30,
+      audience: config.resourceUrl,
+      allowedTools: ["lomway_search_tools"],
+    });
+    const active = await introspect(baseUrl, token);
+    assert.equal(active.status, 200);
+    const result = await active.json() as Record<string, unknown>;
+    assert.equal(result.active, true);
+    assert.equal(result.pat, true);
+    assert.equal(result.scope, "devspace");
+    assert.equal(result.aud, config.resourceUrl);
+    assert.deepEqual(result.allowed_tools, ["lomway_search_tools"]);
+    assert.equal(active.headers.get("cache-control"), "no-store");
+
+    assert.equal(await revokePat(patStorePath(config.runtimeDir), record.id), true);
+    const revoked = await introspect(baseUrl, token);
+    assert.deepEqual(await revoked.json(), { active: false });
+  });
+});
+
+test("public proxy requests cannot reach internal bearer introspection", async () => {
+  await withSidecar(async (baseUrl) => {
+    const blocked = await fetch(`${baseUrl}/oauth/introspect`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "cf-connecting-ip": "203.0.113.11",
+      },
+      body: new URLSearchParams({ token: "synthetic-token" }),
+    });
+    assert.equal(blocked.status, 404);
+    const internal = await introspect(baseUrl, "synthetic-token");
+    assert.deepEqual(await internal.json(), { active: false });
+  });
+});
+
 test("limits oversized and repeated failed owner-password submissions", async () => {
   await withSidecar(async (baseUrl) => {
-    const oversized = await fetch(`${baseUrl}/interaction/test-uid`, {
+    // Unknown UIDs must be rejected BEFORE the expensive password check.
+    const unknown = await submitPassword(baseUrl, "unknown-uid", OWNER_PASSWORD);
+    assert.equal(unknown.status, 400);
+
+    const first = await newLoginInteraction(baseUrl);
+    const oversized = await fetch(first.url, {
       method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        cookie: first.cookies,
+      },
       body: `password=${"x".repeat(5000)}`,
     });
     assert.equal(oversized.status, 413);
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      const rejected = await submitPassword(baseUrl, "rate-limit-uid", "wrong-password");
+      const rejected = await fetch(first.url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: first.cookies,
+        },
+        body: new URLSearchParams({ password: "wrong-password" }),
+        redirect: "manual",
+      });
       assert.equal(rejected.status, 401);
     }
-    const limited = await submitPassword(baseUrl, "rate-limit-uid", "wrong-password");
+    // A fresh, valid interaction does not reset the owner-wide failure budget.
+    const second = await newLoginInteraction(baseUrl);
+    const limited = await fetch(second.url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        cookie: second.cookies,
+      },
+      body: new URLSearchParams({ password: "wrong-password" }),
+    });
     assert.equal(limited.status, 429);
   });
 });
+
+async function newLoginInteraction(
+  baseUrl: string,
+  opts: { challenge?: string; refresh?: boolean } = {},
+): Promise<{ url: string; cookies: string; clientId: string }> {
+  const registration = await fetch(`${baseUrl}/reg`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token_endpoint_auth_method: "none",
+      grant_types: opts.refresh ? ["authorization_code", "refresh_token"] : ["authorization_code"],
+      response_types: ["code"],
+      redirect_uris: ["http://127.0.0.1/callback"],
+    }),
+  });
+  assert.equal(registration.status, 201);
+  const client = await registration.json() as { client_id: string };
+  const url = new URL(`${baseUrl}/auth`);
+  url.searchParams.set("client_id", client.client_id);
+  url.searchParams.set("redirect_uri", "http://127.0.0.1/callback");
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("scope", "openid devspace");
+  url.searchParams.set("resource", RESOURCE);
+  url.searchParams.set("code_challenge", opts.challenge ?? "A".repeat(43));
+  url.searchParams.set("code_challenge_method", "S256");
+  const auth = await fetch(url, { redirect: "manual" });
+  assert.equal(auth.status, 303);
+  return { url: localUrl(baseUrl, requiredLocation(auth)), cookies: responseCookies(auth), clientId: client.client_id };
+}
 
 test("authenticates the owner and resumes the provider-managed interaction", async () => {
   await withSidecar(async (baseUrl) => {
@@ -185,6 +280,162 @@ test("authenticates the owner and resumes the provider-managed interaction", asy
     });
     assert.equal(accepted.status, 303);
     assert.match(requiredLocation(accepted), /^https:\/\/issuer\.example\.test\/auth\//);
+  });
+});
+
+test("requires explicit informed consent after owner login", async () => {
+  await withSidecar(async (baseUrl) => {
+    const first = await newLoginInteraction(baseUrl);
+    const signedIn = await fetch(first.url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        cookie: first.cookies,
+      },
+      body: new URLSearchParams({ password: OWNER_PASSWORD }),
+      redirect: "manual",
+    });
+    assert.equal(signedIn.status, 303);
+    const jar = new Map<string, string>();
+    function mergeCookies(header: string): void {
+      for (const part of header.split("; ").filter(Boolean)) {
+        const name = part.split("=", 1)[0];
+        if (name) jar.set(name, part);
+      }
+    }
+    mergeCookies(first.cookies);
+    mergeCookies(responseCookies(signedIn));
+    const currentCookie = (): string => [...jar.values()].join("; ");
+    let next = localUrl(baseUrl, requiredLocation(signedIn));
+    let consentUrl: string | undefined;
+    let consentBody = "";
+    for (let hop = 0; hop < 8; hop++) {
+      const response = await fetch(next, { headers: { cookie: currentCookie() }, redirect: "manual" });
+      mergeCookies(responseCookies(response));
+      if (response.status === 200 && next.includes("/interaction/")) {
+        consentUrl = next;
+        consentBody = await response.text();
+        break;
+      }
+      assert.equal(response.status, 303, "expected authorization redirect at " + new URL(next).pathname);
+      next = localUrl(baseUrl, requiredLocation(response));
+    }
+    assert.ok(consentUrl, "OAuth must pause at a separate consent screen");
+    assert.match(consentBody, /Authorize this client/);
+    assert.match(consentBody, /Client ID:/);
+    assert.match(consentBody, /Redirect URI:/);
+    assert.match(consentBody, /Requested scopes:/);
+    assert.match(consentBody, /Approve access/);
+    const notApproved = await fetch(consentUrl, {
+      method: "POST",
+      headers: { cookie: currentCookie(), "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ decision: "invalid" }),
+      redirect: "manual",
+    });
+    assert.equal(notApproved.status, 403);
+    const approved = await fetch(consentUrl, {
+      method: "POST",
+      headers: { cookie: currentCookie(), "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ decision: "approve" }),
+      redirect: "manual",
+    });
+    assert.equal(approved.status, 303);
+  });
+});
+
+test("authorization code exchange, refresh rotation and replay revocation work end to end", async () => {
+  await withSidecar(async (baseUrl) => {
+    const verifier = "x".repeat(64);
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const first = await newLoginInteraction(baseUrl, { challenge, refresh: true });
+    const cookies = new Map<string, string>();
+    const merge = (header: string): void => {
+      for (const part of header.split("; ").filter(Boolean)) {
+        const name = part.split("=", 1)[0];
+        if (name) cookies.set(name, part);
+      }
+    };
+    const cookie = (): string => [...cookies.values()].join("; ");
+    merge(first.cookies);
+    const signedIn = await fetch(first.url, {
+      method: "POST",
+      headers: { cookie: cookie(), "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ password: OWNER_PASSWORD }),
+      redirect: "manual",
+    });
+    assert.equal(signedIn.status, 303);
+    merge(responseCookies(signedIn));
+    let next = localUrl(baseUrl, requiredLocation(signedIn));
+    let consentUrl: string | undefined;
+    for (let hop = 0; hop < 8; hop++) {
+      const response = await fetch(next, { headers: { cookie: cookie() }, redirect: "manual" });
+      merge(responseCookies(response));
+      if (response.status === 200 && next.includes("/interaction/")) {
+        consentUrl = next;
+        break;
+      }
+      assert.equal(response.status, 303);
+      next = localUrl(baseUrl, requiredLocation(response));
+    }
+    assert.ok(consentUrl);
+    const approved = await fetch(consentUrl, {
+      method: "POST",
+      headers: { cookie: cookie(), "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ decision: "approve" }),
+      redirect: "manual",
+    });
+    assert.equal(approved.status, 303);
+    merge(responseCookies(approved));
+    next = localUrl(baseUrl, requiredLocation(approved));
+    let finalRedirect: URL | undefined;
+    for (let hop = 0; hop < 8; hop++) {
+      const response = await fetch(next, { headers: { cookie: cookie() }, redirect: "manual" });
+      merge(responseCookies(response));
+      assert.equal(response.status, 303, "expected authorization completion redirect");
+      const destination = new URL(requiredLocation(response), ISSUER);
+      if (destination.pathname === "/callback") {
+        finalRedirect = destination;
+        break;
+      }
+      next = localUrl(baseUrl, destination.href);
+    }
+    assert.ok(finalRedirect, "authorization code must reach registered redirect URI");
+    const code = finalRedirect.searchParams.get("code");
+    assert.ok(code, "authorization code must be present");
+    const exchange = await fetch(`${baseUrl}/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: "http://127.0.0.1/callback",
+        client_id: first.clientId,
+        code_verifier: verifier,
+        resource: RESOURCE,
+      }),
+    });
+    assert.equal(exchange.status, 200, "code exchange must succeed");
+    const issued = await exchange.json() as { refresh_token?: string; access_token?: string };
+    assert.ok(issued.refresh_token && issued.access_token);
+    const rotate = async (refreshToken: string): Promise<Response> =>
+      fetch(`${baseUrl}/token`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: refreshToken,
+          client_id: first.clientId,
+          resource: RESOURCE,
+        }),
+      });
+    const rotated = await rotate(issued.refresh_token);
+    assert.equal(rotated.status, 200, "refresh rotation must succeed");
+    const replacement = await rotated.json() as { refresh_token?: string };
+    assert.ok(replacement.refresh_token && replacement.refresh_token !== issued.refresh_token);
+    const replay = await rotate(issued.refresh_token);
+    assert.equal(replay.status, 400, "reuse must fail");
+    const revoked = await rotate(replacement.refresh_token);
+    assert.equal(revoked.status, 400, "replay must revoke the whole grant family");
   });
 });
 

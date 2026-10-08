@@ -5,6 +5,7 @@ import {
   assertSafeCimdUrl,
   constantTimeEqual,
   hashOwnerPassword,
+  isPublicAddress,
   verifyOwnerPassword,
 } from "../src/security.js";
 
@@ -23,6 +24,12 @@ test("CIMD retrieval accepts HTTPS without credentials and rejects SSRF targets"
   ]) {
     assert.throws(() => assertSafeCimdUrl(value), /unsafe CIMD URL/);
   }
+});
+
+test("IPv4-mapped IPv6 cannot bypass private-address rejection", () => {
+  assert.equal(isPublicAddress("::ffff:127.0.0.1"), false);
+  assert.equal(isPublicAddress("::ffff:192.168.0.1"), false);
+  assert.equal(isPublicAddress("::1"), false);
 });
 
 test("owner password hashing does not retain or compare plaintext state", async () => {

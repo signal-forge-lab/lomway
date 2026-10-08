@@ -155,6 +155,7 @@ switch ($Action) {
 
         $secrets = Get-OAuthSecrets
         New-Item -ItemType Directory -Force -Path $runtimeRoot, $stateDir | Out-Null
+        & (Join-Path $PSScriptRoot 'private-oauth-state-acl.ps1') -RuntimeDirectory $stateDir | Out-Null
 
         $names = @(
             'LOMWAY_OAUTH_BIND_HOST',

@@ -139,7 +139,30 @@ For any `mcp-proxy`, `tower-mcp`, FastMCP interoperability, or protocol change:
 7. verify Swibo lifecycle;
 8. rerun public-repository hygiene review.
 
-## 10. OAuth sidecar cutover (offline-prepared, live-gated)
+## 10. Scoped personal access tokens for non-interactive clients
+
+For AI hosts that cannot perform browser OAuth, issue an **individually
+revocable PAT**. Existing OAuth clients continue unchanged.
+
+```powershell
+# The one-time secret goes to the local clipboard, not the console.
+pwsh -NoProfile -File scripts/pat.ps1 -Action issue -Label external-ai -Days 30 -Tools 'lomway_search_tools,lomway_describe_tool'
+# Deferred invocation requires both wrapper AND nested target to be allowed.
+pwsh -NoProfile -File scripts/pat.ps1 -Action issue -Label browser-ai -Days 30 -Tools 'lomway_call_tool,chrome_devtools_list_pages'
+pwsh -NoProfile -File scripts/pat.ps1 -Action list
+pwsh -NoProfile -File scripts/pat.ps1 -Action revoke -Id '<printed-token-id>'
+```
+
+Enter the PAT only in the other host's dedicated credential field, never
+in chat, shell arguments, screenshots, or shared logs. The PAT audience is
+`https://mcp.maiteneru.com/mcp`, its scope is `devspace`, and its tool
+permissions are exact-name entries rather than wildcards. Maximum expiry
+is 90 days. Only SHA-256 digests and metadata are persisted in
+`%LOCALAPPDATA%/Lomway/oauth-sidecar/runtime/pat-tokens.json` outside Git.
+Revocation takes effect on the next introspection, not during in-flight
+requests. PATs do not have refresh tokens and must be reissued at expiry.
+
+## 11. OAuth sidecar cutover (offline-prepared, live-gated)
 
 The Lomway-owned authorization sidecar is loopback-only, binds
 `127.0.0.1:7677` directly, and is supervised by Swibo. Do not start a second
@@ -150,8 +173,18 @@ OAuth lifetime policy:
 - Access tokens are short-lived (normally one hour).
 - Refresh tokens have a 30-day lifetime and rotate on refresh.
 - Grants start at 30 days and are extended to the newly issued refresh token's expiry whenever a refresh token is issued or rotated.
+- Refresh tokens issued by the current provider are not bound to browser Session TTL. A legacy refresh token is unbound only after its live Session and Grant are validated.
 - Active clients therefore remain valid on a sliding basis, while clients unused for 30 days expire naturally.
 - A client whose grant has already expired and whose refresh token is gone is not resurrected; it must authenticate once again.
+
+Security hardening:
+
+- Owner login validates the interaction before async password verification and applies a uid-independent, owner-wide rate limit.
+- Login and consent are distinct steps; consent displays client ID, unverified name, redirect URI and scopes, requiring explicit approval.
+- Opaque AccessToken, RefreshToken and AuthorizationCode IDs are stored as hashes; a legacy state file is migrated on the first adapter read.
+- The OAuth runtime directory and files are restricted at startup to owner, SYSTEM and Administrators.
+- Internal `/oauth/introspect` rejects Cloudflare-proxied public requests, while public provider introspection is disabled.
+- Concurrent refresh-token consumption revokes the grant family on reuse and prevents reviving it through a later token save.
 
 Before cutover, validate the sidecar with synthetic state only, confirm the
 stable public issuer and endpoint mapping, and run the repository's offline
@@ -165,8 +198,9 @@ During the later live cutover:
 2. Start the sidecar through Swibo on its loopback listener and verify its
    metadata, CIMD/DCR registration, PKCE S256 authorization, resource-bound
    token, refresh rotation, revocation, and loopback introspection behavior.
-3. Route the existing public `/authorize`, `/token`, `/register`, and
-   `/revoke` paths to the sidecar without changing the public issuer.
+3. Route the actual public `/auth`, `/token`, `/reg`, and
+   `/token/revocation` paths to the sidecar without changing the public issuer.
+   Block the internal `/oauth/introspect` at the public tunnel too.
 4. Verify Lomway returns `401` with its protected-resource challenge for
    missing/invalid credentials and `403` with `insufficient_scope` for an
    otherwise valid token missing the required scope.

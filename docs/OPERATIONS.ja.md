@@ -138,7 +138,31 @@ aggregation導入自体はbackend domain state/sourceを変更しません。agg
 
 8. public repository hygiene review
 
-## 10. OAuth sidecar cutover（offline準備済み・live gateあり）
+## 10. OAuthログイン不可のAI向けPAT
+
+ブラウザOAuth認証ができない外部AIには、既存OAuthを維持したまま、
+**個別に失効できるPAT**を発行します。
+
+```powershell
+# Windows実機で実行。秘密値はクリップボードへコピーし、コンソールには出しません。
+pwsh -NoProfile -File scripts/pat.ps1 -Action issue -Label external-ai -Days 30 -Tools 'lomway_search_tools,lomway_describe_tool'
+# Deferred呼び出しはwrapperと対象ツール名の両方が許可必須です。
+pwsh -NoProfile -File scripts/pat.ps1 -Action issue -Label browser-ai -Days 30 -Tools 'lomway_call_tool,chrome_devtools_list_pages'
+pwsh -NoProfile -File scripts/pat.ps1 -Action list
+pwsh -NoProfile -File scripts/pat.ps1 -Action revoke -Id '<発行時のID>'
+```
+
+PATの秘密値は相手AIの**認証情報専用入力欄**にのみ登録し、
+チャット・コマンド引数・共有ログには貼り付けないでください。
+audienceは `https://mcp.maiteneru.com/mcp`、scopeは `devspace`、
+許可ツールは完全一致、期限上限は90日です。Git管理外の
+`%LOCALAPPDATA%/Lomway/oauth-sidecar/runtime/pat-tokens.json`
+には秘密値でなくSHA-256照合値と管理情報だけを保存します。
+失効は次のintrospection対象リクエストから有効で、
+実行中の処理の強制中断ではありません。PATはrefreshできず、
+期限前に必要なら再発行します。
+
+## 11. OAuth sidecar cutover（offline準備済み・live gateあり）
 
 Lomway-owned Authorization sidecarはloopback-onlyで `127.0.0.1:7677` へ直接bindし、
 lifecycleはSwiboがsuperviseします。
@@ -150,8 +174,18 @@ OAuth lifetime policy:
 - Access Tokenは短命（通常1時間）。
 - Refresh Tokenは30日で、refresh時にrotationします。
 - Grantも初期30日とし、Refresh Tokenが新規発行またはrotationされるたび、そのRefresh Tokenのexpiryまで自動延長します。
+- 新規Refresh TokenはブラウザSession期限に紐づけません。旧Tokenについては有効なSessionとGrantを検証できた場合だけ初回使用時に移行します。
 - したがって利用が継続しているclientはslidingで維持され、30日以上利用されないclientは自然失効します。
 - 既にGrantが失効しRefresh Tokenも削除済みのclientは自動復活させず、1回だけ再認証します。
+
+認証の安全対策:
+
+- interactionを確認してから非同期でパスワードを検証し、uidに依存しない所有者単位の試行回数制限を適用します。
+- ログインと同意を分離し、client ID・未検証の名称・redirect URI・scopeを表示して明示承認を求めます。
+- AccessToken/RefreshToken/AuthorizationCodeのBearer IDをハッシュ化して保存し、旧形式のstateは初回読み込み時に移行します。
+- 起動時にOAuthランタイムディレクトリとファイルのACLを所有者・SYSTEM・Administratorsのみに制限します。
+- 内部用 `/oauth/introspect` はCloudflare経由の公開リクエストを拒否し、公開版provider introspectionは無効化します。
+- 並行refreshの再利用を検知するとGrant系列を失効させ、その後の保存でも復活できないようにします。
 
 cutover前はsynthetic stateだけでsidecarを検証し、公開issuerとendpoint mappingが安定して
 いることを確認します。repositoryのoffline fmt、clippy、test、build、diff gateも実行し、
@@ -162,7 +196,9 @@ owner credential、token、state、SOPS materialはrepository外に置きます�
 1. Workbridgeのauthority routeをstop/disableします。必要ならWorkbridgeのMCP backend routeは残します。
 2. Swibo経由でsidecarをloopback listenerに起動し、metadata、CIMD/DCR registration、PKCE S256、
    resource-bound token、refresh rotation、revocation、loopback introspectionを確認します。
-3. 公開issuerを変更せず、公開 `/authorize`、`/token`、`/register`、`/revoke` をsidecarへrouteします。
+3. 公開issuerを変更せず、実際の `/auth`、`/token`、`/reg`、
+   `/token/revocation` をsidecarへrouteします。
+   内部用 `/oauth/introspect` は公開トンネル側でも遮断します。
 4. Lomwayがmissing/invalid credentialにprotected-resource challenge付き`401`、required scope不足の
    有効tokenに`insufficient_scope`付き`403`を返すことを確認します。
 5. 非Workbridge backendへの認証済みcallを確認し、その後real clientのrefreshとTunnelをlive検証します。
