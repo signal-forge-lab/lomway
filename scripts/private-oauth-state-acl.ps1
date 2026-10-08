@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$RuntimeDirectory
+    [string]$RuntimeDirectory,
+    [switch]$VerifyOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,6 +13,18 @@ if (-not (Test-Path -LiteralPath $RuntimeDirectory -PathType Container)) {
 $owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $system = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'
 $admins = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'
+$allowedSids = @($owner.Value, $system.Value, $admins.Value)
+
+function Assert-PrivateAcl {
+    param([string]$Path)
+    $applied = Get-Acl -LiteralPath $Path
+    foreach ($entry in $applied.Access) {
+        $sid = $entry.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+        if ($sid.Value -notin $allowedSids) {
+            throw "Unexpected identity retains access to OAuth state at '$Path'."
+        }
+    }
+}
 
 function Lock-Acl {
     param([string]$Path, [bool]$Directory)
@@ -36,16 +49,17 @@ function Lock-Acl {
         $acl.AddAccessRule($rule)
     }
     Set-Acl -LiteralPath $Path -AclObject $acl
-    $applied = Get-Acl -LiteralPath $Path
-    foreach ($entry in $applied.Access) {
-        $sid = $entry.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
-        if ($sid.Value -notin @($owner.Value, $system.Value, $admins.Value)) {
-            throw 'Unexpected identity retains access to OAuth state.'
-        }
-    }
+    Assert-PrivateAcl -Path $Path
 }
 
-Lock-Acl -Path $RuntimeDirectory -Directory $true
-Get-ChildItem -LiteralPath $RuntimeDirectory -Force -Recurse |
-    ForEach-Object { Lock-Acl -Path $_.FullName -Directory $_.PSIsContainer }
-Write-Output 'OAUTH_RUNTIME_ACL_PRIVATE'
+if ($VerifyOnly) {
+    Assert-PrivateAcl -Path $RuntimeDirectory
+    Get-ChildItem -LiteralPath $RuntimeDirectory -Force -Recurse |
+        ForEach-Object { Assert-PrivateAcl -Path $_.FullName }
+    Write-Output 'OAUTH_RUNTIME_ACL_VERIFIED'
+} else {
+    Lock-Acl -Path $RuntimeDirectory -Directory $true
+    Get-ChildItem -LiteralPath $RuntimeDirectory -Force -Recurse |
+        ForEach-Object { Lock-Acl -Path $_.FullName -Directory $_.PSIsContainer }
+    Write-Output 'OAUTH_RUNTIME_ACL_PRIVATE'
+}

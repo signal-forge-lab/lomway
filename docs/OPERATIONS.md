@@ -162,6 +162,12 @@ is 90 days. Only SHA-256 digests and metadata are persisted in
 Revocation takes effect on the next introspection, not during in-flight
 requests. PATs do not have refresh tokens and must be reissued at expiry.
 
+To deploy the PAT-aware Gateway, run
+`pwsh -NoProfile -File scripts/deploy-pat-gateway.ps1` locally on Windows.
+This briefly stops the Swibo Lomway target, retains the previous binary as
+`runtime/lomway-pre-pat-gateway.exe`, and rolls back if readiness fails.
+Check `runtime/pat-deployment.json` for `phase=success` before issuing a PAT.
+
 ## 11. OAuth sidecar cutover (offline-prepared, live-gated)
 
 The Lomway-owned authorization sidecar is loopback-only, binds
@@ -183,6 +189,9 @@ Security hardening:
 - Login and consent are distinct steps; consent displays client ID, unverified name, redirect URI and scopes, requiring explicit approval.
 - Opaque AccessToken, RefreshToken and AuthorizationCode IDs are stored as hashes; a legacy state file is migrated on the first adapter read.
 - The OAuth runtime directory and files are restricted at startup to owner, SYSTEM and Administrators.
+- Startup only verifies those ACLs. The one-time ACL provisioning script must
+  be run separately under the Windows owner context; Swibo does not reapply
+  ACLs because Set-Acl may require unavailable SeSecurityPrivilege.
 - Internal `/oauth/introspect` rejects Cloudflare-proxied public requests, while public provider introspection is disabled.
 - Concurrent refresh-token consumption revokes the grant family on reuse and prevents reviving it through a later token save.
 

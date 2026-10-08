@@ -162,6 +162,13 @@ audienceは `https://mcp.maiteneru.com/mcp`、scopeは `devspace`、
 実行中の処理の強制中断ではありません。PATはrefreshできず、
 期限前に必要なら再発行します。
 
+PAT対応Gatewayの本番反映は、Windows端末でリポジトリから
+`pwsh -NoProfile -File scripts/deploy-pat-gateway.ps1` を実行します。
+実行時はSwiboのLomway targetを短時間停止します。前版のGateway実行ファイルを
+`runtime/lomway-pre-pat-gateway.exe` に保管し、ヘルスチェック失敗時に
+復元します。進捗・結果は `runtime/pat-deployment.json` で確認してください。
+**`phase=success` を確認するまではPATを発行しないでください。**
+
 ## 11. OAuth sidecar cutover（offline準備済み・live gateあり）
 
 Lomway-owned Authorization sidecarはloopback-onlyで `127.0.0.1:7677` へ直接bindし、
@@ -184,6 +191,9 @@ OAuth lifetime policy:
 - ログインと同意を分離し、client ID・未検証の名称・redirect URI・scopeを表示して明示承認を求めます。
 - AccessToken/RefreshToken/AuthorizationCodeのBearer IDをハッシュ化して保存し、旧形式のstateは初回読み込み時に移行します。
 - 起動時にOAuthランタイムディレクトリとファイルのACLを所有者・SYSTEM・Administratorsのみに制限します。
+- 起動時に行うのは既存ACLの検査だけです。ACLの初期設定は
+  `scripts/private-oauth-state-acl.ps1` をWindowsの所有者権限で別途実行します。
+  Swiboの起動処理からSet-Aclを再実行しません。
 - 内部用 `/oauth/introspect` はCloudflare経由の公開リクエストを拒否し、公開版provider introspectionは無効化します。
 - 並行refreshの再利用を検知するとGrant系列を失効させ、その後の保存でも復活できないようにします。
 

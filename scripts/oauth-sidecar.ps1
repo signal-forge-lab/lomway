@@ -155,7 +155,9 @@ switch ($Action) {
 
         $secrets = Get-OAuthSecrets
         New-Item -ItemType Directory -Force -Path $runtimeRoot, $stateDir | Out-Null
-        & (Join-Path $PSScriptRoot 'private-oauth-state-acl.ps1') -RuntimeDirectory $stateDir | Out-Null
+        # ACLs are provisioned separately: rewriting a safe ACL from a
+        # supervised process may require unavailable SeSecurityPrivilege.
+        & (Join-Path $PSScriptRoot 'private-oauth-state-acl.ps1') -RuntimeDirectory $stateDir -VerifyOnly | Out-Null
 
         $names = @(
             'LOMWAY_OAUTH_BIND_HOST',
