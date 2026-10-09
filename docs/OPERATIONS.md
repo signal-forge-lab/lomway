@@ -149,6 +149,8 @@ revocable PAT**. Existing OAuth clients continue unchanged.
 pwsh -NoProfile -File scripts/pat.ps1 -Action issue -Label external-ai -Days 30 -Tools 'lomway_search_tools,lomway_describe_tool'
 # Deferred invocation requires both wrapper AND nested target to be allowed.
 pwsh -NoProfile -File scripts/pat.ps1 -Action issue -Label browser-ai -Days 30 -Tools 'lomway_call_tool,chrome_devtools_list_pages'
+# Explicit full-access PAT for a trusted client (ordinary direct + deferred tools).
+pwsh -NoProfile -File scripts/pat.ps1 -Action issue -Label hark -Days 7 -AllTools
 pwsh -NoProfile -File scripts/pat.ps1 -Action list
 pwsh -NoProfile -File scripts/pat.ps1 -Action revoke -Id '<printed-token-id>'
 ```
@@ -156,7 +158,10 @@ pwsh -NoProfile -File scripts/pat.ps1 -Action revoke -Id '<printed-token-id>'
 Enter the PAT only in the other host's dedicated credential field, never
 in chat, shell arguments, screenshots, or shared logs. The PAT audience is
 `https://mcp.maiteneru.com/mcp`, its scope is `devspace`, and its tool
-permissions are exact-name entries rather than wildcards. Maximum expiry
+permissions use exact-name entries by default. The explicit `-AllTools`
+option grants access to all ordinary direct and deferred tools, including
+new ones added later, but never to reserved `proxy/` administration tools.
+It does not enable MCP resources, batch requests or GET calls. Maximum expiry
 is 90 days. Only SHA-256 digests and metadata are persisted in
 `%LOCALAPPDATA%/Lomway/oauth-sidecar/runtime/pat-tokens.json` outside Git.
 Revocation takes effect on the next introspection, not during in-flight

@@ -12,6 +12,7 @@ $rollbackJs = if ($Hardening) {
     Join-Path $runtime 'oauth-rollback\server.pre-csp.js'
 }
 $activeJs = Join-Path $repo 'sidecar\dist\src\server.js'
+$rollbackDir = Join-Path $runtime 'oauth-rollback'
 $result = if ($Hardening) {
     Join-Path $runtime 'oauth-hardening-deployment.json'
 } else {
@@ -58,6 +59,14 @@ if (-not (Test-Path -LiteralPath $activeJs -PathType Leaf)) {
     throw 'New Sidecar JavaScript is missing.'
 }
 if ($Hardening) {
+    foreach($part in @('adapter','pat')) {
+        $oldPath = Join-Path $rollbackDir ($part + '.pre-004.js')
+        $newPath = Join-Path $repo ('sidecar\dist\src\' + $part + '.js')
+        if (!(Test-Path -LiteralPath $oldPath -PathType Leaf) -or
+            !(Test-Path -LiteralPath $newPath -PathType Leaf)) {
+            throw ('Missing old/new Sidecar module: ' + $part)
+        }
+    }
     if (-not ((Get-Content -LiteralPath $rollbackJs -Raw).Contains('approvedRedirectOrigin')) -or
         ((Get-Content -LiteralPath $rollbackJs -Raw).Contains('loadClientToolPolicy'))) {
         throw 'Rollback JS is not the reviewed pre-hardening build.'
@@ -111,6 +120,13 @@ try {
         try {
             $current = & (Join-Path $PSScriptRoot 'oauth-sidecar.ps1') -Action status -Json | ConvertFrom-Json
             Copy-Item -LiteralPath $rollbackJs -Destination $activeJs -Force
+            if ($Hardening) {
+                foreach($part in @('adapter','pat')) {
+                    $oldModule = Join-Path $rollbackDir ($part + '.pre-004.js')
+                    $newModule = Join-Path $repo ('sidecar\dist\src\' + $part + '.js')
+                    Copy-Item -LiteralPath $oldModule -Destination $newModule -Force
+                }
+            }
             $null = Invoke-RestMethod -Method Post -Uri $restartUrl -TimeoutSec 45
             if (AwaitReady $current.pid) {
                 Record 'rolled_back' $reason

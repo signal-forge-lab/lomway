@@ -55,7 +55,9 @@ function validateStore(value: unknown): PatStore {
       record.scope !== "devspace" ||
       typeof record.audience !== "string" ||
       !Array.isArray(record.allowedTools) ||
-      record.allowedTools.some((name) => typeof name !== "string" || !NAME_PATTERN.test(name))
+      record.allowedTools.some((name) => typeof name !== "string" ||
+        (name !== "*" && !NAME_PATTERN.test(name))) ||
+      (record.allowedTools.includes("*") && record.allowedTools.length !== 1)
     ) {
       throw new Error("invalid PAT record");
     }
@@ -127,7 +129,9 @@ export async function issuePat(
     allowedTools.length < 1 ||
     allowedTools.length > 100 ||
     new Set(allowedTools).size !== allowedTools.length ||
-    allowedTools.some((name) => !NAME_PATTERN.test(name) || FORBIDDEN_TOOLS.has(name))
+    (allowedTools.includes("*") && allowedTools.length !== 1) ||
+    allowedTools.some((name) => name !== "*" &&
+      (!NAME_PATTERN.test(name) || FORBIDDEN_TOOLS.has(name)))
   ) {
     throw new Error("explicit, unique permitted tool names are required");
   }

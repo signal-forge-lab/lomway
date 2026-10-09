@@ -223,7 +223,7 @@ async fn restricted_pat_request(
 }
 
 fn permitted_pat_call(name: &str, message: &Value, allowed: &[String]) -> bool {
-    if !allowed.iter().any(|tool| tool == name) {
+    if !pat_tool_allowed(allowed, name) {
         return false;
     }
     if name == "lomway_call_tool" {
@@ -233,10 +233,22 @@ fn permitted_pat_call(name: &str, message: &Value, allowed: &[String]) -> bool {
             .pointer("/params/arguments/name")
             .and_then(Value::as_str)
             .is_some_and(|target| {
-                target != "lomway_call_tool" && allowed.iter().any(|tool| tool == target)
+                target != "lomway_call_tool" && pat_tool_allowed(allowed, target)
             });
     }
     true
+}
+
+fn pat_tool_allowed(allowed: &[String], name: &str) -> bool {
+    // Wildcard permission is intentionally explicit and does not grant
+    // administrative proxy endpoints.
+    if name.is_empty()
+        || name.starts_with("proxy/")
+        || matches!(name, "proxy_config" | "proxy_add_backend")
+    {
+        return false;
+    }
+    allowed.iter().any(|tool| tool == "*" || tool == name)
 }
 
 fn audit_field(value: &str) -> &str {
@@ -261,7 +273,7 @@ fn restrict_tool_catalog(message: &mut Value, allowed: &[String]) -> bool {
     tools.retain(|tool| {
         tool.get("name")
             .and_then(Value::as_str)
-            .is_some_and(|name| allowed.iter().any(|item| item == name))
+            .is_some_and(|name| pat_tool_allowed(allowed, name))
     });
     true
 }
@@ -436,6 +448,15 @@ mod tests {
                             "pat": true,
                             "client_id": "pat:synthetic",
                             "allowed_tools": ["safe_status", "lomway_call_tool"]
+                        }),
+                        Some("pat-all") => json!({
+                            "active": true,
+                            "aud": resource,
+                            "scope": "devspace",
+                            "exp": now + 3600,
+                            "pat": true,
+                            "client_id": "pat:all-synthetic",
+                            "allowed_tools": ["*"]
                         }),
                         Some("wrong-aud") => json!({
                             "active": true,
@@ -667,6 +688,57 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["safe_status", "lomway_call_tool"]);
 
+        let all_pat_tools: Value = client
+            .post(&base)
+            .bearer_auth("pat-all")
+            .json(&json!({"jsonrpc":"2.0","id":10,"method":"tools/list"}))
+            .send()
+            .await
+            .expect("all PAT tools")
+            .json()
+            .await
+            .expect("tools JSON");
+        let all_names: Vec<&str> = all_pat_tools["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(
+            all_names,
+            vec!["safe_status", "dangerous_mutation", "lomway_call_tool"]
+        );
+        let permitted = client
+            .post(&base)
+            .bearer_auth("pat-all")
+            .json(&json!({"jsonrpc":"2.0","id":11,"method":"tools/call",
+                "params":{"name":"dangerous_mutation"}}))
+            .send()
+            .await
+            .expect("all tools request");
+        assert_eq!(permitted.status(), reqwest::StatusCode::OK);
+        let deferred = client
+            .post(&base)
+            .bearer_auth("pat-all")
+            .json(&json!({"jsonrpc":"2.0","id":12,"method":"tools/call",
+                "params":{"name":"lomway_call_tool",
+                "arguments":{"name":"dangerous_mutation","arguments":{}}}}))
+            .send()
+            .await
+            .expect("all deferred request");
+        assert_eq!(deferred.status(), reqwest::StatusCode::OK);
+        for name in ["proxy/config", "proxy/add_backend", "proxy_config"] {
+            let denied = client
+                .post(&base)
+                .bearer_auth("pat-all")
+                .json(&json!({"jsonrpc":"2.0","id":13,"method":"tools/call",
+                    "params":{"name":name}}))
+                .send()
+                .await
+                .expect("admin boundary");
+            assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN, "{name}");
+        }
+
         // OAuth is not automatically unrestricted: a new DCR client sees
         // only the tools authorized by its explicit client policy.
         let oauth_tools: Value = client
@@ -719,6 +791,20 @@ mod tests {
         let text = String::from_utf8(bytes.to_vec()).expect("UTF-8");
         assert!(text.contains("safe_status"));
         assert!(!text.contains("dangerous_mutation"));
+        let full_sse = "data: {\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"safe_status\"},{\"name\":\"dangerous_mutation\"},{\"name\":\"proxy/config\"}]}}\n\n";
+        let full_response = Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(Body::from(full_sse)).expect("response");
+        let full = filter_pat_tools_list(full_response, &["*".into()]).await;
+        assert_eq!(full.status(), StatusCode::OK);
+        let full_bytes = to_bytes(full.into_body(), 4096).await.expect("body");
+        let full_text = String::from_utf8(full_bytes.to_vec()).expect("UTF-8");
+        assert!(full_text.contains("safe_status"));
+        assert!(full_text.contains("dangerous_mutation"));
+        assert!(!full_text.contains("proxy/config"));
+        assert!(!permitted_pat_call("lomway_call_tool", &json!({
+            "params":{"name":"lomway_call_tool","arguments":{"name":"proxy/config"}}
+        }), &["*".into()]));
         let unknown = Response::builder()
             .header(header::CONTENT_TYPE, "text/plain")
             .body(Body::from("unfiltered catalog"))

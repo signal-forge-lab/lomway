@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$Public)
+param([switch]$Public, [switch]$AllTools)
 
 # A disposable one-day token is issued strictly in this PowerShell process,
 # never written to logs or clipboard, and revoked in a finally block.
@@ -44,7 +44,11 @@ function Find-RpcResult($response) {
 
 try {
     if (!(Test-Path -LiteralPath $cli)) { throw 'PAT CLI is missing' }
-    $issued = & node.exe $cli issue --label 'disposable-live-probe' --days 1 --tools $targetTool
+    if ($AllTools) {
+        $issued = & node.exe $cli issue --label 'disposable-full-access-live-probe' --days 1 --all-tools
+    } else {
+        $issued = & node.exe $cli issue --label 'disposable-live-probe' --days 1 --tools $targetTool
+    }
     if ($LASTEXITCODE -ne 0) { throw 'PAT issue failed' }
     $record = $issued | ConvertFrom-Json
     $token = [string]$record.token
@@ -83,14 +87,26 @@ try {
     if ($list.StatusCode -ne 200) { throw "PAT tools/list: HTTP $($list.StatusCode)" }
     $listed = Find-RpcResult $list
     $names = @($listed.result.tools | ForEach-Object { $_.name })
-    if ($names.Count -ne 1 -or $names[0] -ne $targetTool) {
+    if ($AllTools) {
+        if ($names.Count -lt 2 -or $targetTool -notin $names -or
+            'lomway_call_tool' -notin $names -or
+            @($names | Where-Object { $_ -like 'proxy/*' }).Count -gt 0) {
+            throw ('Full-access PAT catalog mismatch: observed count=' + $names.Count)
+        }
+        Write-Output ('PAT_ALL_TOOLS_LIST_OK count=' + $names.Count)
+    } elseif ($names.Count -ne 1 -or $names[0] -ne $targetTool) {
         throw ('PAT tool allowlist mismatch: observed count=' + $names.Count)
     }
     Write-Output 'PAT_TOOL_LIST_FILTER_OK'
 
+    $deniedParams = if ($AllTools) {
+        @{ name='proxy/config'; arguments=@{} }
+    } else {
+        @{ name='lomway_call_tool'; arguments=@{ name=$targetTool; arguments=@{} } }
+    }
     $denied = Request-Status $local 'POST' @{
         jsonrpc='2.0'; id=3; method='tools/call'
-        params=@{ name='lomway_call_tool'; arguments=@{ name=$targetTool; arguments=@{} } }
+        params=$deniedParams
     }
     if ($denied.StatusCode -ne 403) { throw "PAT forbidden tool: HTTP $($denied.StatusCode)" }
     Write-Output 'PAT_FORBIDDEN_TOOL_403'

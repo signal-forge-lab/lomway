@@ -19,8 +19,14 @@ async function main(): Promise<void> {
       const days = Number(option(args, "--days") ?? "30");
       const audience = option(args, "--audience") ?? "https://mcp.maiteneru.com/mcp";
       const tools = option(args, "--tools")?.split(",").filter(Boolean) ?? [];
+      const allTools = args.includes("--all-tools");
       if (!label) throw new Error("--label is required");
-      const { token, record } = await issuePat(path, { label, days, audience, allowedTools: tools });
+      if (allTools && option(args, "--tools") !== undefined) {
+        throw new Error("--all-tools cannot be combined with --tools");
+      }
+      const { token, record } = await issuePat(path, {
+        label, days, audience, allowedTools: allTools ? ["*"] : tools,
+      });
       // stdout is deliberately secret-bearing for use by a local clipboard wrapper.
       process.stdout.write(JSON.stringify({ token, ...record }) + "\n");
       break;
@@ -36,7 +42,7 @@ async function main(): Promise<void> {
       break;
     }
     default:
-      throw new Error("usage: pat-cli [issue --label NAME --days 30 --tools tool1,tool2 | list | revoke --id ID]");
+      throw new Error("usage: pat-cli [issue --label NAME --days 30 (--tools tool1,tool2 | --all-tools) | list | revoke --id ID]");
   }
 }
 

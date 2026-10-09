@@ -6,9 +6,11 @@
 2. Add a local runtime policy `client-tool-policy.json` with SHA-256 client
    ID digests and per-client tool lists. Missing policy restricts all OAuth
    clients to discovery; malformed policy fails closed.
-3. Freeze current actively approved client IDs once using
-   `scripts/provision-legacy-oauth-clients.ps1`. Do not regenerate the snapshot
-   after new clients register. Verify directory ACL, keep file out of Git.
+3. Freeze current active Grant client IDs (including CIMD clients without a
+   persistent Client record) once using
+   `scripts/provision-legacy-oauth-clients.ps1`. Reconcile only before the
+   first hardening cutover, never expand this snapshot after deployment.
+   Verify directory ACL and keep the file out of Git.
 4. Extend OAuth introspection with policy fields and apply the same tool
    filtering to non-PAT clients unless explicitly marked trusted legacy.
 5. Add structured authorization audit metadata and sweep safely expired

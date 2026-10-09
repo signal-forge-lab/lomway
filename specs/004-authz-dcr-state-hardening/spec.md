@@ -28,6 +28,10 @@ and state growth without invalidating refresh replay evidence.
    the 128-record limit cannot be exhausted by revoked disposable probes.
 9. Unit tests, type checking, clippy, Rust integration, browser flow, privacy
    scan, and GitHub CI must pass before production cutover.
+10. A trusted operator may explicitly issue a full-tool PAT using
+    `-AllTools`. This covers all current and future ordinary direct/deferred
+    tools, but excludes proxy administration. All normal HTTP method,
+    batch, introspection and revocation constraints continue to apply.
 
 ## Non-goals in this rollout
 

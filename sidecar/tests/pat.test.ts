@@ -71,3 +71,20 @@ test("new issuance reclaims revoked probe credentials but keeps active PATs", as
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("explicit full-access PAT is represented by the single wildcard permission", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "lomway-pat-"));
+  const path = patStorePath(dir);
+  try {
+    const { token } = await issuePat(path, {
+      label: "owner-full-access", days: 1, audience, allowedTools: ["*"],
+    });
+    assert.deepEqual((await verifyPat(path, token, audience))?.allowedTools, ["*"]);
+    await assert.rejects(issuePat(path, {
+      label: "invalid-mixed", days: 1, audience,
+      allowedTools: ["*", "lomway_search_tools"],
+    }));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

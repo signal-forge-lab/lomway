@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$VerifyOnly)
+param([switch]$VerifyOnly, [switch]$ReconcileBeforeCutover)
 
 # One-time compatibility snapshot. New OAuth/DCR clients are NEVER added
 # automatically. Existing live grant holders remain functional after the
@@ -13,9 +13,9 @@ if (!(Test-Path -LiteralPath $statePath -PathType Leaf)) {
 }
 $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json -Depth 100
 $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-$clients = @($state.records.Client.PSObject.Properties | ForEach-Object Name)
 $approvedIds = @($state.records.Grant.PSObject.Properties |
-    Where-Object { $_.Value.clientId -in $clients -and $_.Value.exp -gt $now } |
+    # CIMD clients can have live grants without persistent Client records.
+    Where-Object { $_.Value.clientId -is [string] -and $_.Value.exp -gt $now } |
     ForEach-Object { [string]$_.Value.clientId } | Sort-Object -Unique)
 $digests = @($approvedIds | ForEach-Object {
     $bytes = [Text.Encoding]::UTF8.GetBytes($_)
@@ -24,6 +24,25 @@ $digests = @($approvedIds | ForEach-Object {
 if (Test-Path -LiteralPath $policyPath -PathType Leaf) {
     $existing = Get-Content -LiteralPath $policyPath -Raw | ConvertFrom-Json -Depth 20
     if ($existing.version -ne 1) { throw 'Existing policy has invalid version' }
+    if ($ReconcileBeforeCutover) {
+        $deployed = Join-Path (Split-Path $PSScriptRoot -Parent) 'runtime\oauth-hardening-deployment.json'
+        if (Test-Path $deployed) {
+            throw 'OAuth hardening cutover was already attempted. Refusing legacy privilege expansion.'
+        }
+        $combined = @(@($existing.unrestrictedLegacyClientHashes) + $digests | Sort-Object -Unique)
+        $existing.unrestrictedLegacyClientHashes = $combined
+        $temp = $policyPath + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+        try {
+            [IO.File]::WriteAllText(
+                $temp, ($existing | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false)
+            )
+            [IO.File]::Move($temp, $policyPath, $true)
+        } finally {
+            Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+        }
+        Write-Output ('RECONCILED_BEFORE_CUTOVER protected_clients='+$combined.Count)
+        exit 0
+    }
     Write-Output ('EXISTING_POLICY retained_legacy_clients=' + @($existing.unrestrictedLegacyClientHashes).Count)
     exit 0
 }

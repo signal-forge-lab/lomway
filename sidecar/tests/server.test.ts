@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
-import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -8,6 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import type { SidecarConfig } from "../src/config.js";
+import { clientDigest } from "../src/client-tools.js";
 import { issuePat, patStorePath, revokePat } from "../src/pat.js";
 import { createLomwaySidecar, isMainEntrypoint } from "../src/server.js";
 
@@ -116,6 +117,17 @@ test("serves loopback RFC 7662 introspection without client authentication", asy
     assert.equal(activeBody.scope, "devspace");
     assert.equal(activeBody.oauth_unrestricted_legacy, false);
     assert.deepEqual(activeBody.allowed_tools, ["lomway_search_tools", "lomway_describe_tool"]);
+    // Explicitly frozen legacy policy preserves an existing authorized
+    // client even when it later refreshes an OAuth access token.
+    await writeFile(join(config.runtimeDir, "client-tool-policy.json"), JSON.stringify({
+      version: 1,
+      unrestrictedLegacyClientHashes: [clientDigest(clientId)],
+      clientToolAllowlists: {},
+    }));
+    const trusted = await introspect(baseUrl, tokenValue);
+    const trustedBody = await trusted.json() as Record<string, unknown>;
+    assert.equal(trustedBody.oauth_unrestricted_legacy, true);
+    assert.deepEqual(trustedBody.allowed_tools, []);
 
     await accessToken.destroy();
     const revoked = await introspect(baseUrl, tokenValue);

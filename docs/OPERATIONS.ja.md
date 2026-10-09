@@ -181,6 +181,14 @@ Gatewayを再起動します。結果は `runtime/pat-deployment.json` に保存
 実際のMCP initialize／初期化完了通知／ツール一覧と呼び出し／拒否・失効を検証し、
 最後に必ず失効します。秘密値は出力・クリップボードへ転送しません。
 
+全ツール許可PATは `pwsh -NoProfile -File scripts/pat.ps1 -Action issue -Label hark -Days 7 -AllTools`
+で発行できます。通常のMCPツール（Deferred経由を含む）すべてにアクセスできますが、
+内部管理ツール（`proxy/config`、`proxy/add_backend`等）は許可しません。
+`-AllTools` は将来追加される通常ツールにも適用される強い権限です。
+発行値はチャットやログへ出力せず、WindowsクリップボードからHarkの
+認証情報専用入力欄にのみ登録してください。利用終了後はPAT IDを指定して失効させます。
+固定の権限が必要な場合は引き続き `-Tools` で個別の許可リストを設定します。
+
 外部AI実機の追加試験には `scripts/test-pat-codex-client.ps1` を使用します。
 Codex CLIに1ツールだけの一時PATを子プロセスの環境変数で渡し、実際の
 AIツール呼び出しを確認します。期限内にCodexから結果が来なかった場合も
