@@ -175,6 +175,13 @@ the executable, and rollback restores the previous pointer and restarts the
 Gateway. Confirm `runtime/pat-deployment.json` is `phase=success`, then
 perform a live PAT authorization test before issuing an external credential.
 
+Run `pwsh -NoProfile -File scripts/test-pat-live.ps1` and repeat with
+`-Public` for the public HTTPS MCP endpoint. Each test issues a one-day,
+single-read-only-tool disposable PAT in process memory, completes MCP
+initialize and initialized notification, verifies tools/list, allowed and
+denied tool calls, and checks HTTP 401 after revocation. It does not print
+or copy the credential.
+
 ## 11. OAuth sidecar cutover (offline-prepared, live-gated)
 
 The Lomway-owned authorization sidecar is loopback-only, binds

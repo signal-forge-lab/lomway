@@ -10,8 +10,9 @@
 - [x] Update bilingual operations documentation and endpoint mapping
 - [x] Pass sidecar unit/integration checks
 - [x] Rust clippy/regression (86 PASS, one opt-in live test ignored) and staged-content secret scan
-- [ ] Deploy and verify real OAuth/PAT flows with rollback readiness
+- [x] Deploy isolated, rollback-capable Gateway and smoke-test PAT over local and public MCP
+- [ ] Validate a fresh real-user OAuth browser login after the new explicit consent flow (existing OAuth client access is working)
 - [x] Restore OAuth after ACL startup failure; replace reapply with read-only ACL verification
 - [x] Add local rollback-capable Gateway deployment script
-- [ ] Run local Gateway deployment and validate real OAuth/PAT flows
+- [x] Run isolated Gateway deployment, verify OAuth discovery + scope gate, and exercise PAT allow/deny/revocation
 - [x] Commit/push core security-hardening and PAT implementation

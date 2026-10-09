@@ -8,6 +8,8 @@
 - [x] Add explicit nested deferred-tool authorization
 - [x] Add synthetic unit and negative-security tests
 - [x] Complete final full test suite (46 sidecar PASS; 86 Rust PASS, one opt-in live test ignored)
-- [ ] Live sidecar/gateway lifecycle verification and public/private introspection probes
-- [ ] Run scripts/deploy-pat-gateway.ps1 locally on Windows; detached remote launch is blocked by host safety policy
+- [x] Deploy isolated Gateway binary without interrupting desktop-local, OAuth or the management plane
+- [x] Verify live Gateway/Sidecar health, Swibo READY, public OAuth 200, public unauthenticated MCP 401, and public introspection 404
+- [x] Validate live PAT initialize, notifications/initialized, tools/list filtering, permitted and forbidden tool calls, and revocation (loopback and public URL)
+- [x] Revoke all disposable PATs and confirm zero active credentials
 - [ ] Validate another AI's actual token-based MCP connection (requires user action)

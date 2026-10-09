@@ -175,6 +175,12 @@ Gatewayだけを短時間停止して、`runtime/bin/lomway-gateway-<sha256>.exe
 Gatewayを再起動します。結果は `runtime/pat-deployment.json` に保存します。
 **`phase=success` とPAT権限制御のlive検証を確認するまでPATは発行しないでください。**
 
+検証用PATは `pwsh -NoProfile -File scripts/test-pat-live.ps1`
+と `pwsh -NoProfile -File scripts/test-pat-live.ps1 -Public` で確認できます。
+このスクリプトは1日有効・読み取り専用ツール1件だけの一時PATをプロセス内で発行し、
+実際のMCP initialize／初期化完了通知／ツール一覧と呼び出し／拒否・失効を検証し、
+最後に必ず失効します。秘密値は出力・クリップボードへ転送しません。
+
 ## 11. OAuth sidecar cutover（offline準備済み・live gateあり）
 
 Lomway-owned Authorization sidecarはloopback-onlyで `127.0.0.1:7677` へ直接bindし、
