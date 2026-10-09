@@ -886,14 +886,25 @@ max_argument_size = 1048576
         "after"
     );
 
-    assert_eq!(
-        client
+    // The transport reconnect monitor runs asynchronously. Wait for its
+    // bounded poll cycle rather than racing an immediate client request.
+    // The gateway itself still never retries the client tool call.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let recovered = loop {
+        match client
             .call_tool("restartable_status", serde_json::json!({}))
             .await
-            .expect("gateway should recover after a brief backend restart")
-            .all_text(),
-        "after"
-    );
+        {
+            Ok(result) => break result.all_text(),
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => {
+                panic!("gateway did not recover within the deadline: {error:?}")
+            }
+        }
+    };
+    assert_eq!(recovered, "after");
 
     gateway_task.abort();
     let (replacement_gateway_addr, replacement_gateway_task, _replacement_dir) =

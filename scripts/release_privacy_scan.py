@@ -36,6 +36,36 @@ CHECKS = (
     ("live workspace id", re.compile(r"\bws_[0-9a-f]{8,}\b", re.I)),
 )
 
+# RFC 2606 / RFC 6761: these example and special-use DNS suffixes cannot
+# identify a real mailbox. Keep all other email-shaped matches, including
+# URL userinfo, visible to the release privacy gate.
+RESERVED_EMAIL_DOMAIN = re.compile(
+    r"(?:^|\.)(?:example\.(?:com|net|org)|test|example|invalid|localhost)$",
+    re.I,
+)
+
+
+def is_reserved_example_email(match: re.Match[str]) -> bool:
+    domain = match.group(0).rsplit("@", 1)[1]
+    return RESERVED_EMAIL_DOMAIN.search(domain) is not None
+
+
+# A single historical config-validator fixture predates the privacy gate.
+# Its example-tailnet.ts.net hostname is NOT an RFC-reserved domain, so it
+# must not become a general domain exclusion. Pin the exact immutable blob,
+# path, and URL string; all other URL userinfo still triggers the gate.
+LEGACY_FIXTURE_BLOB = "9eff418b9ee901dab7f2c39bce5ee5d85450ef61"
+
+
+def is_known_history_fixture(
+    text: str, source: str, match: re.Match[str], history_oid: str | None
+) -> bool:
+    if history_oid != LEGACY_FIXTURE_BLOB or source != "history:src/config/validate.rs":
+        return False
+    exact = "https://user" + "@" + "workbridge-mac.example-tailnet.ts.net/mcp"
+    start = match.start() - len("https://")
+    return start >= 0 and text[start : start + len(exact)] == exact
+
 
 def candidate_files() -> list[Path]:
     raw = subprocess.check_output(
@@ -56,10 +86,15 @@ def candidate_files() -> list[Path]:
     return paths
 
 
-def scan_text(text: str, source: str) -> list[str]:
+def scan_text(text: str, source: str, *, history_oid: str | None = None) -> list[str]:
     findings: list[str] = []
     for label, pattern in CHECKS:
         for match in pattern.finditer(text):
+            if label == "email address" and (
+                is_reserved_example_email(match)
+                or is_known_history_fixture(text, source, match, history_oid)
+            ):
+                continue
             line = text.count("\n", 0, match.start()) + 1
             findings.append(f"{source}:{line}: {label}")
     return findings
@@ -182,7 +217,7 @@ def main() -> int:
             findings.append(f"history:{rel}: forbidden public-history path")
 
     history_scanned = 0
-    for _, rel, data in history_blob_contents(unique_history_blobs):
+    for oid, rel, data in history_blob_contents(unique_history_blobs):
         if len(data) > MAX_TEXT_BYTES:
             continue
         try:
@@ -190,7 +225,7 @@ def main() -> int:
         except UnicodeDecodeError:
             continue
         history_scanned += 1
-        findings.extend(scan_text(text, f"history:{rel}"))
+        findings.extend(scan_text(text, f"history:{rel}", history_oid=oid))
 
     if findings:
         print("release privacy scan: FAIL")

@@ -68,7 +68,9 @@ jobs:
 
       - name: Public release privacy scan
         if: matrix.os == 'windows-latest'
-        run: python scripts/release_privacy_scan.py
+        run: |
+          python -m unittest discover -s tests -p 'test_release_privacy_scan.py'
+          python scripts/release_privacy_scan.py
 
       - name: Exact lockfile dependency gate
         if: matrix.os == 'windows-latest'
