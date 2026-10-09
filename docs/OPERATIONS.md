@@ -182,6 +182,12 @@ initialize and initialized notification, verifies tools/list, allowed and
 denied tool calls, and checks HTTP 401 after revocation. It does not print
 or copy the credential.
 
+`scripts/test-pat-codex-client.ps1` separately probes a real Codex AI
+client using an ephemeral, one-tool bearer PAT. It uses a bounded deadline
+and revokes the temporary PAT even when the model does not respond. This
+test requires a working Codex model session; HTTP checks alone cannot prove
+that an independent AI invoked a tool.
+
 ## 11. OAuth sidecar cutover (offline-prepared, live-gated)
 
 The Lomway-owned authorization sidecar is loopback-only, binds
@@ -201,6 +207,11 @@ Security hardening:
 
 - Owner login validates the interaction before async password verification and applies a uid-independent, owner-wide rate limit.
 - Login and consent are distinct steps; consent displays client ID, unverified name, redirect URI and scopes, requiring explicit approval.
+- Chromium can block the OAuth redirect chain if the interaction form has
+  a self-only CSP. `form-action` therefore allows only the local origin and
+  the origin of the OIDC-validated redirect URI. Exercise the full login,
+  informed consent, code exchange and token-introspection path in isolated
+  Chromium with `python scripts/test-oauth-browser.py` (synthetic credentials).
 - Opaque AccessToken, RefreshToken and AuthorizationCode IDs are stored as hashes; a legacy state file is migrated on the first adapter read.
 - The OAuth runtime directory and files are restricted at startup to owner, SYSTEM and Administrators.
 - Startup only verifies those ACLs. The one-time ACL provisioning script must

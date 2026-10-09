@@ -309,12 +309,14 @@ test("requires explicit informed consent after owner login", async () => {
     let next = localUrl(baseUrl, requiredLocation(signedIn));
     let consentUrl: string | undefined;
     let consentBody = "";
+    let consentCsp = "";
     for (let hop = 0; hop < 8; hop++) {
       const response = await fetch(next, { headers: { cookie: currentCookie() }, redirect: "manual" });
       mergeCookies(responseCookies(response));
       if (response.status === 200 && next.includes("/interaction/")) {
         consentUrl = next;
         consentBody = await response.text();
+        consentCsp = response.headers.get("content-security-policy") ?? "";
         break;
       }
       assert.equal(response.status, 303, "expected authorization redirect at " + new URL(next).pathname);
@@ -326,6 +328,10 @@ test("requires explicit informed consent after owner login", async () => {
     assert.match(consentBody, /Redirect URI:/);
     assert.match(consentBody, /Requested scopes:/);
     assert.match(consentBody, /Approve access/);
+    // OAuth form POST may redirect through the provider to the client's
+    // registered redirect origin. Chromium enforces CSP on that chain.
+    assert.match(consentCsp, /form-action 'self' http:\/\/127\.0\.0\.1/);
+    assert.match(consentCsp, /frame-ancestors 'none'/);
     const notApproved = await fetch(consentUrl, {
       method: "POST",
       headers: { cookie: currentCookie(), "content-type": "application/x-www-form-urlencoded" },

@@ -12,6 +12,8 @@
 - [x] Rust clippy/regression (86 PASS, one opt-in live test ignored) and staged-content secret scan
 - [x] Deploy isolated, rollback-capable Gateway and smoke-test PAT over local and public MCP
 - [ ] Validate a fresh real-user OAuth browser login after the new explicit consent flow (existing OAuth client access is working)
+- [x] Validate synthetic owner login, consent, redirect, code exchange and introspection in isolated Chromium
+- [x] Fix overly restrictive CSP that blocked registered redirects after consent POST
 - [x] Restore OAuth after ACL startup failure; replace reapply with read-only ACL verification
 - [x] Add local rollback-capable Gateway deployment script
 - [x] Run isolated Gateway deployment, verify OAuth discovery + scope gate, and exercise PAT allow/deny/revocation

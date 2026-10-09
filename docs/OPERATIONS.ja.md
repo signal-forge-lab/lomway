@@ -181,6 +181,11 @@ Gatewayを再起動します。結果は `runtime/pat-deployment.json` に保存
 実際のMCP initialize／初期化完了通知／ツール一覧と呼び出し／拒否・失効を検証し、
 最後に必ず失効します。秘密値は出力・クリップボードへ転送しません。
 
+外部AI実機の追加試験には `scripts/test-pat-codex-client.ps1` を使用します。
+Codex CLIに1ツールだけの一時PATを子プロセスの環境変数で渡し、実際の
+AIツール呼び出しを確認します。期限内にCodexから結果が来なかった場合も
+子プロセスを終了し、PATを必ず失効させます。
+
 ## 11. OAuth sidecar cutover（offline準備済み・live gateあり）
 
 Lomway-owned Authorization sidecarはloopback-onlyで `127.0.0.1:7677` へ直接bindし、
@@ -201,6 +206,10 @@ OAuth lifetime policy:
 
 - interactionを確認してから非同期でパスワードを検証し、uidに依存しない所有者単位の試行回数制限を適用します。
 - ログインと同意を分離し、client ID・未検証の名称・redirect URI・scopeを表示して明示承認を求めます。
+- OAuthのPOST後にChromiumが登録済みredirect URIへの移動を遮断しないよう、
+  CSPのform-actionにはselfとOIDCで検証されたredirect URIのオリジンだけを
+  許可します。合成資格情報・独立したstateで実ブラウザの認可コード交換まで行う
+  `python scripts/test-oauth-browser.py` を検証に使用してください。
 - AccessToken/RefreshToken/AuthorizationCodeのBearer IDをハッシュ化して保存し、旧形式のstateは初回読み込み時に移行します。
 - 起動時にOAuthランタイムディレクトリとファイルのACLを所有者・SYSTEM・Administratorsのみに制限します。
 - 起動時に行うのは既存ACLの検査だけです。ACLの初期設定は

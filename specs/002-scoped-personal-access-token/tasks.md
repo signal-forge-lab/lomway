@@ -13,3 +13,5 @@
 - [x] Validate live PAT initialize, notifications/initialized, tools/list filtering, permitted and forbidden tool calls, and revocation (loopback and public URL)
 - [x] Revoke all disposable PATs and confirm zero active credentials
 - [ ] Validate another AI's actual token-based MCP connection (requires user action)
+- [x] Prepare an isolated Codex CLI test with disposable PAT and forced timeout/revocation
+- [ ] Obtain a completed external model tool call; initial Codex CLI attempt was unresponsive and the PAT was revoked

@@ -156,7 +156,28 @@ export function createLomwaySidecar(config: SidecarConfig): {
     if (request.method === "GET") {
       response.setHeader("cache-control", "no-store");
       response.setHeader("x-frame-options", "DENY");
-      response.setHeader("content-security-policy", "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
+      // Chromium also applies form-action to redirects following POST. OAuth
+      // authorization intentionally redirects to the registered client's
+      // origin, so allow ONLY that origin in addition to our own. The OIDC
+      // provider has already validated the redirect_uri for this interaction.
+      let approvedRedirectOrigin = "";
+      if (typeof interaction.params.redirect_uri === "string") {
+        try {
+          const redirect = new URL(interaction.params.redirect_uri);
+          if (
+            (redirect.protocol === "https:" ||
+              (redirect.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(redirect.hostname))) &&
+            !redirect.username && !redirect.password
+          ) {
+            approvedRedirectOrigin = " " + redirect.origin;
+          }
+        } catch {
+          // Missing or malformed redirect never weakens the default CSP.
+        }
+      }
+      response.setHeader("content-security-policy",
+        "default-src 'none'; form-action 'self'" + approvedRedirectOrigin +
+        "; frame-ancestors 'none'; base-uri 'none'");
       response.statusCode = 200;
       response.setHeader("content-type", "text/html; charset=utf-8");
       if (interaction.prompt.name === "login") {
