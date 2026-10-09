@@ -4,7 +4,24 @@ $Script:RepoRoot = Split-Path -Parent $PSScriptRoot
 $Script:RuntimeDir = Join-Path $Script:RepoRoot 'runtime'
 $Script:LogDir = Join-Path $Script:RepoRoot 'logs'
 $Script:PidFile = Join-Path $Script:RuntimeDir 'gateway.pid'
-$Script:Exe = Join-Path $Script:RepoRoot 'target\release\lomway.exe'
+$Script:DefaultExe = Join-Path $Script:RepoRoot 'target\release\lomway.exe'
+$Script:BinaryPointer = Join-Path $Script:RuntimeDir 'gateway-binary-path.txt'
+$Script:Exe = $Script:DefaultExe
+if (Test-Path -LiteralPath $Script:BinaryPointer -PathType Leaf) {
+    $selected = (Get-Content -LiteralPath $Script:BinaryPointer -Raw).Trim()
+    $approvedDir = [IO.Path]::GetFullPath((Join-Path $Script:RuntimeDir 'bin'))
+    if (
+        -not [IO.Path]::IsPathRooted($selected) -or
+        -not [IO.Path]::GetFullPath($selected).StartsWith(
+            ($approvedDir + [IO.Path]::DirectorySeparatorChar),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [IO.Path]::GetExtension($selected) -ne '.exe'
+    ) {
+        throw 'Gateway binary pointer is outside runtime/bin or malformed.'
+    }
+    $Script:Exe = [IO.Path]::GetFullPath($selected)
+}
 
 function Get-GatewayPid {
     if (-not (Test-Path -LiteralPath $Script:PidFile -PathType Leaf)) { return $null }

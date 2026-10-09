@@ -163,11 +163,17 @@ audienceは `https://mcp.maiteneru.com/mcp`、scopeは `devspace`、
 期限前に必要なら再発行します。
 
 PAT対応Gatewayの本番反映は、Windows端末でリポジトリから
-`pwsh -NoProfile -File scripts/deploy-pat-gateway.ps1` を実行します。
-実行時はSwiboのLomway targetを短時間停止します。前版のGateway実行ファイルを
-`runtime/lomway-pre-pat-gateway.exe` に保管し、ヘルスチェック失敗時に
-復元します。進捗・結果は `runtime/pat-deployment.json` で確認してください。
-**`phase=success` を確認するまではPATを発行しないでください。**
+`pwsh -NoProfile -File scripts/deploy-gateway-isolated.ps1 -PreflightOnly`
+で事前検証後、
+`pwsh -NoProfile -File scripts/deploy-gateway-isolated.ps1` を実行します。
+`scripts/deploy-pat-gateway.ps1` も同じ安全な実装に委譲します。
+事前に独立したWorkbridge管理経路（7680）とGateway/OAuth/公開Issuerの健全性を検証します。
+Gatewayだけを短時間停止して、`runtime/bin/lomway-gateway-<sha256>.exe` という
+独立した不変のバイナリへ切り替えます。デスクトップ用17778と共有している
+`target/release/lomway.exe` は上書きせず、デスクトップ用プロセスも停止しません。
+起動先は `runtime/gateway-binary-path.txt` で指定し、失敗時は元の起動先に戻して
+Gatewayを再起動します。結果は `runtime/pat-deployment.json` に保存します。
+**`phase=success` とPAT権限制御のlive検証を確認するまでPATは発行しないでください。**
 
 ## 11. OAuth sidecar cutover（offline準備済み・live gateあり）
 

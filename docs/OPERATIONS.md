@@ -162,11 +162,18 @@ is 90 days. Only SHA-256 digests and metadata are persisted in
 Revocation takes effect on the next introspection, not during in-flight
 requests. PATs do not have refresh tokens and must be reissued at expiry.
 
-To deploy the PAT-aware Gateway, run
-`pwsh -NoProfile -File scripts/deploy-pat-gateway.ps1` locally on Windows.
-This briefly stops the Swibo Lomway target, retains the previous binary as
-`runtime/lomway-pre-pat-gateway.exe`, and rolls back if readiness fails.
-Check `runtime/pat-deployment.json` for `phase=success` before issuing a PAT.
+To deploy the PAT-aware Gateway, first run
+`pwsh -NoProfile -File scripts/deploy-gateway-isolated.ps1 -PreflightOnly`,
+then run `pwsh -NoProfile -File scripts/deploy-gateway-isolated.ps1`
+on Windows via an independent management plane. The legacy
+`deploy-pat-gateway.ps1` entrypoint delegates to the new implementation.
+Only the Gateway process is stopped: desktop-local (port 17778), OAuth,
+Swibo, and Tunnel stay running. The new Gateway executable is immutable and
+versioned under `runtime/bin`; the shared `target/release/lomway.exe` is
+never overwritten. A pointer in `runtime/gateway-binary-path.txt` selects
+the executable, and rollback restores the previous pointer and restarts the
+Gateway. Confirm `runtime/pat-deployment.json` is `phase=success`, then
+perform a live PAT authorization test before issuing an external credential.
 
 ## 11. OAuth sidecar cutover (offline-prepared, live-gated)
 
