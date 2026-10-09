@@ -794,7 +794,8 @@ mod tests {
         let full_sse = "data: {\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"safe_status\"},{\"name\":\"dangerous_mutation\"},{\"name\":\"proxy/config\"}]}}\n\n";
         let full_response = Response::builder()
             .header(header::CONTENT_TYPE, "text/event-stream")
-            .body(Body::from(full_sse)).expect("response");
+            .body(Body::from(full_sse))
+            .expect("response");
         let full = filter_pat_tools_list(full_response, &["*".into()]).await;
         assert_eq!(full.status(), StatusCode::OK);
         let full_bytes = to_bytes(full.into_body(), 4096).await.expect("body");
@@ -802,9 +803,13 @@ mod tests {
         assert!(full_text.contains("safe_status"));
         assert!(full_text.contains("dangerous_mutation"));
         assert!(!full_text.contains("proxy/config"));
-        assert!(!permitted_pat_call("lomway_call_tool", &json!({
-            "params":{"name":"lomway_call_tool","arguments":{"name":"proxy/config"}}
-        }), &["*".into()]));
+        assert!(!permitted_pat_call(
+            "lomway_call_tool",
+            &json!({
+                "params":{"name":"lomway_call_tool","arguments":{"name":"proxy/config"}}
+            }),
+            &["*".into()]
+        ));
         let unknown = Response::builder()
             .header(header::CONTENT_TYPE, "text/plain")
             .body(Body::from("unfiltered catalog"))
