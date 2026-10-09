@@ -207,6 +207,34 @@ OAuth lifetime policy:
 
 Security hardening:
 
+- Public DCR POST requests are limited to 20 per rolling minute per Sidecar
+  process. The persistent adapter also caps all clients at 128; registrations
+  never approved within 48 hours are pruned on a later registration if no
+  active authorization refers to them. Historic clients without a registration
+  timestamp are preserved rather than guessed about.
+- New OAuth clients are restricted to `lomway_search_tools` and
+  `lomway_describe_tool`. Unlike scoped PATs, existing OAuth clients need
+  a one-time compatibility snapshot before the upgraded Gateway is deployed:
+  `pwsh -NoProfile -File scripts/provision-legacy-oauth-clients.ps1 -VerifyOnly`,
+  followed by the same command without `-VerifyOnly`. The owner-only
+  `%LOCALAPPDATA%/Lomway/oauth-sidecar/runtime/client-tool-policy.json`
+  stores only SHA-256 client IDs. Existing clients with active grants are
+  preserved; new clients are never auto-exempted. Operators can replace the
+  legacy exemption for a specific hashed client ID with an exact
+  `clientToolAllowlists` entry.
+- Roll out the updated Sidecar first using
+  `scripts/deploy-oauth-csp.ps1 -Hardening` only after staging the prior
+  `server.js` as `runtime/oauth-rollback/server.pre-004.js`, then deploy
+  the immutable Gateway executable via
+  `scripts/deploy-gateway-isolated.ps1`. Preserve independent Workbridge
+  recovery throughout; these operations are not all-service restarts.
+- Gateway logs structured authorization decisions with pseudonymous actor
+  digests and sanitized tool names; bearer credentials and arguments are
+  never logged. Per-client policies apply to both direct and deferred calls.
+- The serialized adapter sweeps expired short-lived tokens, interactions and
+  replay markers only after a 5-minute grace period. Refresh replay tokens,
+  grants and grant-revocation tombstones are not swept. Revoked/expired PAT
+  records are reclaimed when issuing the next credential.
 - Owner login validates the interaction before async password verification and applies a uid-independent, owner-wide rate limit.
 - Login and consent are distinct steps; consent displays client ID, unverified name, redirect URI and scopes, requiring explicit approval.
 - Chromium can block the OAuth redirect chain if the interaction form has

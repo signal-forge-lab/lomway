@@ -132,6 +132,12 @@ export async function issuePat(
     throw new Error("explicit, unique permitted tool names are required");
   }
   return lockedUpdate(path, async (store) => {
+    // Revoke/expiry makes a credential unusable. Reclaim capacity on issue,
+    // rather than letting repeated one-time probes exhaust the store.
+    const current = Math.floor(Date.now() / 1000);
+    store.tokens = store.tokens.filter(
+      (record) => record.revokedAt === undefined && record.expiresAt > current,
+    );
     if (store.tokens.length >= MAX_RECORDS) throw new Error("PAT store is full");
     const token = PAT_PREFIX + randomBytes(32).toString("base64url");
     const now = Math.floor(Date.now() / 1000);

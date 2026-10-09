@@ -205,6 +205,24 @@ OAuth lifetime policy:
 
 認証の安全対策:
 
+- 公開DCR POSTはSidecarプロセス全体で60秒20回までとし、永続Client登録数は
+  128件までに制限します。未承認・未参照の新規Clientは48時間経過後の次の登録で
+  整理します。作成時刻の不明な旧Clientは推測で消去しません。
+- 新規OAuthクライアントは `lomway_search_tools` と
+  `lomway_describe_tool` のみ許可します。既存の承認済みClientを維持する
+  ため、Gateway更新前に `scripts/provision-legacy-oauth-clients.ps1` を
+  `-VerifyOnly`、次に通常モードで一度だけ実行します。
+  `client-tool-policy.json` はGit外の所有者専用ランタイムにSHA-256の
+  Client IDだけを保存します。新規Clientを自動的に旧Client扱いにはしません。
+- 旧Sidecar実装を `runtime/oauth-rollback/server.pre-004.js` に保存してから
+  `scripts/deploy-oauth-csp.ps1 -Hardening` でOAuthのみ再起動します。
+  その後、独立したWorkbridge経路を保持したまま
+  `scripts/deploy-gateway-isolated.ps1` で不変のGatewayバイナリへ切り替えます。
+- Gatewayは認証主体のハッシュ・メソッド・ツール・許可/拒否を構造化監査します。
+  トークン本文、ツール引数、平文client_idは記録しません。
+- 期限切れの一時的レコードを5分の猶予後に清掃します。refresh再利用検知に
+  必要なGrant、RefreshToken、失効マーカーは削除しません。
+  失効・期限切れPATは次のPAT発行時に整理します。
 - interactionを確認してから非同期でパスワードを検証し、uidに依存しない所有者単位の試行回数制限を適用します。
 - ログインと同意を分離し、client ID・未検証の名称・redirect URI・scopeを表示して明示承認を求めます。
 - OAuthのPOST後にChromiumが登録済みredirect URIへの移動を遮断しないよう、

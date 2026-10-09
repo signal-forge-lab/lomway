@@ -24,6 +24,12 @@ const operationQueues = new Map<string, Promise<void>>();
 // The opaque jti is a bearer credential for these models. Never persist it
 // as a JSON key or inside a JSON value, including migrated legacy records.
 const sensitiveModels = new Set(["AccessToken", "RefreshToken", "AuthorizationCode"]);
+const CLIENT_LIMIT = 128;
+const UNAPPROVED_CLIENT_TTL_SECONDS = 48 * 60 * 60;
+const SWEEPABLE_MODELS = new Set([
+  "AccessToken", "AuthorizationCode", "Interaction", "ReplayDetection", "Session",
+]);
+const GC_GRACE_SECONDS = 5 * 60;
 
 function storedKey(model: string, id: string): string {
   return sensitiveModels.has(model)
@@ -78,6 +84,16 @@ export function createPersistentAdapter(statePath: string): (modelName: string) 
     async upsert(id, payload, expiresIn) {
       await enqueue(statePath, async () => {
         const state = await readState(statePath);
+        if (modelName === "Client") {
+          pruneUnapprovedClients(state);
+          const clients = modelBucket(state, "Client");
+          if (clients[id] === undefined && Object.keys(clients).length >= CLIENT_LIMIT) {
+            throw new Error("dynamic client registration capacity reached");
+          }
+          if (clients[id] === undefined) {
+            modelBucket(state, "LomwayClientRegistered")[id] = { createdAt: nowSeconds() };
+          }
+        }
         // A racing refresh must not resurrect a revoked grant family.
         const grantId = payload.grantId;
         if (
@@ -144,6 +160,7 @@ export function createPersistentAdapter(statePath: string): (modelName: string) 
       await enqueue(statePath, async () => {
         const state = await readState(statePath);
         if (deleteRecord(state, modelName, storedKey(modelName, id))) {
+          if (modelName === "Client") deleteRecord(state, "LomwayClientRegistered", id);
           await writeState(statePath, state);
         }
       });
@@ -246,6 +263,50 @@ function extendGrantThroughRefreshToken(
   }
 }
 
+function pruneUnapprovedClients(state: StateFile): void {
+  const clients = state.records.Client;
+  const registrations = state.records.LomwayClientRegistered;
+  if (!clients || !registrations) return;
+  const hasGrant = new Set(
+    Object.values(state.records.Grant ?? {})
+      .map((grant) => grant.clientId)
+      .filter((id): id is string => typeof id === "string"),
+  );
+  const now = nowSeconds();
+  for (const [id, metadata] of Object.entries(registrations)) {
+    if (typeof metadata.createdAt !== "number" ||
+        metadata.createdAt + UNAPPROVED_CLIENT_TTL_SECONDS > now ||
+        hasGrant.has(id)) continue;
+    // Keep clients with live in-flight authorization or tokens.
+    const referenced = ["Interaction", "AuthorizationCode", "RefreshToken", "AccessToken"]
+      .some((model) => Object.values(state.records[model] ?? {})
+        .some((item) => item.clientId === id && !isExpired(item)));
+    if (referenced) continue;
+    delete clients[id];
+    delete registrations[id];
+  }
+  if (Object.keys(registrations).length === 0) delete state.records.LomwayClientRegistered;
+  if (Object.keys(clients).length === 0) delete state.records.Client;
+}
+
+function sweepExpiredStatelessRecords(state: StateFile): boolean {
+  const threshold = nowSeconds() - GC_GRACE_SECONDS;
+  let changed = false;
+  // RefreshToken, Grant and revocation tombstones are intentionally excluded.
+  for (const model of SWEEPABLE_MODELS) {
+    const bucket = state.records[model];
+    if (!bucket) continue;
+    for (const [id, record] of Object.entries(bucket)) {
+      if (typeof record.exp === "number" && record.exp <= threshold) {
+        delete bucket[id];
+        changed = true;
+      }
+    }
+    if (Object.keys(bucket).length === 0) delete state.records[model];
+  }
+  return changed;
+}
+
 async function findFirstInModel(
   statePath: string,
   modelName: string,
@@ -295,6 +356,7 @@ async function readState(statePath: string): Promise<StateFile> {
       migrated = true;
     }
   }
+  if (sweepExpiredStatelessRecords(state)) migrated = true;
   if (migrated) await writeState(statePath, state);
   return state;
 }

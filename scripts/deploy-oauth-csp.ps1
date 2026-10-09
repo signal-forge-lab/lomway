@@ -1,14 +1,22 @@
 [CmdletBinding()]
-param()
+param([switch]$Hardening)
 
 # Controlled, OAuth-only cutover. Workbridge management must not share this
 # process, and the old build must be staged before any restart is attempted.
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $runtime = Join-Path $repo 'runtime'
-$rollbackJs = Join-Path $runtime 'oauth-rollback\server.pre-csp.js'
+$rollbackJs = if ($Hardening) {
+    Join-Path $runtime 'oauth-rollback\server.pre-004.js'
+} else {
+    Join-Path $runtime 'oauth-rollback\server.pre-csp.js'
+}
 $activeJs = Join-Path $repo 'sidecar\dist\src\server.js'
-$result = Join-Path $runtime 'oauth-csp-deployment.json'
+$result = if ($Hardening) {
+    Join-Path $runtime 'oauth-hardening-deployment.json'
+} else {
+    Join-Path $runtime 'oauth-csp-deployment.json'
+}
 $restartUrl = 'http://127.0.0.1:17991/api/targets/lomway/components/oauth/restart'
 $started = $false
 
@@ -49,7 +57,24 @@ if (-not (Test-Path -LiteralPath $rollbackJs -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $activeJs -PathType Leaf)) {
     throw 'New Sidecar JavaScript is missing.'
 }
-if (-not ((Get-Content -LiteralPath $rollbackJs -Raw).Contains("form-action 'self';"))) {
+if ($Hardening) {
+    if (-not ((Get-Content -LiteralPath $rollbackJs -Raw).Contains('approvedRedirectOrigin')) -or
+        ((Get-Content -LiteralPath $rollbackJs -Raw).Contains('loadClientToolPolicy'))) {
+        throw 'Rollback JS is not the reviewed pre-hardening build.'
+    }
+    $policyFile = Join-Path $env:LOCALAPPDATA 'Lomway\oauth-sidecar\runtime\client-tool-policy.json'
+    if (!(Test-Path -LiteralPath $policyFile -PathType Leaf)) {
+        throw 'Legacy client compatibility policy missing. Refusing cutover.'
+    }
+    $policy = Get-Content -LiteralPath $policyFile -Raw | ConvertFrom-Json
+    if ($policy.version -ne 1 -or @($policy.unrestrictedLegacyClientHashes).Count -lt 1) {
+        throw 'Legacy client policy was not provisioned.'
+    }
+    & (Join-Path $PSScriptRoot 'private-oauth-state-acl.ps1') -RuntimeDirectory (Split-Path $policyFile) -VerifyOnly | Out-Null
+    if (-not ((Get-Content -LiteralPath $activeJs -Raw).Contains('loadClientToolPolicy'))) {
+        throw 'New Sidecar build lacks client authorization support.'
+    }
+} elseif (-not ((Get-Content -LiteralPath $rollbackJs -Raw).Contains("form-action 'self';"))) {
     throw 'Rollback JS is not the expected pre-fix build.'
 }
 if (-not ((Get-Content -LiteralPath $activeJs -Raw).Contains('approvedRedirectOrigin'))) {
@@ -77,8 +102,8 @@ try {
     Record 'restarting' 'Restart only OAuth component; Gateway and desktop local remain untouched'
     $null = Invoke-RestMethod -Method Post -Uri $restartUrl -TimeoutSec 45
     if (-not (AwaitReady $old.pid)) { throw 'New Sidecar did not pass public/local readiness' }
-    Record 'success' 'Chromium-tested CSP fix is active; public OAuth and MCP healthy'
-    Write-Output 'OAUTH_CSP_LIVE_DEPLOYMENT_PASS'
+    Record 'success' 'Reviewed Sidecar is active; public OAuth and MCP healthy'
+    Write-Output 'OAUTH_SIDECAR_LIVE_DEPLOYMENT_PASS'
 } catch {
     $reason = $_.Exception.Message
     if ($started) {

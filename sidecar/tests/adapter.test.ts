@@ -197,3 +197,61 @@ test("findByUserCode and findByUid use their model namespace", async () => {
     assert.equal(await sessions.findByUid("user-code"), undefined);
   });
 });
+
+test("DCR client registration is capped and does not evict existing clients", async () => {
+  await withStateFile(async (statePath) => {
+    const clients = createPersistentAdapter(statePath)("Client");
+    for (let index = 0; index < 128; index++) {
+      await clients.upsert("client-" + index, { kind: "Client" });
+    }
+    await assert.rejects(
+      clients.upsert("client-over-limit", { kind: "Client" }),
+      /registration capacity reached/,
+    );
+    assert.ok(await clients.find("client-0"));
+    // Updating existing metadata does not consume a registration slot.
+    await clients.upsert("client-0", { kind: "Client", clientName: "existing" });
+    assert.equal((await clients.find("client-0"))?.clientName, "existing");
+  });
+});
+
+test("expired never-approved DCR clients are reclaimed without deleting approved clients", async () => {
+  await withStateFile(async (statePath) => {
+    const clients = createPersistentAdapter(statePath)("Client");
+    const grants = createPersistentAdapter(statePath)("Grant");
+    await clients.upsert("unapproved", { kind: "Client" });
+    await clients.upsert("approved", { kind: "Client" });
+    await grants.upsert("grant", { kind: "Grant", clientId: "approved" }, 3600);
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    for (const record of Object.values(state.records.LomwayClientRegistered) as Array<{createdAt: number}>) {
+      record.createdAt -= 49 * 3600;
+    }
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(statePath, JSON.stringify(state));
+    await clients.upsert("new", { kind: "Client" });
+    assert.equal(await clients.find("unapproved"), undefined);
+    assert.ok(await clients.find("approved"));
+    assert.ok(await clients.find("new"));
+  });
+});
+
+test("GC prunes only safe expired records and retains refresh replay evidence", async () => {
+  await withStateFile(async (statePath) => {
+    const factory = createPersistentAdapter(statePath);
+    await factory("AccessToken").upsert("expired-at", { kind: "AccessToken" }, -600);
+    await factory("AuthorizationCode").upsert("expired-code", { kind: "AuthorizationCode" }, -600);
+    await factory("ReplayDetection").upsert("expired-replay", { kind: "ReplayDetection" }, -600);
+    await factory("Grant").upsert("grant", { kind: "Grant" }, 3600);
+    await factory("RefreshToken").upsert(
+      "consumed-refresh", { kind: "RefreshToken", grantId: "grant", consumed: 12345 }, -600,
+    );
+    // Any adapter read triggers the bounded sweep.
+    await factory("Client").find("missing");
+    const data = JSON.parse(await readFile(statePath, "utf8"));
+    assert.equal(data.records.AccessToken, undefined);
+    assert.equal(data.records.AuthorizationCode, undefined);
+    assert.equal(data.records.ReplayDetection, undefined);
+    assert.equal(Object.keys(data.records.RefreshToken).length, 1);
+    assert.equal(Object.keys(data.records.Grant).length, 1);
+  });
+});

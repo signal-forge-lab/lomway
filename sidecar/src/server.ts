@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type Provider from "oidc-provider";
 
+import { loadClientToolPolicy } from "./client-tools.js";
 import { loadConfig, type SidecarConfig } from "./config.js";
 import { PAT_PREFIX, patStorePath, verifyPat } from "./pat.js";
 import { createLomwayProvider } from "./provider.js";
@@ -12,6 +13,8 @@ import { hashOwnerPassword, verifyOwnerPassword } from "./security.js";
 const MAX_FORM_BYTES = 4096;
 const FAILURE_LIMIT = 5;
 const FAILURE_WINDOW_MS = 60_000;
+const REGISTRATION_LIMIT = 20;
+const REGISTRATION_WINDOW_MS = 60_000;
 
 interface ConsentDetails {
   missingOIDCScope?: string[];
@@ -29,6 +32,7 @@ export function createLomwaySidecar(config: SidecarConfig): {
   const ownerPassword = hashOwnerPassword(config.ownerCredential);
   // One owner account: bound all login attempts together, not by attacker-supplied uid.
   let loginFailures: number[] = [];
+  let registrations: number[] = [];
   const providerCallback = provider.callback();
   const server = createServer((request, response) => {
     void handleRequest(request, response).catch(() => {
@@ -47,6 +51,20 @@ export function createLomwaySidecar(config: SidecarConfig): {
       response.statusCode = 200;
       response.end();
       return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/reg") {
+      const now = Date.now();
+      registrations = registrations.filter((time) => now - time < REGISTRATION_WINDOW_MS);
+      if (registrations.length >= REGISTRATION_LIMIT) {
+        response.statusCode = 429;
+        response.setHeader("retry-after", "60");
+        response.setHeader("cache-control", "no-store");
+        response.end();
+        request.resume();
+        return;
+      }
+      registrations.push(now);
     }
 
     if (url.pathname === "/oauth/introspect") {
@@ -118,6 +136,13 @@ export function createLomwaySidecar(config: SidecarConfig): {
         }
       }
 
+      if (typeof token.clientId !== "string" || token.clientId.length === 0) {
+        response.statusCode = 200;
+        response.end(JSON.stringify({ active: false }));
+        return;
+      }
+      const clientPolicy = await loadClientToolPolicy(config.runtimeDir, token.clientId);
+
       response.statusCode = 200;
       response.setHeader("content-type", "application/json; charset=utf-8");
       response.end(
@@ -130,6 +155,8 @@ export function createLomwaySidecar(config: SidecarConfig): {
           aud: token.aud,
           scope: token.scope,
           token_type: token.tokenType,
+          oauth_unrestricted_legacy: clientPolicy.unrestrictedLegacy,
+          allowed_tools: clientPolicy.allowedTools,
         }),
       );
       return;

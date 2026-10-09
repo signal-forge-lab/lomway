@@ -11,6 +11,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::config::model::NorthboundOAuthConfig;
 
@@ -26,6 +27,8 @@ struct OAuthState {
 struct IntrospectionResponse {
     active: bool,
     #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
     aud: Option<Value>,
     #[serde(default)]
     scope: Option<String>,
@@ -33,6 +36,8 @@ struct IntrospectionResponse {
     exp: Option<u64>,
     #[serde(default)]
     pat: bool,
+    #[serde(default)]
+    oauth_unrestricted_legacy: bool,
     #[serde(default)]
     allowed_tools: Vec<String>,
 }
@@ -102,15 +107,52 @@ async fn require_oauth(State(state): State<OAuthState>, request: Request, next: 
     if !token_has_required_scope(&state, &introspection) {
         return insufficient_scope(&state);
     }
-    if introspection.pat {
-        return restricted_pat_request(request, next, &introspection.allowed_tools).await;
+    let Some(client_id) = introspection.client_id.as_deref() else {
+        return unauthorized(&state);
+    };
+    let actor = format!("{:x}", Sha256::digest(client_id.as_bytes()));
+    let actor = &actor[..16];
+    if introspection.pat || !introspection.oauth_unrestricted_legacy {
+        return restricted_pat_request(request, next, &introspection.allowed_tools, actor).await;
     }
-    next.run(request).await
+    unrestricted_audited_request(request, next, actor).await
+}
+
+async fn unrestricted_audited_request(request: Request, next: Next, actor: &str) -> Response {
+    // Audit tool names, never token values or request arguments.
+    let (parts, body) = request.into_parts();
+    let Ok(bytes) = to_bytes(body, 1_048_576).await else {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    };
+    let message = serde_json::from_slice::<Value>(&bytes).ok();
+    let method = message
+        .as_ref()
+        .and_then(|v| v.get("method"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let method = audit_field(method);
+    let tool = message
+        .as_ref()
+        .and_then(|v| v.pointer("/params/name"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let tool = audit_field(tool);
+    let response = next
+        .run(Request::from_parts(parts, Body::from(bytes)))
+        .await;
+    tracing::info!(actor, method, tool, decision="legacy_allow",
+        http_status=%response.status(), "mcp authorization audit");
+    response
 }
 
 /// PATs do not inherit the OAuth owner's unrestricted capability catalog.
 /// The MCP request and tools/list response are both enforced, including SSE.
-async fn restricted_pat_request(request: Request, next: Next, allowed: &[String]) -> Response {
+async fn restricted_pat_request(
+    request: Request,
+    next: Next,
+    allowed: &[String],
+    actor: &str,
+) -> Response {
     if request.method() != Method::POST {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
@@ -126,26 +168,58 @@ async fn restricted_pat_request(request: Request, next: Next, allowed: &[String]
         // Batch JSON-RPC and opaque calls are deliberately denied.
         return StatusCode::FORBIDDEN.into_response();
     };
+    let tool = message
+        .pointer("/params/name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let tool = audit_field(tool);
+    let deferred_target = audit_field(
+        message
+            .pointer("/params/arguments/name")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
     let should_filter = match method {
         "initialize" | "ping" | "notifications/initialized" | "notifications/cancelled" => false,
         "tools/list" => true,
         "tools/call" => {
             let name = message.pointer("/params/name").and_then(Value::as_str);
             if !name.is_some_and(|name| permitted_pat_call(name, &message, allowed)) {
+                tracing::info!(
+                    actor,
+                    method = audit_field(method),
+                    tool,
+                    deferred_target,
+                    decision = "deny",
+                    "mcp authorization audit"
+                );
                 return StatusCode::FORBIDDEN.into_response();
             }
             false
         }
-        _ => return StatusCode::FORBIDDEN.into_response(),
+        _ => {
+            tracing::info!(
+                actor,
+                method = audit_field(method),
+                tool,
+                deferred_target,
+                decision = "deny",
+                "mcp authorization audit"
+            );
+            return StatusCode::FORBIDDEN.into_response();
+        }
     };
     let response = next
         .run(Request::from_parts(parts, Body::from(bytes)))
         .await;
-    if should_filter {
+    let response = if should_filter {
         filter_pat_tools_list(response, allowed).await
     } else {
         response
-    }
+    };
+    tracing::info!(actor, method = audit_field(method), tool, deferred_target, decision="restricted",
+        http_status=%response.status(), "mcp authorization audit");
+    response
 }
 
 fn permitted_pat_call(name: &str, message: &Value, allowed: &[String]) -> bool {
@@ -163,6 +237,18 @@ fn permitted_pat_call(name: &str, message: &Value, allowed: &[String]) -> bool {
             });
     }
     true
+}
+
+fn audit_field(value: &str) -> &str {
+    if value.len() <= 128
+        && value
+            .bytes()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'-' | b'.' | b':' | b'/'))
+    {
+        value
+    } else {
+        "[redacted]"
+    }
 }
 
 fn restrict_tool_catalog(message: &mut Value, allowed: &[String]) -> bool {
@@ -330,7 +416,17 @@ mod tests {
                             "active": true,
                             "aud": resource,
                             "scope": "devspace",
-                            "exp": now + 3600
+                            "exp": now + 3600,
+                            "client_id": "legacy-client",
+                            "oauth_unrestricted_legacy": true
+                        }),
+                        Some("oauth-limited") => json!({
+                            "active": true,
+                            "aud": resource,
+                            "scope": "devspace",
+                            "exp": now + 3600,
+                            "client_id": "new-client",
+                            "allowed_tools": ["safe_status"]
                         }),
                         Some("pat") => json!({
                             "active": true,
@@ -338,24 +434,28 @@ mod tests {
                             "scope": "devspace",
                             "exp": now + 3600,
                             "pat": true,
+                            "client_id": "pat:synthetic",
                             "allowed_tools": ["safe_status", "lomway_call_tool"]
                         }),
                         Some("wrong-aud") => json!({
                             "active": true,
                             "aud": "https://other.example/mcp",
                             "scope": "devspace",
+                            "client_id": "wrong-client",
                             "exp": now + 3600
                         }),
                         Some("wrong-scope") => json!({
                             "active": true,
                             "aud": resource,
                             "scope": "other",
+                            "client_id": "wrong-client",
                             "exp": now + 3600
                         }),
                         Some("expired") => json!({
                             "active": true,
                             "aud": resource,
                             "scope": "devspace",
+                            "client_id": "expired-client",
                             "exp": now.saturating_sub(1)
                         }),
                         _ => json!({ "active": false }),
@@ -566,6 +666,44 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
         assert_eq!(names, vec!["safe_status", "lomway_call_tool"]);
+
+        // OAuth is not automatically unrestricted: a new DCR client sees
+        // only the tools authorized by its explicit client policy.
+        let oauth_tools: Value = client
+            .post(&base)
+            .bearer_auth("oauth-limited")
+            .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))
+            .send()
+            .await
+            .expect("limited OAuth list")
+            .json()
+            .await
+            .expect("json");
+        let oauth_names: Vec<&str> = oauth_tools["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(oauth_names, vec!["safe_status"]);
+        let forbidden = client
+            .post(&base)
+            .bearer_auth("oauth-limited")
+            .json(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{"name":"dangerous_mutation"}}))
+            .send()
+            .await
+            .expect("limited OAuth request");
+        assert_eq!(forbidden.status(), reqwest::StatusCode::FORBIDDEN);
+        let allowed = client
+            .post(&base)
+            .bearer_auth("oauth-limited")
+            .json(&json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+                "params":{"name":"safe_status"}}))
+            .send()
+            .await
+            .expect("limited OAuth request");
+        assert_eq!(allowed.status(), reqwest::StatusCode::OK);
     }
 
     #[tokio::test]

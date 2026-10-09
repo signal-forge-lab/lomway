@@ -114,11 +114,39 @@ test("serves loopback RFC 7662 introspection without client authentication", asy
     assert.equal(activeBody.aud, config.resourceUrl);
     assert.equal(activeBody.client_id, clientId);
     assert.equal(activeBody.scope, "devspace");
+    assert.equal(activeBody.oauth_unrestricted_legacy, false);
+    assert.deepEqual(activeBody.allowed_tools, ["lomway_search_tools", "lomway_describe_tool"]);
 
     await accessToken.destroy();
     const revoked = await introspect(baseUrl, tokenValue);
     assert.equal(revoked.status, 200);
     assert.deepEqual(await revoked.json(), { active: false });
+  });
+});
+
+test("public DCR enforces a server-side global registration burst limit", async () => {
+  await withSidecar(async (baseUrl) => {
+    const metadata = {
+      token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code"],
+      response_types: ["code"],
+      redirect_uris: ["http://127.0.0.1/callback"],
+    };
+    for (let index = 0; index < 20; index++) {
+      const result = await fetch(baseUrl + "/reg", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(metadata),
+      });
+      assert.equal(result.status, 201, "registration " + index);
+    }
+    const blocked = await fetch(baseUrl + "/reg", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(metadata),
+    });
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.headers.get("retry-after"), "60");
   });
 });
 

@@ -50,3 +50,24 @@ test("refuses missing tool restrictions and admin tools", async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("new issuance reclaims revoked probe credentials but keeps active PATs", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "lomway-pat-"));
+  const path = patStorePath(dir);
+  try {
+    const old = await issuePat(path, {
+      label: "temporary", days: 1, audience, allowedTools: ["lomway_search_tools"],
+    });
+    const active = await issuePat(path, {
+      label: "active", days: 7, audience, allowedTools: ["lomway_search_tools"],
+    });
+    assert.equal(await revokePat(path, old.record.id), true);
+    await issuePat(path, {
+      label: "next", days: 1, audience, allowedTools: ["lomway_search_tools"],
+    });
+    assert.equal((await listPats(path)).some((record) => record.id === old.record.id), false);
+    assert.ok(await verifyPat(path, active.token, audience));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
