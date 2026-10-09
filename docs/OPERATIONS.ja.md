@@ -185,6 +185,7 @@ Gatewayを再起動します。結果は `runtime/pat-deployment.json` に保存
 Codex CLIに1ツールだけの一時PATを子プロセスの環境変数で渡し、実際の
 AIツール呼び出しを確認します。期限内にCodexから結果が来なかった場合も
 子プロセスを終了し、PATを必ず失効させます。
+検証前にCodex自身の最小モデル応答を確認し、応答がない場合はPATを発行しません。
 
 ## 11. OAuth sidecar cutover（offline準備済み・live gateあり）
 

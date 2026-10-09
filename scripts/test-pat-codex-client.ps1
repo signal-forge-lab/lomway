@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param([ValidateRange(20,300)][int]$TimeoutSeconds = 90)
+param(
+    [ValidateRange(20,300)][int]$TimeoutSeconds = 90,
+    [ValidateRange(5,60)][int]$ModelPreflightSeconds = 25
+)
 
 # End-to-end external AI test with disposable single-tool PAT.
 # Credentials exist only in a child-process environment variable.
@@ -11,10 +14,50 @@ $tokenId = $null
 $raw = $null
 $allowed = 'praxiom_praxiom_status'
 $child = $null
+$preflight = $null
 try {
     if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
         throw 'Codex CLI unavailable'
     }
+    # Establish that the actual AI responds BEFORE minting any credential.
+    # A logged-in CLI and reachable model endpoint do not guarantee the
+    # model can complete a turn; in that case no PAT should be issued at all.
+    $preflightStart = [System.Diagnostics.ProcessStartInfo]::new()
+    $preflightStart.FileName = (Get-Command codex).Source
+    $preflightStart.WorkingDirectory = $repo
+    $preflightStart.UseShellExecute = $false
+    $preflightStart.RedirectStandardOutput = $true
+    $preflightStart.RedirectStandardError = $true
+    $preflightStart.CreateNoWindow = $true
+    foreach ($arg in @(
+        'exec', '--ignore-user-config', '--ignore-rules', '--ephemeral',
+        '--skip-git-repo-check', '--sandbox', 'read-only', '--json',
+        'Reply exactly MODEL_PREFLIGHT_OK. Do not use tools.'
+    )) { [void]$preflightStart.ArgumentList.Add($arg) }
+    $preflight = [System.Diagnostics.Process]::Start($preflightStart)
+    $preflightStdout = $preflight.StandardOutput.ReadToEndAsync()
+    $preflightStderr = $preflight.StandardError.ReadToEndAsync()
+    if (-not $preflight.WaitForExit($ModelPreflightSeconds * 1000)) {
+        $preflight.Kill($true)
+        $preflight.WaitForExit(5000) | Out-Null
+        throw 'Codex basic model preflight timed out; no PAT was issued'
+    }
+    $preflightText = $preflightStdout.GetAwaiter().GetResult()
+    $null = $preflightStderr.GetAwaiter().GetResult()
+    $preflightConfirmed = $false
+    foreach ($line in ($preflightText -split '\r?\n')) {
+        try { $event = [string]$line | ConvertFrom-Json -Depth 12 } catch { continue }
+        if ($event.type -eq 'item.completed' -and $event.item.type -eq 'agent_message' -and
+            ([string]$event.item.text).Trim() -eq 'MODEL_PREFLIGHT_OK') {
+            $preflightConfirmed = $true
+        }
+    }
+    if ($preflight.ExitCode -ne 0 -or -not $preflightConfirmed) {
+        throw 'Codex basic model preflight failed; no PAT was issued'
+    }
+    $preflightText = $null
+    Write-Output 'CODEX_MODEL_PREFLIGHT_PASS'
+
     $issued = & node.exe $cli issue --label 'disposable-codex-mcp-probe' --days 1 --tools $allowed
     if ($LASTEXITCODE -ne 0) { throw 'PAT issuance failed' }
     $parsed = $issued | ConvertFrom-Json
@@ -80,6 +123,11 @@ try {
     }
     Write-Output 'CODEX_REAL_AI_MCP_TOOL_CALL_PASS'
 } finally {
+    if ($preflight -and -not $preflight.HasExited) {
+        $preflight.Kill($true)
+        $preflight.WaitForExit(5000) | Out-Null
+    }
+    if ($preflight) { $preflight.Dispose() }
     if ($child -and -not $child.HasExited) {
         $child.Kill($true)
         $child.WaitForExit(5000) | Out-Null

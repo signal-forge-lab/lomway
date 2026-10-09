@@ -187,6 +187,8 @@ client using an ephemeral, one-tool bearer PAT. It uses a bounded deadline
 and revokes the temporary PAT even when the model does not respond. This
 test requires a working Codex model session; HTTP checks alone cannot prove
 that an independent AI invoked a tool.
+The script now verifies a successful simple Codex model response *before*
+issuing the PAT, so transient CLI/model failures never create credentials.
 
 ## 11. OAuth sidecar cutover (offline-prepared, live-gated)
 

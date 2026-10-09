@@ -15,3 +15,5 @@
 - [ ] Validate another AI's actual token-based MCP connection (requires user action)
 - [x] Prepare an isolated Codex CLI test with disposable PAT and forced timeout/revocation
 - [ ] Obtain a completed external model tool call; initial Codex CLI attempt was unresponsive and the PAT was revoked
+- [x] Diagnose the Codex CLI model independently of MCP: doctor authentication/connectivity healthy, but basic model turns timed out even with an explicit model
+- [x] Refuse to mint test PAT until the independent Codex model preflight completes; verified no new PAT record was created on timeout
