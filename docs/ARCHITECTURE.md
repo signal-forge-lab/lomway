@@ -60,7 +60,7 @@ The project-owned listener exposes only:
 
 - `POST/GET/DELETE /mcp` as required by Streamable HTTP MCP;
 - `GET /healthz` for liveness;
-- `GET /readyz` for readiness (required backends must be up; optional degradation is reported; the status is recomputed live from backend health).
+- `GET /readyz` for cached direct-backend readiness (updated by the configurable monitor, with no per-request MCP traffic).
 
 It does **not** expose upstream `/admin/*`. Both top-level `/admin/*` and nested `/mcp/admin/*` are rejected with 404, as is every other unrouted path. Therefore no gateway admin secret is required.
 
@@ -99,7 +99,7 @@ src/
                 recovery monitor
 ```
 
-`lib.rs` also runs the backend restart recovery monitor: a loopback port probe plus stability hysteresis decides when an offline or unhealthy backend's transport is replaced, so a recovered backend is re-adopted without a gateway restart.
+`gateway/reconnect.rs` runs an interval-controlled loopback TCP monitor (30 seconds by default), with exponential outage backoff and a ten-minute deferred-idle suspension. Transport errors from real tool calls initiate MCP recovery; the failed tool call is not replayed. The private upstream admin health thread is disabled to avoid redundant pings.
 
 ## 6. Request flow
 
@@ -165,7 +165,7 @@ Swibo owns steps 2 and 3 as one declarative target and keeps backend targets ind
 ## 11. Observability
 
 - `/healthz`: liveness of the gateway process.
-- `/readyz`: readiness, recomputed live from backend health (2 s bound); required-backend failure never reports ready.
+- `/readyz`: cached readiness for direct backends, updated at the monitor cadence; no per-request backend network traffic.
 - structured gateway logs: backend initialization, routing/audit and errors without secret values.
 - Swibo: independent server/tunnel state for the gateway and independent health for each backend.
 - no public/admin metrics API in v1.

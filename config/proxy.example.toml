@@ -2,6 +2,11 @@
 # Runtime implementation should pin and validate the upstream mcp-proxy version.
 # Machine-specific URLs are environment-injected so this file can remain public.
 
+# Shared by both the legacy [proxy] format and the public schema.
+[monitor]
+interval_seconds = 30
+deferred_idle_minutes = 10
+
 [proxy]
 name = "lomway"
 version = "0.1.0"

@@ -60,7 +60,7 @@ project所有listenerが公開するのは以下だけです。
 
 - Streamable HTTP MCP用の `POST/GET/DELETE /mcp`
 - liveness用の `GET /healthz`
-- readiness用の `GET /readyz`（required backendの起動が必須。optionalのdegradeは報告。状態はbackend healthから都度再計算）
+- readiness用の `GET /readyz`（direct backendの監視結果cacheを返す。リクエスト毎のMCP通信なし）
 
 upstream `/admin/*` は公開しません。top-level `/admin/*` と nested `/mcp/admin/*` はどちらも404で、それ以外の未定義経路も404です。このためGateway admin secret自体が不要です。
 
@@ -97,7 +97,10 @@ src/
 `- lib.rs       proxy構成・control-plane除去・backend再起動復旧monitor
 ```
 
-`lib.rs` はbackend再起動復旧monitorも実行します: loopback port probeと安定性ヒステリシスで、offline/unhealthyになったbackendのtransport置換时机を決め、復旧したbackendはGateway再起動なしで再接続されます。
+`gateway/reconnect.rs` は既定30秒のloopback TCP監視、down時の指数backoff、
+deferred backendの10分未使用時の監視停止を実装します。実際のtool callの
+transport errorでも再接続処理を起動しますが、失敗したtool call自体は再送しません。
+upstream管理API用の独立health threadは不要なMCP pingを避けるため無効化しています。
 
 ## 6. Request flow
 
@@ -163,7 +166,7 @@ Swiboでは2と3を1つのdeclarative targetとして管理し、backend target�
 ## 11. Observability
 
 - `/healthz`: Gateway processのliveness。
-- `/readyz`: readiness。backend healthから上限2秒で都度再計算。required backendの障害がreadyを報告することはありません。
+- `/readyz`: direct backendの監視cache。監視間隔に応じて更新され、リクエスト毎のbackend通信はありません。
 - structured gateway logs: backend initialize / route / audit / errorを記録。secret valueは記録しない。
 - Swibo: Gateway server/Tunnelを別checkし、各backendも独立health管理。
 - v1ではpublic/admin metrics APIを持たない。
