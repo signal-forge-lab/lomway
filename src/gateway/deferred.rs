@@ -19,6 +19,7 @@ use tower_mcp::{
 };
 
 use crate::config::model::{BackendExposure, GatewayConfig};
+use crate::gateway::reconnect::MonitorHandle;
 
 const DEFAULT_LIMIT: usize = 8;
 const MAX_LIMIT: usize = 20;
@@ -206,9 +207,14 @@ struct CallInput {
 
 /// Register the safe deferred-discovery backend under the reserved lomway
 /// namespace. Upstream proxy/admin tools remain removed.
-pub(super) async fn register(proxy: &McpProxy, catalog: DeferredCatalog) -> Result<()> {
+pub(super) async fn register(
+    proxy: &McpProxy,
+    catalog: DeferredCatalog,
+    monitor: MonitorHandle,
+) -> Result<()> {
     let search_catalog = catalog.clone();
     let search_proxy = proxy.clone();
+    let search_monitor = monitor.clone();
     let deferred_ids = catalog.backend_ids().join(", ");
     let routing_guidance = catalog
         .routing_guidance()
@@ -221,6 +227,7 @@ pub(super) async fn register(proxy: &McpProxy, catalog: DeferredCatalog) -> Resu
         .handler(move |input: SearchInput| {
             let catalog = search_catalog.clone();
             let proxy = search_proxy.clone();
+            let monitor = search_monitor.clone();
             async move {
                 if input.query.trim().is_empty() {
                     return Err(tower_mcp::Error::tool("search query must not be empty"));
@@ -231,6 +238,15 @@ pub(super) async fn register(proxy: &McpProxy, catalog: DeferredCatalog) -> Resu
                     return Err(tower_mcp::Error::tool(format!(
                         "backend '{backend}' is not configured for deferred exposure"
                     )));
+                }
+                if let Some(backend) = input.backend.as_deref() {
+                    monitor.activate(backend).await.map_err(|e| tower_mcp::Error::tool(e.to_string()))?;
+                } else {
+                    for backend in catalog.backend_ids() {
+                        // Search across all possible deferred sources. An offline
+                        // optional backend must not conceal online ones.
+                        let _ = monitor.activate(&backend).await;
+                    }
                 }
                 let tools = current_deferred_tools(&proxy, &catalog).await?;
                 let results = catalog.search(
@@ -246,6 +262,7 @@ pub(super) async fn register(proxy: &McpProxy, catalog: DeferredCatalog) -> Resu
 
     let describe_catalog = catalog.clone();
     let describe_proxy = proxy.clone();
+    let describe_monitor = monitor.clone();
     let describe = ToolBuilder::new("describe_tool")
         .description(
             "Use after lomway_search_tools, or whenever arguments are uncertain. Return the exact current MCP description and input/output schema for one deferred Lomway tool before invoking it.",
@@ -253,7 +270,11 @@ pub(super) async fn register(proxy: &McpProxy, catalog: DeferredCatalog) -> Resu
         .handler(move |input: DescribeInput| {
             let catalog = describe_catalog.clone();
             let proxy = describe_proxy.clone();
+            let monitor = describe_monitor.clone();
             async move {
+                if let Some(backend) = catalog.backend_for_name(&input.name) {
+                    monitor.activate(&backend.id).await.map_err(|e| tower_mcp::Error::tool(e.to_string()))?;
+                }
                 let tools = current_deferred_tools(&proxy, &catalog).await?;
                 let Some(tool) = tools.iter().find(|tool| tool.public_name == input.name) else {
                     return Err(tower_mcp::Error::tool(format!(
@@ -276,6 +297,7 @@ pub(super) async fn register(proxy: &McpProxy, catalog: DeferredCatalog) -> Resu
 
     let call_catalog = catalog;
     let call_proxy = proxy.clone();
+    let call_monitor = monitor;
     let call = ToolBuilder::new("call_tool")
         .description(
             "Invoke one exact currently available deferred Lomway tool using arguments that match the schema returned by lomway_describe_tool. Normally use after lomway_search_tools and lomway_describe_tool. Direct/control-plane tools are rejected.",
@@ -283,7 +305,12 @@ pub(super) async fn register(proxy: &McpProxy, catalog: DeferredCatalog) -> Resu
         .handler(move |input: CallInput| {
             let catalog = call_catalog.clone();
             let mut proxy = call_proxy.clone();
+            let monitor = call_monitor.clone();
             async move {
+                let backend_id = catalog.backend_for_name(&input.name).map(|b| b.id.clone());
+                if let Some(backend) = backend_id.as_deref() {
+                    monitor.activate(backend).await.map_err(|e| tower_mcp::Error::tool(e.to_string()))?;
+                }
                 let tools = current_deferred_tools(&proxy, &catalog).await?;
                 if !tools.iter().any(|tool| tool.public_name == input.name) {
                     return Err(tower_mcp::Error::tool(format!(
@@ -309,11 +336,23 @@ pub(super) async fn register(proxy: &McpProxy, catalog: DeferredCatalog) -> Resu
                         Ok(_) => Err(tower_mcp::Error::tool(
                             "deferred tool returned an unexpected response type",
                         )),
-                        Err(error) => Err(tower_mcp::Error::tool(error.message)),
+                        Err(error) => {
+                            if (error.message.to_ascii_lowercase().contains("transport")
+                                || error.message.to_ascii_lowercase().contains("session")
+                                || error.message.to_ascii_lowercase().contains("connection"))
+                                && let Some(backend) = backend_id.as_deref()
+                            {
+                                monitor.transport_failure(backend);
+                            }
+                            Err(tower_mcp::Error::tool(error.message))
+                        }
                     },
-                    Err(_) => Err(tower_mcp::Error::tool(
-                        "internal deferred tool dispatch failed",
-                    )),
+                    Err(_) => {
+                        if let Some(backend) = backend_id.as_deref() {
+                            monitor.transport_failure(backend);
+                        }
+                        Err(tower_mcp::Error::tool("internal deferred tool dispatch failed"))
+                    },
                 }
             }
         })

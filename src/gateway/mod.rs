@@ -7,6 +7,7 @@ pub mod policy;
 mod reconnect;
 pub mod router;
 
-pub use build::{Gateway, build_proxy};
+pub use build::{Gateway, build_proxy, build_proxy_with_monitor};
 pub use policy::validate_proxy_policy;
-pub use router::{gateway_router, serve};
+pub use reconnect::MonitorHandle;
+pub use router::{gateway_router, gateway_router_with_monitor, serve};

@@ -57,10 +57,31 @@ pub struct GatewayConfig {
     /// Optional log settings for the gateway process itself.
     #[serde(default)]
     pub observability: ObservabilityConfig,
+    /// Low-overhead backend reconnection monitor.
+    #[serde(default)]
+    pub monitor: MonitorConfig,
     /// Aggregated backends. The public schema permits zero, one, or many
     /// entries; every present entry is fully validated.
     #[serde(default)]
     pub backends: Vec<BackendEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MonitorConfig {
+    /// TCP probe cadence for a healthy active backend.
+    pub interval_seconds: u64,
+    /// Stop monitoring deferred backends after this much inactivity.
+    pub deferred_idle_minutes: u64,
+}
+
+impl Default for MonitorConfig {
+    fn default() -> Self {
+        Self {
+            interval_seconds: 30,
+            deferred_idle_minutes: 10,
+        }
+    }
 }
 
 /// Listener settings.
@@ -260,12 +281,39 @@ url = "http://127.0.0.1:18701/mcp"
     fn schema_version_one_is_supported() {
         let config = parse(MINIMAL).expect("parse minimal");
         assert_eq!(config.schema_version, SCHEMA_VERSION);
+        assert_eq!(config.monitor.interval_seconds, 30);
+        assert_eq!(config.monitor.deferred_idle_minutes, 10);
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 17777);
         assert_eq!(
             config.policy.max_argument_size_bytes,
             MAX_ARGUMENT_SIZE_BYTES
         );
+    }
+
+    #[test]
+    fn monitor_settings_parse_and_reject_unknown_keys() {
+        let config = parse(
+            "schema_version = 1\n[monitor]\ninterval_seconds = 15\ndeferred_idle_minutes = 8\n",
+        )
+        .expect("monitor settings");
+        assert_eq!(config.monitor.interval_seconds, 15);
+        assert_eq!(config.monitor.deferred_idle_minutes, 8);
+        assert!(parse("schema_version = 1\n[monitor]\ninterval_millis = 500\n").is_err());
+    }
+
+    #[test]
+    fn monitor_cadence_is_bounded() {
+        for seconds in [0, 301] {
+            let config = parse(&format!(
+                "schema_version = 1\n[monitor]\ninterval_seconds = {seconds}\n"
+            ))
+            .expect("parse numeric cadence");
+            assert!(crate::config::validate::validate(&config).is_err());
+        }
+        let config =
+            parse("schema_version = 1\n[monitor]\ninterval_seconds = 15\n").expect("valid monitor");
+        crate::config::validate::validate(&config).expect("accepted cadence");
     }
 
     #[test]

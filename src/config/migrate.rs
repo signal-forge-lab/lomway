@@ -16,7 +16,8 @@ use mcp_proxy::config::{
 
 use crate::DEFAULT_SERVER_NAME;
 use crate::config::model::{
-    BackendEntry, BackendExposure, GatewayConfig, ObservabilityConfig, PolicyConfig, ServerConfig,
+    BackendEntry, BackendExposure, GatewayConfig, MonitorConfig, ObservabilityConfig, PolicyConfig,
+    ServerConfig,
 };
 use crate::config::validate::{self, MAX_ARGUMENT_SIZE_BYTES, SCHEMA_VERSION};
 use crate::namespace::NAMESPACE_SEPARATOR;
@@ -89,6 +90,7 @@ pub fn to_public(legacy: &ProxyConfig) -> Result<GatewayConfig> {
             log_level: legacy.observability.log_level.clone(),
             json_logs: legacy.observability.json_logs,
         },
+        monitor: MonitorConfig::default(),
         backends,
     })
 }

@@ -15,8 +15,9 @@ use axum::{
     serve,
 };
 use lomway::config::migrate::to_legacy;
-use lomway::config::model::GatewayConfig;
+use lomway::config::model::{GatewayConfig, MonitorConfig};
 use lomway::gateway::Gateway;
+use lomway::gateway::{build_proxy_with_monitor, gateway_router_with_monitor};
 use lomway::{build_proxy, gateway_router};
 use mcp_proxy::ProxyConfig;
 use schemars::JsonSchema;
@@ -272,13 +273,21 @@ async fn spawn_gateway_router(
     let path = dir.path().join("proxy.toml");
     fs::write(&path, config_text).expect("write gateway config");
     let config = ProxyConfig::load(&path).expect("load gateway config");
-    let proxy = build_proxy(config).await.expect("build gateway proxy");
+    let (proxy, monitor) = build_proxy_with_monitor(
+        config,
+        MonitorConfig {
+            interval_seconds: 1,
+            deferred_idle_minutes: 10,
+        },
+    )
+    .await
+    .expect("build gateway proxy");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind gateway listener");
     let addr = listener.local_addr().expect("gateway address");
     let task = tokio::spawn(async move {
-        serve(listener, gateway_router(proxy))
+        serve(listener, gateway_router_with_monitor(proxy, monitor))
             .await
             .expect("serve gateway router");
     });
@@ -1134,6 +1143,55 @@ max_argument_size = 1048576
 
     gateway_task.abort();
     restarted_backend_task.abort();
+}
+
+#[tokio::test]
+async fn readyz_reads_cached_status_without_polling_mcp_backend() {
+    let requests = Arc::new(AtomicUsize::new(0));
+    let calls = requests.clone();
+    let tool = ToolBuilder::new("status")
+        .handler(|_: StatusInput| async move { Ok(CallToolResult::text("healthy")) })
+        .build();
+    let app = HttpTransport::new(McpRouter::new().server_info("cache-test", "1.0").tool(tool))
+        .into_router_at("/mcp")
+        .layer(middleware::from_fn(move |request: Request, next: Next| {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                next.run(request).await
+            }
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("backend port");
+    let addr = listener.local_addr().expect("backend address");
+    let backend_task = tokio::spawn(async move {
+        serve(listener, app).await.expect("backend server");
+    });
+    let config = format!(
+        "[proxy]\nname = \"lomway\"\nversion = \"0.1.0\"\nseparator = \"_\"\ntool_exposure = \"direct\"\n[proxy.listen]\nhost = \"127.0.0.1\"\nport = 17777\n[[backends]]\nname = \"direct\"\ntransport = \"http\"\nurl = \"http://{addr}/mcp\"\n[security]\nmax_argument_size = 1048576\n"
+    );
+    let (gateway_addr, gateway_task, _dir) = spawn_gateway_router(config).await;
+    let client = reqwest::Client::new();
+    let initial = requests.load(Ordering::SeqCst);
+    for _ in 0..30 {
+        assert_eq!(
+            client
+                .get(format!("http://{gateway_addr}/readyz"))
+                .send()
+                .await
+                .expect("ready response")
+                .status(),
+            reqwest::StatusCode::OK
+        );
+    }
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        initial,
+        "/readyz must not create any MCP request"
+    );
+    gateway_task.abort();
+    backend_task.abort();
 }
 
 // ---------------------------------------------------------------------------

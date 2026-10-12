@@ -63,7 +63,16 @@ pub fn load_gateway_config_with_format(path: &Path) -> Result<(ConfigFormat, Gat
             })?;
             resolve_legacy_env(&mut legacy)?;
             validate_proxy_policy(&legacy)?;
-            Ok((ConfigFormat::Legacy, migrate::to_public(&legacy)?))
+            let mut public = migrate::to_public(&legacy)?;
+            let value: toml::Value = toml::from_str(&text)?;
+            if let Some(monitor) = value.get("monitor") {
+                public.monitor = monitor
+                    .clone()
+                    .try_into()
+                    .context("invalid legacy [monitor] settings")?;
+            }
+            validate::validate(&public)?;
+            Ok((ConfigFormat::Legacy, public))
         }
         ConfigFormat::Public => {
             let mut config: GatewayConfig = toml::from_str(&text)
@@ -375,6 +384,40 @@ mod tests {
         assert!(!config.backends[1].required);
 
         std::fs::remove_dir_all(&base).expect("cleanup base");
+    }
+
+    #[test]
+    fn legacy_monitor_table_survives_migration() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let path = dir.path().join("proxy.toml");
+        std::fs::write(
+            &path,
+            r#"
+[proxy]
+name = "lomway"
+version = "0.1.0"
+separator = "_"
+tool_exposure = "direct"
+[proxy.listen]
+host = "127.0.0.1"
+port = 17777
+[[backends]]
+name = "test"
+transport = "http"
+url = "http://127.0.0.1:19999/mcp"
+[security]
+max_argument_size = 1048576
+[monitor]
+interval_seconds = 15
+deferred_idle_minutes = 7
+"#,
+        )
+        .expect("write test configuration");
+        let (format, config) =
+            load_gateway_config_with_format(&path).expect("legacy monitor parse");
+        assert_eq!(format, ConfigFormat::Legacy);
+        assert_eq!(config.monitor.interval_seconds, 15);
+        assert_eq!(config.monitor.deferred_idle_minutes, 7);
     }
 
     #[test]

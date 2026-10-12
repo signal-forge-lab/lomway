@@ -17,7 +17,7 @@ use mcp_proxy::{Proxy, ProxyConfig};
 
 use crate::backend::registry::BackendRegistry;
 use crate::config::migrate;
-use crate::config::model::GatewayConfig;
+use crate::config::model::{GatewayConfig, MonitorConfig};
 use crate::gateway::policy::validate_proxy_policy;
 use crate::gateway::reconnect;
 use crate::namespace::collision::plan_tools;
@@ -29,15 +29,33 @@ use crate::namespace::collision::plan_tools;
 /// receives identical long-lived recovery semantics without retrying client
 /// tool calls.
 pub async fn build_proxy(config: ProxyConfig) -> Result<Proxy> {
+    build_proxy_with_monitor(config, MonitorConfig::default())
+        .await
+        .map(|(proxy, _)| proxy)
+}
+
+/// Return the monitor with its cache so serving routers never probe on /readyz.
+pub async fn build_proxy_with_monitor(
+    config: ProxyConfig,
+    settings: MonitorConfig,
+) -> Result<(Proxy, reconnect::MonitorHandle)> {
     validate_proxy_policy(&config)?;
     let reconnect_specs = reconnect::specs(&config);
-    let proxy = Proxy::from_config(config).await?;
+    let mut proxy = Proxy::from_config(config).await?;
     ensure!(
         proxy.mcp_proxy().remove_backend("proxy").await,
         "upstream control-plane MCP backend 'proxy' was not present; refusing to serve because admin-tool removal cannot be proven"
     );
-    reconnect::spawn(proxy.mcp_proxy().clone(), reconnect_specs);
-    Ok(proxy)
+    let monitor = reconnect::spawn(proxy.mcp_proxy().clone(), reconnect_specs, settings);
+    proxy.attach_application_extension(monitor.clone());
+    let mut failures = proxy.subscribe_transport_failures();
+    let recovery = monitor.clone();
+    tokio::spawn(async move {
+        while let Ok(backend) = failures.recv().await {
+            recovery.transport_failure(&backend);
+        }
+    });
+    Ok((proxy, monitor))
 }
 
 /// A constructed, validated gateway that is not yet bound to a port.
@@ -91,10 +109,12 @@ impl Gateway {
         // public model.
         let oauth = public.server.oauth.clone();
         let legacy = migrate::to_legacy(&public)?;
-        let proxy = build_proxy(legacy).await?;
-        crate::gateway::deferred::register(proxy.mcp_proxy(), deferred_catalog).await?;
+        let (proxy, monitor) = build_proxy_with_monitor(legacy, public.monitor).await?;
+        crate::gateway::deferred::register(proxy.mcp_proxy(), deferred_catalog, monitor.clone())
+            .await?;
         let namespaces = proxy.mcp_proxy().backend_namespaces();
-        let router = crate::gateway::router::gateway_router_with_oauth(proxy, oauth);
+        let router =
+            crate::gateway::router::gateway_router_with_monitor_and_oauth(proxy, oauth, monitor);
         Ok(Self {
             router,
             listen_host,

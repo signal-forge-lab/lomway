@@ -31,6 +31,14 @@ pub const ALLOWED_ID_CHARSET: &str = "a-z 0-9 '_' '-' (must start with a letter 
 /// entry that is present is fully validated.
 pub fn validate(config: &GatewayConfig) -> Result<()> {
     validate_schema_version(config.schema_version)?;
+    ensure!(
+        (1..=300).contains(&config.monitor.interval_seconds),
+        "monitor.interval_seconds must be between 1 and 300"
+    );
+    ensure!(
+        (1..=1440).contains(&config.monitor.deferred_idle_minutes),
+        "monitor.deferred_idle_minutes must be between 1 and 1440"
+    );
     validate_server(&config.server.host, config.server.port)?;
     if let Some(oauth) = &config.server.oauth {
         validate_northbound_oauth(oauth)?;
@@ -274,6 +282,7 @@ mod tests {
             server: Default::default(),
             observability: Default::default(),
             policy: Default::default(),
+            monitor: Default::default(),
             backends,
         }
     }
