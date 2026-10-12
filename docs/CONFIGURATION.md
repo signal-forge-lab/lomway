@@ -113,6 +113,8 @@ thread is disabled in Lomway's pinned adapter. On the MCP 2026-07-28
 protocol, `ping` is unsupported, so Lomway does not run periodic MCP pings.
 `/readyz` reads the monitor's cached direct-backend status, rather than
 issuing network probes per request.
+Required direct backends must be ready; an unavailable optional backend
+only degrades the catalog as long as another direct backend is connected.
 
 ## 4. CLI reference
 

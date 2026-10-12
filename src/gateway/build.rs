@@ -110,6 +110,17 @@ impl Gateway {
         let oauth = public.server.oauth.clone();
         let legacy = migrate::to_legacy(&public)?;
         let (proxy, monitor) = build_proxy_with_monitor(legacy, public.monitor).await?;
+        monitor.set_required(
+            public
+                .backends
+                .iter()
+                .filter(|backend| backend.required)
+                .map(|backend| {
+                    crate::namespace::mcp_name_from_prefix(&backend.prefix)
+                        .expect("validated namespace prefix")
+                        .to_string()
+                }),
+        );
         crate::gateway::deferred::register(proxy.mcp_proxy(), deferred_catalog, monitor.clone())
             .await?;
         let namespaces = proxy.mcp_proxy().backend_namespaces();

@@ -5,7 +5,7 @@
 //! after its MCP health has remained unhealthy across confirmation probes.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -85,6 +85,7 @@ impl BackendReconnectState {
 #[derive(Clone)]
 pub struct MonitorHandle {
     states: Arc<Mutex<HashMap<String, BackendReconnectState>>>,
+    required: Arc<Mutex<HashSet<String>>>,
     specs: Arc<Vec<BackendReconnectSpec>>,
     settings: MonitorConfig,
     proxy: McpProxy,
@@ -92,6 +93,13 @@ pub struct MonitorHandle {
 }
 
 impl MonitorHandle {
+    pub(super) fn set_required(&self, names: impl IntoIterator<Item = String>) {
+        *self
+            .required
+            .lock()
+            .expect("monitor required lock poisoned") = names.into_iter().collect();
+    }
+
     fn commit_observation(&self, name: &str, state: BackendReconnectState) {
         let mut states = self.states.lock().expect("monitor lock poisoned");
         if states
@@ -103,15 +111,28 @@ impl MonitorHandle {
     }
     pub fn ready(&self) -> bool {
         let states = self.states.lock().expect("monitor lock poisoned");
-        self.specs
-            .iter()
-            .filter(|spec| !spec.deferred)
-            .all(|spec| states.get(&spec.name).is_some_and(|state| state.ready))
+        let required = self
+            .required
+            .lock()
+            .expect("monitor required lock poisoned");
+        let direct: Vec<_> = self.specs.iter().filter(|spec| !spec.deferred).collect();
+        // Optional outages degrade the catalog, not gateway readiness.
+        // When all backends are optional, at least one connected direct
+        // backend is still required for readiness.
+        direct.is_empty()
+            || (direct
+                .iter()
+                .any(|spec| states.get(&spec.name).is_some_and(|state| state.ready))
+                && direct
+                    .iter()
+                    .filter(|spec| required.contains(&spec.name))
+                    .all(|spec| states.get(&spec.name).is_some_and(|state| state.ready)))
     }
 
     pub fn snapshot_for_proxy(proxy: McpProxy) -> Self {
         Self {
             states: Arc::new(Mutex::new(HashMap::new())),
+            required: Arc::new(Mutex::new(HashSet::new())),
             specs: Arc::new(Vec::new()),
             settings: MonitorConfig::default(),
             proxy,
@@ -233,6 +254,7 @@ pub(super) fn spawn(
         .collect();
     let handle = MonitorHandle {
         states: Arc::new(Mutex::new(states)),
+        required: Arc::new(Mutex::new(HashSet::new())),
         specs: Arc::new(specs),
         settings,
         proxy,

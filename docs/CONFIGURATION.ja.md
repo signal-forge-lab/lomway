@@ -91,6 +91,9 @@ Discoveryはraw proxyへの登録状態を示すもので、独立したhealth�
 
 ### backend再接続monitor
 
+Required direct backendの稼働をreadinessの条件とします。一方、少なくとも一つの
+direct backendが接続できていれば、optional backendの停止だけではunreadyになりません。
+
 公開schemaとlegacy TOMLの両方で、以下のtop-level設定を使用できます。
 
 ```toml

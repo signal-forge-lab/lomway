@@ -1146,6 +1146,55 @@ max_argument_size = 1048576
 }
 
 #[tokio::test]
+async fn optional_backend_outage_does_not_make_healthy_gateway_unready() {
+    let (backend_addr, backend_task) = spawn_status_backend("online").await;
+    let reserved = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve offline port");
+    let offline_addr = reserved.local_addr().expect("offline address");
+    drop(reserved);
+    let config = parse_public_config(format!(
+        r#"
+schema_version = 1
+
+[[backends]]
+id = "online"
+prefix = "online_"
+url = "http://{backend_addr}/mcp"
+required = false
+
+[[backends]]
+id = "offline"
+prefix = "offline_"
+url = "http://{offline_addr}/mcp"
+required = false
+"#
+    ));
+    let gateway = Gateway::build(config)
+        .await
+        .expect("gateway with optional offline backend");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind gateway");
+    let address = listener.local_addr().expect("gateway address");
+    let task = tokio::spawn(async move {
+        serve(listener, gateway.router())
+            .await
+            .expect("serve gateway");
+    });
+    let response = reqwest::get(format!("http://{address}/readyz"))
+        .await
+        .expect("readiness response");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "unavailable optional backend must not take healthy gateway offline"
+    );
+    task.abort();
+    backend_task.abort();
+}
+
+#[tokio::test]
 async fn readyz_reads_cached_status_without_polling_mcp_backend() {
     let requests = Arc::new(AtomicUsize::new(0));
     let calls = requests.clone();
