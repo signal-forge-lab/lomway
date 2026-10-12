@@ -18,7 +18,7 @@ clap = { version = "4", features = ["derive"] }
 mcp-proxy = { version = "=0.4.3", default-features = false, features = ["protocol-2026-07-28"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "time", "sync"] }
 toml = "1"
 tower = { version = "0.5", features = ["timeout"] }
 tower-mcp = { version = "=0.18.2", features = ["http", "http-client", "proxy", "protocol-2026-07-28"] }
@@ -30,3 +30,9 @@ sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
+
+# mcp-proxy 0.4.3 unconditionally spawns an inaccessible /admin health thread
+# which pings every backend every 10s. Lomway owns its own low-load monitor.
+# The vendored crate is otherwise unmodified upstream source.
+[patch.crates-io]
+mcp-proxy = { path = "vendor/mcp-proxy" }

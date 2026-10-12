@@ -1,0 +1,1592 @@
+//! Core proxy construction and serving.
+
+use std::any::Any;
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::sync::Arc;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context as TaskContext, Poll};
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use axum::Router;
+use tokio::process::Command;
+use tokio::sync::broadcast;
+use tower::timeout::TimeoutLayer;
+use tower::util::BoxCloneService;
+use tower::{Layer, Service, ServiceExt};
+use tower_mcp::SessionHandle;
+use tower_mcp::auth::{AuthLayer, StaticBearerValidator};
+use tower_mcp::client::StdioClientTransport;
+use tower_mcp::proxy::McpProxy;
+use tower_mcp::{RouterRequest, RouterResponse};
+use tower_mcp::protocol::McpRequest;
+use tower_resilience::retry::RetryLayer;
+
+use crate::admin::BackendMeta;
+use crate::alias;
+use crate::cache;
+use crate::coalesce;
+use crate::config::{AuthConfig, ProxyConfig, TransportType};
+use crate::filter::CapabilityFilterService;
+#[cfg(feature = "oauth")]
+use crate::rbac::{RbacConfig, RbacService};
+use crate::validation::{ValidationConfig, ValidationService};
+
+/// A fully constructed MCP proxy ready to serve or embed.
+pub struct Proxy {
+    router: Router,
+    session_handle: SessionHandle,
+    inner: McpProxy,
+    config: ProxyConfig,
+    transport_failure_tx: broadcast::Sender<String>,
+    application_extension: Option<Arc<dyn Any + Send + Sync>>,
+    #[cfg(feature = "discovery")]
+    discovery_index: Option<crate::discovery::SharedDiscoveryIndex>,
+}
+
+impl Proxy {
+    /// Build a proxy from a [`ProxyConfig`].
+    ///
+    /// Connects to all backends, builds the middleware stack, and prepares
+    /// the axum router. Call [`serve()`](Self::serve) to run standalone or
+    /// [`into_router()`](Self::into_router) to embed in an existing app.
+    pub async fn from_config(config: ProxyConfig) -> Result<Self> {
+        let (mcp_proxy, cb_handles) = build_mcp_proxy(&config).await?;
+        let proxy_for_admin = mcp_proxy.clone();
+        // Only the discovery index build mutates this clone.
+        #[cfg_attr(not(feature = "discovery"), allow(unused_mut))]
+        let mut proxy_for_caller = mcp_proxy.clone();
+        let proxy_for_management = mcp_proxy.clone();
+
+        // Install Prometheus metrics recorder (must happen before middleware)
+        #[cfg(feature = "metrics")]
+        let metrics_handle = if config.observability.metrics.enabled {
+            tracing::info!("Prometheus metrics enabled at /admin/metrics");
+            let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
+            let handle = builder
+                .install_recorder()
+                .context("installing Prometheus metrics recorder")?;
+            Some(handle)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "metrics"))]
+        let metrics_handle = None;
+
+        let (service, cache_handle) = build_middleware_stack(&config, mcp_proxy)?;
+        let (transport_failure_tx, _) = broadcast::channel(64);
+        // Observe failed backend invocations without ever replaying a tool call.
+        let service = BoxCloneService::new(TransportErrorObserver {
+            service,
+            tx: transport_failure_tx.clone(),
+            prefixes: config.backends.iter().map(|b| {
+                (format!("{}{}", b.name, config.proxy.separator), b.name.clone())
+            }).collect(),
+        });
+
+        let (router, session_handle) =
+            tower_mcp::transport::http::HttpTransport::from_service(service)
+                .into_router_with_handle();
+
+        // Inbound authentication (axum-level middleware)
+        let router = apply_auth(&config, router).await?;
+
+        // Collect backend metadata for the health checker
+        let backend_meta: std::collections::HashMap<String, BackendMeta> = config
+            .backends
+            .iter()
+            .map(|b| {
+                (
+                    b.name.clone(),
+                    BackendMeta {
+                        transport: format!("{:?}", b.transport).to_lowercase(),
+                    },
+                )
+            })
+            .collect();
+
+        // Admin API
+        let admin_state = crate::admin::spawn_health_checker(
+            proxy_for_admin,
+            config.proxy.name.clone(),
+            config.proxy.version.clone(),
+            config.backends.len(),
+            backend_meta,
+        );
+        let router = router.nest(
+            "/admin",
+            crate::admin::admin_router(
+                admin_state.clone(),
+                metrics_handle,
+                session_handle.clone(),
+                cache_handle,
+                proxy_for_management,
+                &config,
+                config.source_path.clone(),
+                cb_handles,
+            ),
+        );
+        tracing::info!("Admin API enabled at /admin/backends");
+
+        // Build discovery index if enabled (search mode implies discovery)
+        #[cfg(feature = "discovery")]
+        let discovery_enabled = config.proxy.tool_discovery
+            || config.proxy.tool_exposure == crate::config::ToolExposure::Search;
+        #[cfg(feature = "discovery")]
+        let (discovery_index, discovery_tools) = if discovery_enabled {
+            let index =
+                crate::discovery::build_index(&mut proxy_for_caller, &config.proxy.separator).await;
+            let tools = crate::discovery::build_discovery_tools(index.clone());
+            (Some(index), Some(tools))
+        } else {
+            (None, None)
+        };
+        #[cfg(not(feature = "discovery"))]
+        let discovery_tools: Option<Vec<tower_mcp::Tool>> = None;
+
+        // MCP admin tools (proxy/ namespace)
+        if let Err(e) = crate::admin_tools::register_admin_tools(
+            &proxy_for_caller,
+            admin_state,
+            session_handle.clone(),
+            &config,
+            discovery_tools,
+        )
+        .await
+        {
+            tracing::warn!("Failed to register admin tools: {e}");
+        } else {
+            tracing::info!("MCP admin tools registered under proxy/ namespace");
+        }
+
+        Ok(Self {
+            router,
+            session_handle,
+            inner: proxy_for_caller,
+            config,
+            transport_failure_tx,
+            application_extension: None,
+            #[cfg(feature = "discovery")]
+            discovery_index,
+        })
+    }
+
+    /// Get a reference to the session handle for monitoring active sessions.
+    pub fn session_handle(&self) -> &SessionHandle {
+        &self.session_handle
+    }
+
+    /// Get a reference to the underlying [`McpProxy`] for dynamic operations.
+    ///
+    /// Use this to add backends dynamically via [`McpProxy::add_backend()`].
+    pub fn mcp_proxy(&self) -> &McpProxy {
+        &self.inner
+    }
+
+    /// Notification-only channel; a failed user request is NEVER retried.
+    pub fn subscribe_transport_failures(&self) -> broadcast::Receiver<String> {
+        self.transport_failure_tx.subscribe()
+    }
+
+    /// Optional typed state carried by an embedding gateway to its router.
+    pub fn attach_application_extension<T: Any + Send + Sync>(&mut self, value: T) {
+        self.application_extension = Some(Arc::new(value));
+    }
+
+    pub fn application_extension<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        self.application_extension.as_ref()?.clone().downcast().ok()
+    }
+
+    /// Enable hot reload by watching the given config file path.
+    ///
+    /// New backends added to the config file will be connected dynamically
+    /// without restarting the proxy.
+    pub fn enable_hot_reload(&self, config_path: std::path::PathBuf) {
+        tracing::info!("Hot reload enabled, watching config file for changes");
+        crate::reload::spawn_config_watcher(
+            config_path,
+            self.inner.clone(),
+            #[cfg(feature = "discovery")]
+            self.discovery_index
+                .as_ref()
+                .map(|idx| (idx.clone(), self.config.proxy.separator.clone())),
+        );
+    }
+
+    /// Consume the proxy and return the axum Router and SessionHandle.
+    ///
+    /// Use this to embed the proxy in an existing axum application:
+    ///
+    /// ```rust,ignore
+    /// let (proxy_router, session_handle) = proxy.into_router();
+    ///
+    /// let app = Router::new()
+    ///     .nest("/mcp", proxy_router)
+    ///     .route("/health", get(|| async { "ok" }));
+    /// ```
+    pub fn into_router(self) -> (Router, SessionHandle) {
+        (self.router, self.session_handle)
+    }
+
+    /// Serve the proxy on the configured listen address.
+    ///
+    /// Blocks until a shutdown signal (SIGTERM/SIGINT) is received,
+    /// then drains connections for the configured timeout period.
+    pub async fn serve(self) -> Result<()> {
+        let addr = format!(
+            "{}:{}",
+            self.config.proxy.listen.host, self.config.proxy.listen.port
+        );
+
+        tracing::info!(listen = %addr, "Proxy ready");
+
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .with_context(|| format!("binding to {}", addr))?;
+
+        let shutdown_timeout = Duration::from_secs(self.config.proxy.shutdown_timeout_seconds);
+        axum::serve(listener, self.router)
+            .with_graceful_shutdown(shutdown_signal(shutdown_timeout))
+            .await
+            .context("server error")?;
+
+        tracing::info!("Proxy shut down");
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct TransportErrorObserver {
+    service: BoxCloneService<RouterRequest, RouterResponse, Infallible>,
+    tx: broadcast::Sender<String>,
+    prefixes: Vec<(String, String)>,
+}
+
+impl Service<RouterRequest> for TransportErrorObserver {
+    type Response = RouterResponse;
+    type Error = Infallible;
+    type Future = Pin<Box<dyn Future<Output = std::result::Result<RouterResponse, Infallible>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut TaskContext<'_>) -> Poll<std::result::Result<(), Self::Error>> {
+        self.service.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: RouterRequest) -> Self::Future {
+        let tool_name = match &request.inner {
+            McpRequest::CallTool(params) => Some(params.name.clone()),
+            _ => None,
+        };
+        let prefixes = self.prefixes.clone();
+        let tx = self.tx.clone();
+        let service = self.service.clone();
+        Box::pin(async move {
+            let response = service.oneshot(request).await;
+            if let (Some(name), Ok(result)) = (tool_name.as_deref(), &response) {
+                if let Err(error) = &result.inner {
+                    // tower-mcp's BackendService labels *client transport*
+                    // errors, not application-level tool failures, this way.
+                    if error.message.starts_with("Backend error:") {
+                        if let Some((_, backend)) = prefixes.iter().find(|(prefix, _)| name.starts_with(prefix)) {
+                            let _ = tx.send(backend.clone());
+                        }
+                    }
+                }
+            }
+            response
+        })
+    }
+}
+
+/// Circuit breaker handle type alias.
+pub type CbHandle = tower_resilience::circuitbreaker::CircuitBreakerHandle;
+
+/// Build the circuit breaker layer for one backend from its config.
+///
+/// The count-based breaker only evaluates once its sliding window is full,
+/// and the window defaults to 100 calls. Aligning the window with
+/// `minimum_calls` makes the failure rate cover the most recent
+/// `minimum_calls` calls and evaluation begin exactly at the documented
+/// threshold (#220).
+fn build_breaker_layer(
+    cb: &crate::config::CircuitBreakerConfig,
+    backend_name: &str,
+) -> (
+    tower_resilience::circuitbreaker::CircuitBreakerLayer,
+    CbHandle,
+) {
+    tower_resilience::circuitbreaker::CircuitBreakerLayer::builder()
+        .failure_rate_threshold(cb.failure_rate_threshold)
+        .minimum_number_of_calls(cb.minimum_calls)
+        .sliding_window_size(cb.minimum_calls)
+        .wait_duration_in_open(Duration::from_secs(cb.wait_duration_seconds))
+        .permitted_calls_in_half_open(cb.permitted_calls_in_half_open)
+        .name(format!("{backend_name}-cb"))
+        .build_with_handle()
+}
+
+type InfallibleService = BoxCloneService<RouterRequest, RouterResponse, Infallible>;
+type MwService = BoxCloneService<RouterRequest, RouterResponse, tower::BoxError>;
+type MwStage = Box<dyn Fn(MwService) -> MwService + Send + Sync>;
+
+/// Every configured per-backend middleware composed into ONE tower-mcp
+/// backend layer. tower-mcp's `backend_layer` replaces the previously applied
+/// layer rather than stacking (joshrotenberg/tower-mcp#1173), so handing it
+/// the middlewares one call at a time silently keeps only the last.
+///
+/// Composition happens in three zones matching the middlewares' type
+/// contracts: retry and hedging operate on the raw `Error = Infallible`
+/// backend service (both classify failures from the response, and hedging
+/// requires a `Clone` error type); concurrency, rate limit, timeout, and
+/// circuit breaker operate in a widened `BoxError` plane where they can
+/// produce service-level errors; a `CatchError` fold then converts those
+/// errors into JSON-RPC error responses, and outlier detection sits on top,
+/// observing the response plane (its `Service` impl requires
+/// `Error = Infallible`).
+#[derive(Default)]
+struct BackendMiddlewareLayer {
+    /// Innermost: retries against the raw backend service.
+    retry: Option<RetryLayer<RouterRequest, RouterResponse, Infallible>>,
+    /// Outside retry, still in the Infallible zone.
+    hedge: Option<tower_resilience::hedge::HedgeLayer>,
+    /// BoxError zone, applied outward in push order: concurrency, rate
+    /// limit, timeout, circuit breaker.
+    stages: Vec<MwStage>,
+    /// Outermost, after the error fold: observes response-plane errors.
+    outlier: Option<crate::outlier::OutlierDetectionLayer>,
+}
+
+impl BackendMiddlewareLayer {
+    fn is_empty(&self) -> bool {
+        self.retry.is_none()
+            && self.hedge.is_none()
+            && self.stages.is_empty()
+            && self.outlier.is_none()
+    }
+
+    fn stage<L>(&mut self, layer: L)
+    where
+        L: Layer<MwService> + Send + Sync + 'static,
+        L::Service:
+            tower::Service<RouterRequest, Response = RouterResponse> + Clone + Send + 'static,
+        <L::Service as tower::Service<RouterRequest>>::Error: std::fmt::Display,
+        <L::Service as tower::Service<RouterRequest>>::Future: Send + 'static,
+    {
+        self.stages.push(Box::new(move |inner| {
+            BoxCloneService::new(
+                layer
+                    .layer(inner)
+                    .map_err(|e| -> tower::BoxError { e.to_string().into() }),
+            )
+        }));
+    }
+}
+
+impl<S> Layer<S> for BackendMiddlewareLayer
+where
+    S: tower::Service<RouterRequest, Response = RouterResponse, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    type Service = InfallibleService;
+
+    fn layer(&self, base: S) -> InfallibleService {
+        fn widen(e: Infallible) -> tower::BoxError {
+            match e {}
+        }
+
+        // Zone A: retry classifies failures from responses over the
+        // Infallible base (hedging also needs a Clone inner error, which
+        // Infallible satisfies).
+        let after_retry: InfallibleService = match &self.retry {
+            Some(retry) => BoxCloneService::new(retry.layer(base)),
+            None => BoxCloneService::new(base),
+        };
+
+        // Zone B: error-producing middlewares in the BoxError plane. Hedging
+        // wraps the inner error type (`HedgeError<Infallible>`), so it forms
+        // the floor of this zone.
+        let mut svc: MwService = match &self.hedge {
+            Some(hedge) => BoxCloneService::new(
+                hedge
+                    .layer(after_retry)
+                    .map_err(|e| -> tower::BoxError { e.to_string().into() }),
+            ),
+            None => BoxCloneService::new(after_retry.map_err(widen)),
+        };
+        for stage in &self.stages {
+            svc = stage(svc);
+        }
+
+        // Fold middleware errors into JSON-RPC error responses.
+        let folded: InfallibleService =
+            BoxCloneService::new(tower_mcp::transport::CatchError::new(svc));
+
+        // Zone C: outlier detection observes the response plane.
+        match &self.outlier {
+            Some(outlier) => BoxCloneService::new(outlier.layer(folded)),
+            None => folded,
+        }
+    }
+}
+
+/// Build the McpProxy with all backends and per-backend middleware.
+/// Returns the proxy and a map of backend name -> circuit breaker handle.
+async fn build_mcp_proxy(config: &ProxyConfig) -> Result<(McpProxy, HashMap<String, CbHandle>)> {
+    let mut builder = McpProxy::builder(&config.proxy.name, &config.proxy.version)
+        .separator(&config.proxy.separator);
+    let mut cb_handles: HashMap<String, CbHandle> = HashMap::new();
+
+    if let Some(instructions) = &config.proxy.instructions {
+        builder = builder.instructions(instructions);
+    }
+
+    // Create shared outlier detector if any backend has outlier_detection configured.
+    // Use the max of all max_ejection_percent values.
+    let outlier_detector = {
+        let max_pct = config
+            .backends
+            .iter()
+            .filter_map(|b| b.outlier_detection.as_ref())
+            .map(|od| od.max_ejection_percent)
+            .max();
+        max_pct.map(crate::outlier::OutlierDetector::new)
+    };
+
+    for backend in &config.backends {
+        tracing::info!(name = %backend.name, transport = ?backend.transport, "Adding backend");
+
+        match backend.transport {
+            TransportType::Stdio => {
+                let command = backend.command.as_deref().unwrap();
+                let args: Vec<&str> = backend.args.iter().map(|s| s.as_str()).collect();
+
+                let mut cmd = Command::new(command);
+                cmd.args(&args);
+
+                for (key, value) in &backend.env {
+                    cmd.env(key, value);
+                }
+
+                let transport = StdioClientTransport::spawn_command(&mut cmd)
+                    .await
+                    .with_context(|| format!("spawning backend '{}'", backend.name))?;
+
+                builder = builder.backend(&backend.name, transport).await;
+            }
+            TransportType::Http => {
+                let url = backend.url.as_deref().unwrap();
+                let mut transport = tower_mcp::client::HttpClientTransport::new(url);
+                if let Some(token) = &backend.bearer_token {
+                    transport = transport.bearer_token(token);
+                }
+
+                builder = builder.backend(&backend.name, transport).await;
+            }
+            #[cfg(feature = "websocket")]
+            TransportType::Websocket => {
+                let url = backend.url.as_deref().unwrap();
+                tracing::info!(url = %url, "Connecting to WebSocket backend");
+                let transport = if let Some(token) = &backend.bearer_token {
+                    crate::ws_transport::WebSocketClientTransport::connect_with_bearer_token(
+                        url, token,
+                    )
+                    .await
+                    .with_context(|| {
+                        format!("connecting to WebSocket backend '{}'", backend.name)
+                    })?
+                } else {
+                    crate::ws_transport::WebSocketClientTransport::connect(url)
+                        .await
+                        .with_context(|| {
+                            format!("connecting to WebSocket backend '{}'", backend.name)
+                        })?
+                };
+
+                builder = builder.backend(&backend.name, transport).await;
+            }
+            #[cfg(not(feature = "websocket"))]
+            TransportType::Websocket => {
+                anyhow::bail!(
+                    "WebSocket transport requires the 'websocket' feature. \
+                     Rebuild with: cargo install mcp-proxy --features websocket"
+                );
+            }
+        }
+
+        // Per-backend middleware stack (applied in order: inner -> outer).
+        // Collected into one BackendMiddlewareLayer and handed to tower-mcp
+        // as a single backend_layer call; see the type's doc comment.
+        let mut mw = BackendMiddlewareLayer::default();
+
+        // Retry (innermost -- retries happen before other middleware)
+        if let Some(retry_cfg) = &backend.retry {
+            tracing::info!(
+                backend = %backend.name,
+                max_retries = retry_cfg.max_retries,
+                initial_backoff_ms = retry_cfg.initial_backoff_ms,
+                max_backoff_ms = retry_cfg.max_backoff_ms,
+                "Applying retry policy"
+            );
+            mw.retry = Some(crate::retry::build_retry_layer(retry_cfg, &backend.name));
+        }
+
+        // Hedging (after retry, before concurrency -- hedges are separate requests)
+        if let Some(hedge_cfg) = &backend.hedging {
+            let delay = Duration::from_millis(hedge_cfg.delay_ms);
+            let max_attempts = hedge_cfg.max_hedges + 1; // +1 for the primary request
+            tracing::info!(
+                backend = %backend.name,
+                delay_ms = hedge_cfg.delay_ms,
+                max_hedges = hedge_cfg.max_hedges,
+                "Applying request hedging"
+            );
+            let layer = if delay.is_zero() {
+                tower_resilience::hedge::HedgeLayer::builder()
+                    .no_delay()
+                    .max_hedged_attempts(max_attempts)
+                    .name(format!("{}-hedge", backend.name))
+                    .build()
+            } else {
+                tower_resilience::hedge::HedgeLayer::builder()
+                    .delay(delay)
+                    .max_hedged_attempts(max_attempts)
+                    .name(format!("{}-hedge", backend.name))
+                    .build()
+            };
+            mw.hedge = Some(layer);
+        }
+
+        // Concurrency limit
+        if let Some(cc) = &backend.concurrency {
+            tracing::info!(
+                backend = %backend.name,
+                max = cc.max_concurrent,
+                "Applying concurrency limit"
+            );
+            mw.stage(tower::limit::ConcurrencyLimitLayer::new(cc.max_concurrent));
+        }
+
+        // Rate limit
+        if let Some(rl) = &backend.rate_limit {
+            tracing::info!(
+                backend = %backend.name,
+                requests = rl.requests,
+                period_seconds = rl.period_seconds,
+                "Applying rate limit"
+            );
+            let layer = tower_resilience::ratelimiter::RateLimiterLayer::builder()
+                .limit_for_period(rl.requests)
+                .refresh_period(Duration::from_secs(rl.period_seconds))
+                .name(format!("{}-ratelimit", backend.name))
+                .build();
+            mw.stage(layer);
+        }
+
+        // Timeout
+        if let Some(timeout) = &backend.timeout {
+            tracing::info!(
+                backend = %backend.name,
+                seconds = timeout.seconds,
+                "Applying timeout"
+            );
+            mw.stage(TimeoutLayer::new(Duration::from_secs(timeout.seconds)));
+        }
+
+        // Circuit breaker
+        if let Some(cb) = &backend.circuit_breaker {
+            tracing::info!(
+                backend = %backend.name,
+                failure_rate = cb.failure_rate_threshold,
+                wait_seconds = cb.wait_duration_seconds,
+                "Applying circuit breaker"
+            );
+            let (layer, handle) = build_breaker_layer(cb, &backend.name);
+            cb_handles.insert(backend.name.clone(), handle);
+            mw.stage(layer);
+        }
+
+        // Outlier detection (outermost -- observes errors after all other middleware)
+        if let Some(od) = &backend.outlier_detection
+            && let Some(ref detector) = outlier_detector
+        {
+            tracing::info!(
+                backend = %backend.name,
+                consecutive_errors = od.consecutive_errors,
+                base_ejection_seconds = od.base_ejection_seconds,
+                max_ejection_percent = od.max_ejection_percent,
+                "Applying outlier detection"
+            );
+            let layer = crate::outlier::OutlierDetectionLayer::new(
+                backend.name.clone(),
+                od.clone(),
+                detector.clone(),
+            );
+            mw.outlier = Some(layer);
+        }
+
+        if !mw.is_empty() {
+            builder = builder.backend_layer(mw);
+        }
+    }
+
+    let result = builder.build().await?;
+
+    if !result.skipped.is_empty() {
+        for s in &result.skipped {
+            tracing::warn!("Skipped backend: {s}");
+        }
+    }
+
+    Ok((result.proxy, cb_handles))
+}
+
+/// Build a scope-enforcement layer from configured OAuth `required_scopes`.
+///
+/// Returns `None` when no scopes are required (the layer would be a no-op).
+/// Otherwise returns a [`ScopeEnforcementLayer`](tower_mcp::oauth::ScopeEnforcementLayer)
+/// whose default policy requires *all* of `required_scopes` to be present in the
+/// token (AND semantics) for every request.
+#[cfg(feature = "oauth")]
+fn oauth_scope_layer(
+    required_scopes: &[String],
+) -> Option<tower_mcp::oauth::ScopeEnforcementLayer> {
+    if required_scopes.is_empty() {
+        return None;
+    }
+    let policy = tower_mcp::oauth::ScopePolicy::new().default_scopes(
+        tower_mcp::oauth::ScopeRequirement::all(required_scopes.iter().cloned()),
+    );
+    Some(tower_mcp::oauth::ScopeEnforcementLayer::new(policy))
+}
+
+/// Build the MCP-level middleware stack around the proxy.
+fn build_middleware_stack(
+    config: &ProxyConfig,
+    proxy: McpProxy,
+) -> Result<(
+    BoxCloneService<RouterRequest, RouterResponse, Infallible>,
+    Option<cache::CacheHandle>,
+)> {
+    let mut service: BoxCloneService<RouterRequest, RouterResponse, Infallible> =
+        BoxCloneService::new(proxy);
+    let mut cache_handle: Option<cache::CacheHandle> = None;
+
+    // Argument injection (innermost -- merges default/per-tool args into CallTool requests)
+    let injection_rules: Vec<_> = config
+        .backends
+        .iter()
+        .filter(|b| !b.default_args.is_empty() || !b.inject_args.is_empty())
+        .map(|b| {
+            let namespace = format!("{}{}", b.name, config.proxy.separator);
+            tracing::info!(
+                backend = %b.name,
+                default_args = b.default_args.len(),
+                tool_rules = b.inject_args.len(),
+                "Applying argument injection"
+            );
+            crate::inject::InjectionRules::new(
+                namespace,
+                b.default_args.clone(),
+                b.inject_args.clone(),
+            )
+        })
+        .collect();
+
+    if !injection_rules.is_empty() {
+        service = BoxCloneService::new(crate::inject::InjectArgsService::new(
+            service,
+            injection_rules,
+        ));
+    }
+
+    // Parameter overrides (after inject, before filter -- hides/renames tool params)
+    let param_overrides: Vec<_> = config
+        .backends
+        .iter()
+        .filter(|b| !b.param_overrides.is_empty())
+        .flat_map(|b| {
+            let namespace = format!("{}{}", b.name, config.proxy.separator);
+            tracing::info!(
+                backend = %b.name,
+                overrides = b.param_overrides.len(),
+                "Applying parameter overrides"
+            );
+            b.param_overrides
+                .iter()
+                .map(move |c| crate::param_override::ToolOverride::new(&namespace, c))
+        })
+        .collect();
+
+    if !param_overrides.is_empty() {
+        service = BoxCloneService::new(crate::param_override::ParamOverrideService::new(
+            service,
+            param_overrides,
+        ));
+    }
+
+    // Canary routing (rewrites requests from primary to canary namespace based on weight)
+    let canary_mappings: std::collections::HashMap<String, (String, u32, u32)> = config
+        .backends
+        .iter()
+        .filter_map(|b| {
+            b.canary_of.as_ref().map(|primary_name| {
+                // Find the primary backend's weight
+                let primary_weight = config
+                    .backends
+                    .iter()
+                    .find(|p| p.name == *primary_name)
+                    .map(|p| p.weight)
+                    .unwrap_or(100);
+                (
+                    primary_name.clone(),
+                    (b.name.clone(), primary_weight, b.weight),
+                )
+            })
+        })
+        .collect();
+
+    if !canary_mappings.is_empty() {
+        for (primary, (canary, pw, cw)) in &canary_mappings {
+            tracing::info!(
+                primary = %primary,
+                canary = %canary,
+                primary_weight = pw,
+                canary_weight = cw,
+                "Enabling canary routing"
+            );
+        }
+        service = BoxCloneService::new(crate::canary::CanaryService::new(
+            service,
+            canary_mappings,
+            &config.proxy.separator,
+        ));
+    }
+
+    // Failover routing (deterministic fallback on primary error)
+    // Collect failover backends grouped by primary, sorted by priority (ascending).
+    let mut failover_groups: std::collections::HashMap<String, Vec<(u32, String)>> =
+        std::collections::HashMap::new();
+    for b in &config.backends {
+        if let Some(ref primary) = b.failover_for {
+            failover_groups
+                .entry(primary.clone())
+                .or_default()
+                .push((b.priority, b.name.clone()));
+        }
+    }
+    // Sort each group by priority (lower = preferred)
+    let failover_mappings: std::collections::HashMap<String, Vec<String>> = failover_groups
+        .into_iter()
+        .map(|(primary, mut backends)| {
+            backends.sort_by_key(|(priority, _)| *priority);
+            let names: Vec<String> = backends.into_iter().map(|(_, name)| name).collect();
+            (primary, names)
+        })
+        .collect();
+
+    if !failover_mappings.is_empty() {
+        for (primary, failovers) in &failover_mappings {
+            tracing::info!(
+                primary = %primary,
+                failovers = ?failovers,
+                "Enabling failover routing"
+            );
+        }
+        service = BoxCloneService::new(crate::failover::FailoverService::new(
+            service,
+            failover_mappings,
+            &config.proxy.separator,
+        ));
+    }
+
+    // Traffic mirroring (sends cloned requests through the proxy)
+    let mirror_mappings: std::collections::HashMap<String, (String, u32)> = config
+        .backends
+        .iter()
+        .filter_map(|b| {
+            b.mirror_of
+                .as_ref()
+                .map(|source| (source.clone(), (b.name.clone(), b.mirror_percent)))
+        })
+        .collect();
+
+    if !mirror_mappings.is_empty() {
+        for (source, (mirror, pct)) in &mirror_mappings {
+            tracing::info!(
+                source = %source,
+                mirror = %mirror,
+                percent = pct,
+                "Enabling traffic mirroring"
+            );
+        }
+        service = BoxCloneService::new(crate::mirror::MirrorService::new(
+            service,
+            mirror_mappings,
+            &config.proxy.separator,
+        ));
+    }
+
+    // Response caching
+    let cache_configs: Vec<_> = config
+        .backends
+        .iter()
+        .filter_map(|b| {
+            b.cache
+                .as_ref()
+                .map(|c| (format!("{}{}", b.name, config.proxy.separator), c))
+        })
+        .collect();
+
+    if !cache_configs.is_empty() {
+        for (ns, cfg) in &cache_configs {
+            tracing::info!(
+                backend = %ns.trim_end_matches(&config.proxy.separator),
+                resource_ttl = cfg.resource_ttl_seconds,
+                tool_ttl = cfg.tool_ttl_seconds,
+                max_entries = cfg.max_entries,
+                "Applying response cache"
+            );
+        }
+        let (cache_svc, handle) = cache::CacheService::new(service, cache_configs, &config.cache);
+        service = BoxCloneService::new(cache_svc);
+        cache_handle = Some(handle);
+    }
+
+    // Request coalescing
+    if config.performance.coalesce_requests {
+        tracing::info!("Request coalescing enabled");
+        service = BoxCloneService::new(coalesce::CoalesceService::new(service));
+    }
+
+    // Request validation
+    if config.security.max_argument_size.is_some() {
+        let validation = ValidationConfig {
+            max_argument_size: config.security.max_argument_size,
+        };
+        if let Some(max) = validation.max_argument_size {
+            tracing::info!(max_argument_size = max, "Applying request validation");
+        }
+        service = BoxCloneService::new(ValidationService::new(service, validation));
+    }
+
+    // Static capability filtering
+    let filters: Vec<_> = config
+        .backends
+        .iter()
+        .filter_map(|b| b.build_filter(&config.proxy.separator).transpose())
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    if !filters.is_empty() {
+        for f in &filters {
+            tracing::info!(
+                backend = %f.namespace.trim_end_matches(&config.proxy.separator),
+                tool_filter = ?f.tool_filter,
+                resource_filter = ?f.resource_filter,
+                prompt_filter = ?f.prompt_filter,
+                "Applying capability filter"
+            );
+        }
+        service = BoxCloneService::new(CapabilityFilterService::new(service, filters));
+    }
+
+    // Search-mode filtering: hide all tools except proxy/ namespace
+    if config.proxy.tool_exposure == crate::config::ToolExposure::Search {
+        let prefix = format!("proxy{}", config.proxy.separator);
+        tracing::info!(
+            prefix = %prefix,
+            "Search mode: ListTools will only show proxy/ namespace tools"
+        );
+        service =
+            BoxCloneService::new(crate::filter::SearchModeFilterService::new(service, prefix));
+    }
+
+    // Tool aliasing
+    let alias_mappings: Vec<_> = config
+        .backends
+        .iter()
+        .flat_map(|b| {
+            let ns = format!("{}{}", b.name, config.proxy.separator);
+            b.aliases
+                .iter()
+                .map(move |a| (ns.clone(), a.from.clone(), a.to.clone()))
+        })
+        .collect();
+
+    if let Some(alias_map) = alias::AliasMap::new(alias_mappings) {
+        let count = alias_map.forward.len();
+        tracing::info!(aliases = count, "Applying tool aliases");
+        service = BoxCloneService::new(alias::AliasService::new(service, alias_map));
+    }
+
+    // Composite tools (fan-out to multiple backend tools)
+    if !config.composite_tools.is_empty() {
+        let count = config.composite_tools.len();
+        tracing::info!(composite_tools = count, "Applying composite tool fan-out");
+        service = BoxCloneService::new(crate::composite::CompositeService::new(
+            service,
+            config.composite_tools.clone(),
+        ));
+    }
+
+    // Bearer token scoping (per-token allow/deny lists)
+    #[cfg(feature = "oauth")]
+    if matches!(
+        &config.auth,
+        Some(AuthConfig::Bearer {
+            scoped_tokens,
+            ..
+        }) if !scoped_tokens.is_empty()
+    ) {
+        tracing::info!("Enabling bearer token scoping middleware");
+        service = BoxCloneService::new(crate::bearer_scope::BearerScopingService::new(service));
+    }
+
+    // RBAC (JWT auth only)
+    #[cfg(feature = "oauth")]
+    {
+        let rbac_config = match &config.auth {
+            Some(
+                AuthConfig::Jwt {
+                    roles,
+                    role_mapping: Some(mapping),
+                    ..
+                }
+                | AuthConfig::OAuth {
+                    roles,
+                    role_mapping: Some(mapping),
+                    ..
+                },
+            ) if !roles.is_empty() => {
+                tracing::info!(
+                    roles = roles.len(),
+                    claim = %mapping.claim,
+                    "Enabling RBAC"
+                );
+                Some(RbacConfig::new(roles, mapping))
+            }
+            _ => None,
+        };
+
+        if let Some(rbac) = rbac_config {
+            service = BoxCloneService::new(RbacService::new(service, rbac));
+        }
+
+        // OAuth `required_scopes` enforcement: a coarse global gate that rejects
+        // any token missing one of the configured scopes (AND semantics). Runs
+        // outside RBAC so a token lacking the required scopes is denied for every
+        // operation, including `tools/list`. Reads TokenClaims injected by the
+        // OAuth auth layer; requests without claims pass through (already rejected
+        // upstream by the HTTP auth layer when auth is enabled).
+        let required_scopes: &[String] = match &config.auth {
+            Some(AuthConfig::OAuth {
+                required_scopes, ..
+            }) => required_scopes,
+            _ => &[],
+        };
+        if let Some(layer) = oauth_scope_layer(required_scopes) {
+            tracing::info!(
+                scopes = ?required_scopes,
+                "Enabling OAuth required_scopes enforcement"
+            );
+            service = BoxCloneService::new(tower::Layer::layer(&layer, service));
+        }
+
+        // Token passthrough (inject ClientToken for forward_auth backends)
+        let forward_namespaces: std::collections::HashSet<String> = config
+            .backends
+            .iter()
+            .filter(|b| b.forward_auth)
+            .map(|b| format!("{}{}", b.name, config.proxy.separator))
+            .collect();
+
+        if !forward_namespaces.is_empty() {
+            tracing::info!(
+                backends = ?forward_namespaces,
+                "Enabling token passthrough for forward_auth backends"
+            );
+            service = BoxCloneService::new(crate::token::TokenPassthroughService::new(
+                service,
+                forward_namespaces,
+            ));
+        }
+    }
+
+    // Metrics
+    #[cfg(feature = "metrics")]
+    if config.observability.metrics.enabled {
+        service = BoxCloneService::new(crate::metrics::MetricsService::new(service));
+    }
+
+    // Structured access logging
+    if config.observability.access_log.enabled {
+        tracing::info!("Access logging enabled (target: mcp::access)");
+        service = BoxCloneService::new(crate::access_log::AccessLogService::new(
+            service,
+            &config.proxy.separator,
+        ));
+    }
+
+    // Audit logging
+    if config.observability.audit {
+        tracing::info!("Audit logging enabled (target: mcp::audit)");
+        let audited = tower::Layer::layer(&tower_mcp::AuditLayer::new(), service);
+        service = BoxCloneService::new(tower_mcp::CatchError::new(audited));
+    }
+
+    // Global rate limit (outermost -- protects entire proxy)
+    if let Some(ref rl) = config.proxy.rate_limit {
+        tracing::info!(
+            requests = rl.requests,
+            period_seconds = rl.period_seconds,
+            "Applying global rate limit"
+        );
+        let layer = tower_resilience::ratelimiter::RateLimiterLayer::builder()
+            .limit_for_period(rl.requests)
+            .refresh_period(Duration::from_secs(rl.period_seconds))
+            .name("global-ratelimit")
+            .build();
+        let limited = tower::Layer::layer(&layer, service);
+        service = BoxCloneService::new(tower_mcp::CatchError::new(limited));
+    }
+
+    Ok((service, cache_handle))
+}
+
+/// Apply inbound authentication middleware to the router.
+async fn apply_auth(config: &ProxyConfig, router: Router) -> Result<Router> {
+    let router = if let Some(auth) = &config.auth {
+        match auth {
+            AuthConfig::Bearer {
+                tokens,
+                scoped_tokens,
+            } => {
+                let total = tokens.len() + scoped_tokens.len();
+                if scoped_tokens.is_empty() {
+                    // Simple bearer auth: use StaticBearerValidator
+                    tracing::info!(token_count = total, "Enabling bearer token auth");
+                    let validator = StaticBearerValidator::new(tokens.iter().cloned());
+                    let layer = AuthLayer::new(validator);
+                    router.layer(layer)
+                } else {
+                    // Scoped bearer auth: use custom layer that injects TokenClaims
+                    #[cfg(feature = "oauth")]
+                    {
+                        tracing::info!(
+                            token_count = total,
+                            scoped = scoped_tokens.len(),
+                            "Enabling bearer token auth with per-token scoping"
+                        );
+                        let layer =
+                            crate::bearer_scope::ScopedBearerAuthLayer::new(tokens, scoped_tokens);
+                        router.layer(layer)
+                    }
+                    #[cfg(not(feature = "oauth"))]
+                    {
+                        anyhow::bail!(
+                            "Per-token tool scoping requires the 'oauth' feature. \
+                             Rebuild with: cargo install mcp-proxy --features oauth"
+                        );
+                    }
+                }
+            }
+            #[cfg(feature = "oauth")]
+            AuthConfig::Jwt {
+                issuer,
+                audience,
+                jwks_uri,
+                ..
+            } => {
+                tracing::info!(
+                    issuer = %issuer,
+                    audience = %audience,
+                    jwks_uri = %jwks_uri,
+                    "Enabling JWT auth (JWKS)"
+                );
+                let validator = tower_mcp::oauth::JwksValidator::builder(jwks_uri)
+                    .expected_audience(audience)
+                    .expected_issuer(issuer)
+                    .build()
+                    .await
+                    .context("building JWKS validator")?;
+
+                let addr = format!(
+                    "http://{}:{}",
+                    config.proxy.listen.host, config.proxy.listen.port
+                );
+                let metadata = tower_mcp::oauth::ProtectedResourceMetadata::new(&addr)
+                    .authorization_server(issuer);
+
+                let layer = tower_mcp::oauth::OAuthLayer::new(validator, metadata);
+                router.layer(layer)
+            }
+            #[cfg(not(feature = "oauth"))]
+            AuthConfig::Jwt { .. } => {
+                anyhow::bail!(
+                    "JWT auth requires the 'oauth' feature. Rebuild with: cargo install mcp-proxy --features oauth"
+                );
+            }
+            #[cfg(feature = "oauth")]
+            AuthConfig::OAuth {
+                issuer,
+                audience,
+                token_validation,
+                jwks_uri,
+                introspection_endpoint,
+                client_id,
+                client_secret,
+                ..
+            } => {
+                use crate::config::TokenValidationStrategy;
+
+                tracing::info!(
+                    issuer = %issuer,
+                    audience = %audience,
+                    strategy = ?token_validation,
+                    "Enabling OAuth 2.1 auth"
+                );
+
+                // Auto-discover endpoints from issuer if not overridden
+                let discovered = crate::introspection::discover_auth_server(issuer)
+                    .await
+                    .context("discovering OAuth authorization server")?;
+
+                let effective_jwks_uri = jwks_uri
+                    .as_deref()
+                    .or(discovered.jwks_uri.as_deref())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "JWKS URI not found via discovery and not configured manually"
+                        )
+                    })?;
+
+                let effective_introspection = introspection_endpoint
+                    .as_deref()
+                    .or(discovered.introspection_endpoint.as_deref());
+
+                let addr = format!(
+                    "http://{}:{}",
+                    config.proxy.listen.host, config.proxy.listen.port
+                );
+                let metadata = tower_mcp::oauth::ProtectedResourceMetadata::new(&addr)
+                    .authorization_server(issuer);
+
+                match token_validation {
+                    TokenValidationStrategy::Jwt => {
+                        let validator =
+                            tower_mcp::oauth::JwksValidator::builder(effective_jwks_uri)
+                                .expected_audience(audience)
+                                .expected_issuer(issuer)
+                                .build()
+                                .await
+                                .context("building JWKS validator")?;
+                        let layer = tower_mcp::oauth::OAuthLayer::new(validator, metadata);
+                        router.layer(layer)
+                    }
+                    TokenValidationStrategy::Introspection => {
+                        let endpoint = effective_introspection.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "introspection endpoint not found via discovery and not configured"
+                            )
+                        })?;
+                        let validator = crate::introspection::IntrospectionValidator::new(
+                            endpoint,
+                            client_id.as_deref().unwrap(),
+                            client_secret.as_deref().unwrap(),
+                        )
+                        .expected_audience(audience);
+                        let layer = tower_mcp::oauth::OAuthLayer::new(validator, metadata);
+                        router.layer(layer)
+                    }
+                    TokenValidationStrategy::Both => {
+                        let endpoint = effective_introspection.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "introspection endpoint not found via discovery and not configured"
+                            )
+                        })?;
+                        let jwt_validator =
+                            tower_mcp::oauth::JwksValidator::builder(effective_jwks_uri)
+                                .expected_audience(audience)
+                                .expected_issuer(issuer)
+                                .build()
+                                .await
+                                .context("building JWKS validator")?;
+                        let introspection_validator =
+                            crate::introspection::IntrospectionValidator::new(
+                                endpoint,
+                                client_id.as_deref().unwrap(),
+                                client_secret.as_deref().unwrap(),
+                            )
+                            .expected_audience(audience);
+                        let fallback = crate::introspection::FallbackValidator::new(
+                            jwt_validator,
+                            introspection_validator,
+                        );
+                        let layer = tower_mcp::oauth::OAuthLayer::new(fallback, metadata);
+                        router.layer(layer)
+                    }
+                }
+            }
+            #[cfg(not(feature = "oauth"))]
+            AuthConfig::OAuth { .. } => {
+                anyhow::bail!(
+                    "OAuth auth requires the 'oauth' feature. Rebuild with: cargo install mcp-proxy --features oauth"
+                );
+            }
+        }
+    } else {
+        router
+    };
+    Ok(router)
+}
+
+/// Wait for SIGTERM or SIGINT, then log and return.
+pub async fn shutdown_signal(timeout: Duration) {
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await.ok();
+    }
+    tracing::info!(
+        timeout_seconds = timeout.as_secs(),
+        "Shutdown signal received, draining connections"
+    );
+}
+
+#[cfg(all(test, feature = "oauth"))]
+mod scope_enforcement_tests {
+    use std::collections::HashMap;
+
+    use tower::{Layer, Service};
+    use tower_mcp::oauth::token::TokenClaims;
+    use tower_mcp::protocol::{CallToolParams, McpRequest, RequestId};
+    use tower_mcp::router::Extensions;
+
+    use super::oauth_scope_layer;
+    use crate::test_util::MockService;
+
+    /// Build a `tools/call` request, optionally carrying a token with `scope`.
+    fn call_with_scope(scope: Option<&str>) -> tower_mcp::RouterRequest {
+        let mut extensions = Extensions::new();
+        if let Some(scope) = scope {
+            extensions.insert(TokenClaims {
+                sub: Some("user".into()),
+                iss: None,
+                aud: None,
+                exp: None,
+                scope: Some(scope.to_string()),
+                client_id: None,
+                extra: HashMap::new(),
+            });
+        }
+        tower_mcp::RouterRequest {
+            id: RequestId::Number(1),
+            inner: McpRequest::CallTool(CallToolParams {
+                name: "fs/read".into(),
+                arguments: serde_json::json!({}),
+                input_responses: None,
+                request_state: None,
+                meta: None,
+                task: None,
+            }),
+            extensions,
+        }
+    }
+
+    #[test]
+    fn no_required_scopes_yields_no_layer() {
+        assert!(oauth_scope_layer(&[]).is_none());
+    }
+
+    #[tokio::test]
+    async fn token_missing_required_scope_is_rejected() {
+        let required = vec!["mcp:access".to_string()];
+        let layer = oauth_scope_layer(&required).expect("layer for non-empty scopes");
+        let mut svc = layer.layer(MockService::with_tools(&["fs/read"]));
+
+        // Token carries a different scope -> missing the required one.
+        let resp = svc
+            .call(call_with_scope(Some("other:scope")))
+            .await
+            .unwrap();
+        let err = resp.inner.unwrap_err();
+        assert!(
+            err.message.to_lowercase().contains("scope"),
+            "expected insufficient-scope error, got: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn token_with_all_required_scopes_is_allowed() {
+        let required = vec!["mcp:access".to_string(), "mcp:read".to_string()];
+        let layer = oauth_scope_layer(&required).expect("layer for non-empty scopes");
+        let mut svc = layer.layer(MockService::with_tools(&["fs/read"]));
+
+        let resp = svc
+            .call(call_with_scope(Some("mcp:access mcp:read mcp:extra")))
+            .await
+            .unwrap();
+        assert!(
+            resp.inner.is_ok(),
+            "token carrying all required scopes should be allowed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod middleware_stack_tests {
+    //! Regression tests for #218: the per-backend middleware chain must
+    //! compose as one stack. Under tower-mcp's last-wins `backend_layer`
+    //! semantics (joshrotenberg/tower-mcp#1173), only the final middleware
+    //! survived and the first test here fails at "call 1 should time out".
+
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+
+    use tower::Service;
+    use tower_mcp::CallToolResult;
+    use tower_mcp::protocol::{CallToolParams, McpRequest, McpResponse, RequestId};
+    use tower_mcp::router::Extensions;
+    use tower_mcp_types::JsonRpcError;
+
+    use super::*;
+
+    /// Infallible backend with a hit counter, switchable slowness, and a
+    /// countdown of response-plane failures to emit before succeeding.
+    #[derive(Clone)]
+    struct FlakyBackend {
+        hits: Arc<AtomicUsize>,
+        slow: Arc<AtomicBool>,
+        fail_responses: Arc<AtomicUsize>,
+    }
+
+    impl FlakyBackend {
+        fn new() -> (Self, Arc<AtomicUsize>, Arc<AtomicBool>, Arc<AtomicUsize>) {
+            let hits = Arc::new(AtomicUsize::new(0));
+            let slow = Arc::new(AtomicBool::new(false));
+            let fail_responses = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    hits: hits.clone(),
+                    slow: slow.clone(),
+                    fail_responses: fail_responses.clone(),
+                },
+                hits,
+                slow,
+                fail_responses,
+            )
+        }
+    }
+
+    impl tower::Service<RouterRequest> for FlakyBackend {
+        type Response = RouterResponse;
+        type Error = Infallible;
+        type Future = Pin<Box<dyn Future<Output = Result<RouterResponse, Infallible>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: RouterRequest) -> Self::Future {
+            let hits = self.hits.clone();
+            let slow = self.slow.clone();
+            let fail_responses = self.fail_responses.clone();
+            Box::pin(async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                if slow.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                let inner = if fail_responses
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+                {
+                    Err(JsonRpcError::internal_error("transient backend failure"))
+                } else {
+                    Ok(McpResponse::CallTool(CallToolResult::text("pong")))
+                };
+                Ok(RouterResponse { id: req.id, inner })
+            })
+        }
+    }
+
+    fn req() -> RouterRequest {
+        RouterRequest {
+            id: RequestId::Number(1),
+            inner: McpRequest::CallTool(CallToolParams {
+                name: "ping".to_string(),
+                arguments: serde_json::json!({}),
+                input_responses: None,
+                request_state: None,
+                meta: None,
+                task: None,
+            }),
+            extensions: Extensions::new(),
+        }
+    }
+
+    async fn drive(svc: &mut InfallibleService) -> RouterResponse {
+        svc.ready()
+            .await
+            .expect("infallible")
+            .call(req())
+            .await
+            .expect("infallible")
+    }
+
+    fn test_breaker(
+        minimum_calls: usize,
+        wait_in_open: Duration,
+        permitted_in_half_open: usize,
+    ) -> tower_resilience::circuitbreaker::CircuitBreakerLayer {
+        let (layer, _handle) = tower_resilience::circuitbreaker::CircuitBreakerLayer::builder()
+            .failure_rate_threshold(0.5)
+            .minimum_number_of_calls(minimum_calls)
+            // The count-based window must be full before the breaker
+            // evaluates; align it with minimum_calls (see #220 for the
+            // production-side mapping fix).
+            .sliding_window_size(minimum_calls)
+            .wait_duration_in_open(wait_in_open)
+            .permitted_calls_in_half_open(permitted_in_half_open)
+            .name("test-cb")
+            .build_with_handle();
+        layer
+    }
+
+    /// Timeout and circuit breaker both apply; timeouts count as failures,
+    /// the breaker opens, rejects without reaching the backend, and closes
+    /// again through half-open probes once the fault clears.
+    #[tokio::test]
+    async fn timeout_and_breaker_compose_and_breaker_trips() {
+        let (backend, hits, slow, _fail) = FlakyBackend::new();
+        slow.store(true, Ordering::SeqCst);
+
+        let mut mw = BackendMiddlewareLayer::default();
+        mw.stage(TimeoutLayer::new(Duration::from_millis(10)));
+        mw.stage(test_breaker(4, Duration::from_millis(200), 2));
+
+        let mut svc = mw.layer(backend);
+
+        for i in 1..=4 {
+            let resp = drive(&mut svc).await;
+            assert!(resp.inner.is_err(), "call {i} should time out");
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            4,
+            "all four calls reach the backend"
+        );
+
+        let resp = drive(&mut svc).await;
+        assert!(resp.inner.is_err(), "open breaker rejects");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            4,
+            "rejected call must not reach the backend"
+        );
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        slow.store(false, Ordering::SeqCst);
+        for i in 1..=3 {
+            let resp = drive(&mut svc).await;
+            assert!(resp.inner.is_ok(), "recovered call {i} succeeds");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 7);
+    }
+
+    /// Retry (Infallible zone) and timeout (BoxError zone) coexist: the
+    /// retry policy absorbs transient response-plane failures while the
+    /// timeout stays armed above it.
+    #[tokio::test]
+    async fn retry_and_timeout_compose() {
+        let (backend, hits, _slow, fail) = FlakyBackend::new();
+        fail.store(2, Ordering::SeqCst);
+
+        let cfg = crate::config::RetryConfig {
+            max_retries: 3,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 5,
+            budget_percent: None,
+            min_retries_per_sec: 10,
+        };
+        let mut mw = BackendMiddlewareLayer {
+            retry: Some(crate::retry::build_retry_layer(&cfg, "test")),
+            ..Default::default()
+        };
+        mw.stage(TimeoutLayer::new(Duration::from_millis(500)));
+
+        let mut svc = mw.layer(backend);
+
+        let resp = drive(&mut svc).await;
+        assert!(resp.inner.is_ok(), "retries absorb the transient failures");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            3,
+            "two failures plus the successful attempt"
+        );
+    }
+
+    /// The empty layer is the identity.
+    #[tokio::test]
+    async fn empty_middleware_layer_is_identity() {
+        let (backend, hits, _slow, _fail) = FlakyBackend::new();
+        let mw = BackendMiddlewareLayer::default();
+        assert!(mw.is_empty());
+
+        let mut svc = mw.layer(backend);
+        let resp = drive(&mut svc).await;
+        assert!(resp.inner.is_ok());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// Regression for #220: a breaker built through the production config
+    /// mapping opens after exactly `minimum_calls` failing calls, not after
+    /// the tower-resilience default 100-call window fills.
+    #[tokio::test]
+    async fn config_mapped_breaker_opens_at_minimum_calls() {
+        let (backend, hits, slow, _fail) = FlakyBackend::new();
+        slow.store(true, Ordering::SeqCst);
+
+        let cfg = crate::config::CircuitBreakerConfig {
+            failure_rate_threshold: 0.5,
+            minimum_calls: 4,
+            wait_duration_seconds: 60,
+            permitted_calls_in_half_open: 1,
+        };
+        let (breaker, _handle) = build_breaker_layer(&cfg, "test");
+
+        let mut mw = BackendMiddlewareLayer::default();
+        mw.stage(TimeoutLayer::new(Duration::from_millis(10)));
+        mw.stage(breaker);
+
+        let mut svc = mw.layer(backend);
+
+        for i in 1..=4 {
+            let resp = drive(&mut svc).await;
+            assert!(resp.inner.is_err(), "call {i} should time out");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 4);
+
+        let resp = drive(&mut svc).await;
+        assert!(resp.inner.is_err(), "open breaker rejects");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            4,
+            "rejected call must not reach the backend"
+        );
+    }
+}

@@ -1174,8 +1174,6 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 [[package]]
 name = "mcp-proxy"
 version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7410b1ca3c7bc7ea83483a83ea7e2cf42ab5503b4db99a89c45a82953ad4bfa"
 dependencies = [
  "anyhow",
  "axum",
