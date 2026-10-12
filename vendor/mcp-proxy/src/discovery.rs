@@ -1,0 +1,609 @@
+//! BM25 full-text tool discovery and search.
+//!
+//! When a proxy aggregates many backends, clients (and the LLMs behind them)
+//! need a way to find relevant tools without scanning a long flat list. This
+//! module builds a BM25 search index over all registered tools using
+//! [`jpx-engine`](jpx_engine) and exposes three discovery tools under the
+//! `proxy/` namespace:
+//!
+//! | Tool | Description |
+//! |---|---|
+//! | `proxy/search_tools` | Full-text search across tool names, descriptions, parameters, and tags |
+//! | `proxy/similar_tools` | Find tools related to a given tool by BM25 term similarity |
+//! | `proxy/tool_categories` | Browse tools grouped by backend namespace with counts |
+//!
+//! # Enabling discovery
+//!
+//! Set `tool_discovery = true` in the `[proxy]` section:
+//!
+//! ```toml
+//! [proxy]
+//! name = "my-proxy"
+//! tool_discovery = true
+//!
+//! [proxy.listen]
+//! # ...
+//! ```
+//!
+//! The three `proxy/` discovery tools are added to the proxy's tool list
+//! alongside the backend tools.
+//!
+//! # Search mode (`tool_exposure = "search"`)
+//!
+//! For proxies aggregating a large number of tools (100+), listing every tool
+//! in `tools/list` responses can overwhelm LLM context windows. Setting
+//! `tool_exposure = "search"` hides individual backend tools from listings
+//! while keeping them invokable. Only the `proxy/` meta-tools appear in
+//! `tools/list`; clients use `proxy/search_tools` to discover and then call
+//! backend tools by name.
+//!
+//! ```toml
+//! [proxy]
+//! name = "my-proxy"
+//! tool_exposure = "search"
+//! # tool_discovery is implied when tool_exposure = "search"
+//! ```
+//!
+//! # Indexing architecture
+//!
+//! At startup, [`build_index`] sends a `ListTools` request through the proxy
+//! to collect all registered tools, groups them by backend namespace (derived
+//! from the configured separator), and registers each group as a
+//! [`DiscoverySpec`] in a
+//! [`DiscoveryRegistry`]. Tool annotations
+//! (destructive, read-only, idempotent, open-world) are extracted as
+//! searchable tags.
+//!
+//! The index is stored as a [`SharedDiscoveryIndex`] (`Arc<RwLock<DiscoveryRegistry>>`)
+//! for concurrent read access from tool handlers.
+//!
+//! # Hot reload re-indexing
+//!
+//! When the proxy configuration is hot-reloaded (backends added, removed, or
+//! updated), [`reindex`] rebuilds the search index from scratch with the new
+//! tool set. This keeps search results consistent with the proxy's current
+//! state without requiring a restart.
+
+use std::sync::Arc;
+
+use jpx_engine::{
+    CategorySummary, DiscoveryRegistry, DiscoverySpec, ParamSpec, ServerInfo, ToolQueryResult,
+    ToolSpec,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
+use tower_mcp::proxy::McpProxy;
+use tower_mcp::{CallToolResult, NoParams, ToolBuilder, ToolDefinition};
+
+/// Shared discovery index, wrapped for concurrent access from tool handlers.
+pub type SharedDiscoveryIndex = Arc<RwLock<DiscoveryRegistry>>;
+
+/// Build a discovery index from the proxy's current tool list.
+///
+/// Sends a `ListTools` request through the proxy to collect all registered
+/// tools, then indexes them using jpx-engine's BM25 search.
+pub async fn build_index(proxy: &mut McpProxy, separator: &str) -> SharedDiscoveryIndex {
+    use tower::Service;
+    use tower_mcp::protocol::{ListToolsParams, McpRequest, McpResponse, RequestId};
+    use tower_mcp::router::{Extensions, RouterRequest};
+
+    let req = RouterRequest {
+        id: RequestId::Number(0),
+        inner: McpRequest::ListTools(ListToolsParams::default()),
+        extensions: Extensions::new(),
+    };
+
+    let tools = match proxy.call(req).await {
+        Ok(resp) => match resp.inner {
+            Ok(McpResponse::ListTools(result)) => result.tools,
+            _ => {
+                tracing::warn!("Failed to list tools for discovery indexing");
+                vec![]
+            }
+        },
+        Err(_) => vec![],
+    };
+
+    let mut registry = DiscoveryRegistry::new();
+    index_tools(&mut registry, &tools, separator);
+
+    tracing::info!(tools_indexed = tools.len(), "Built tool discovery index");
+
+    Arc::new(RwLock::new(registry))
+}
+
+/// Re-index all tools into an existing shared discovery index.
+///
+/// Called after hot reload adds, removes, or replaces backends to keep
+/// the search index in sync with the proxy's current tool set.
+pub async fn reindex(index: &SharedDiscoveryIndex, proxy: &mut McpProxy, separator: &str) {
+    use tower::Service;
+    use tower_mcp::protocol::{ListToolsParams, McpRequest, McpResponse, RequestId};
+    use tower_mcp::router::{Extensions, RouterRequest};
+
+    let req = RouterRequest {
+        id: RequestId::Number(0),
+        inner: McpRequest::ListTools(ListToolsParams::default()),
+        extensions: Extensions::new(),
+    };
+
+    let tools = match proxy.call(req).await {
+        Ok(resp) => match resp.inner {
+            Ok(McpResponse::ListTools(result)) => result.tools,
+            _ => vec![],
+        },
+        Err(_) => vec![],
+    };
+
+    let mut registry = DiscoveryRegistry::new();
+    index_tools(&mut registry, &tools, separator);
+
+    let mut guard = index.write().await;
+    *guard = registry;
+
+    tracing::info!(tools_indexed = tools.len(), "Re-indexed tool discovery");
+}
+
+/// Index MCP tool definitions into the discovery registry.
+///
+/// Groups tools by backend namespace (derived from the separator) and registers
+/// each group as a discovery "server" with its tools.
+fn index_tools(registry: &mut DiscoveryRegistry, tools: &[ToolDefinition], separator: &str) {
+    // Group tools by backend namespace
+    let mut by_namespace: std::collections::HashMap<String, Vec<&ToolDefinition>> =
+        std::collections::HashMap::new();
+
+    for tool in tools {
+        let namespace = tool
+            .name
+            .split_once(separator)
+            .map(|(ns, _)| ns.to_string())
+            .unwrap_or_else(|| "default".to_string());
+        by_namespace.entry(namespace).or_default().push(tool);
+    }
+
+    for (namespace, ns_tools) in &by_namespace {
+        let tool_specs: Vec<ToolSpec> = ns_tools
+            .iter()
+            .map(|t| tool_definition_to_spec(t, separator))
+            .collect();
+
+        let spec = DiscoverySpec {
+            schema: None,
+            server: ServerInfo {
+                name: namespace.clone(),
+                version: None,
+                description: None,
+            },
+            tools: tool_specs,
+            categories: std::collections::HashMap::new(),
+        };
+
+        registry.register(spec, true);
+    }
+}
+
+/// Convert an MCP ToolDefinition to a jpx ToolSpec for indexing.
+fn tool_definition_to_spec(tool: &ToolDefinition, separator: &str) -> ToolSpec {
+    // Extract the local tool name (without namespace prefix)
+    let local_name = tool
+        .name
+        .split_once(separator)
+        .map(|(_, name)| name.to_string())
+        .unwrap_or_else(|| tool.name.clone());
+
+    // Extract parameter names from input schema
+    let params = extract_params(&tool.input_schema);
+
+    // Extract tags from annotations if available
+    let mut tags = Vec::new();
+    if let Some(annotations) = &tool.annotations {
+        if annotations.destructive_hint {
+            tags.push("destructive".to_string());
+        }
+        if annotations.read_only_hint {
+            tags.push("read-only".to_string());
+        }
+        if annotations.idempotent_hint {
+            tags.push("idempotent".to_string());
+        }
+        if annotations.open_world_hint {
+            tags.push("open-world".to_string());
+        }
+    }
+
+    // Extract category from namespace
+    let category = tool
+        .name
+        .split_once(separator)
+        .map(|(ns, _)| ns.to_string());
+
+    ToolSpec {
+        name: local_name,
+        aliases: vec![],
+        category,
+        subcategory: None,
+        tags,
+        summary: tool.description.clone(),
+        description: tool.description.clone(),
+        params,
+        returns: None,
+        examples: vec![],
+        related: vec![],
+        since: None,
+        stability: None,
+    }
+}
+
+/// Extract parameter specs from a JSON Schema input_schema.
+fn extract_params(schema: &serde_json::Value) -> Vec<ParamSpec> {
+    let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return vec![];
+    };
+    let required: std::collections::HashSet<&str> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    properties
+        .iter()
+        .map(|(name, prop)| ParamSpec {
+            name: name.clone(),
+            param_type: prop.get("type").and_then(|t| t.as_str()).map(String::from),
+            required: required.contains(name.as_str()),
+            description: prop
+                .get("description")
+                .and_then(|d| d.as_str())
+                .map(String::from),
+            enum_values: None,
+            default: None,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Discovery tool handlers
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SearchInput {
+    /// Search query (e.g. "read file", "database query", "math operations")
+    query: String,
+    /// Maximum number of results to return (default: 10)
+    #[serde(default = "default_top_k")]
+    top_k: usize,
+}
+
+fn default_top_k() -> usize {
+    10
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SimilarInput {
+    /// Tool ID to find similar tools for (e.g. "math:add")
+    tool_id: String,
+    /// Maximum number of results to return (default: 5)
+    #[serde(default = "default_similar_k")]
+    top_k: usize,
+}
+
+fn default_similar_k() -> usize {
+    5
+}
+
+#[derive(Serialize)]
+struct SearchResultEntry {
+    id: String,
+    server: String,
+    name: String,
+    description: Option<String>,
+    score: f64,
+    tags: Vec<String>,
+    category: Option<String>,
+}
+
+impl From<ToolQueryResult> for SearchResultEntry {
+    fn from(r: ToolQueryResult) -> Self {
+        Self {
+            id: r.id,
+            server: r.server,
+            name: r.tool.name,
+            description: r.tool.description,
+            score: r.score,
+            tags: r.tool.tags,
+            category: r.tool.category,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct CategoriesResult {
+    categories: Vec<CategorySummary>,
+    total_categories: usize,
+}
+
+/// Build the discovery tools and return them for inclusion in the admin router.
+pub fn build_discovery_tools(index: SharedDiscoveryIndex) -> Vec<tower_mcp::Tool> {
+    let index_for_search = Arc::clone(&index);
+    let search_tools = ToolBuilder::new("search_tools")
+        .description(
+            "Search for tools across all backends using BM25 full-text search. \
+             Searches tool names, descriptions, parameters, and tags.",
+        )
+        .handler(move |input: SearchInput| {
+            let idx = Arc::clone(&index_for_search);
+            async move {
+                let registry = idx.read().await;
+                let results = registry.query(&input.query, input.top_k);
+                let entries: Vec<SearchResultEntry> =
+                    results.into_iter().map(SearchResultEntry::from).collect();
+                Ok(CallToolResult::text(
+                    serde_json::to_string_pretty(&entries).unwrap(),
+                ))
+            }
+        })
+        .build();
+
+    let index_for_similar = Arc::clone(&index);
+    let similar_tools = ToolBuilder::new("similar_tools")
+        .description(
+            "Find tools similar to a given tool. Uses BM25 similarity based on \
+             shared terms in descriptions, parameters, and tags.",
+        )
+        .handler(move |input: SimilarInput| {
+            let idx = Arc::clone(&index_for_similar);
+            async move {
+                let registry = idx.read().await;
+                let results = registry.similar(&input.tool_id, input.top_k);
+                let entries: Vec<SearchResultEntry> =
+                    results.into_iter().map(SearchResultEntry::from).collect();
+                Ok(CallToolResult::text(
+                    serde_json::to_string_pretty(&entries).unwrap(),
+                ))
+            }
+        })
+        .build();
+
+    let index_for_categories = Arc::clone(&index);
+    let tool_categories = ToolBuilder::new("tool_categories")
+        .description(
+            "List all tool categories (backend namespaces) with tool counts. \
+             Useful for browsing available capabilities by domain.",
+        )
+        .handler(move |_: NoParams| {
+            let idx = Arc::clone(&index_for_categories);
+            async move {
+                let registry = idx.read().await;
+                let categories = registry.list_categories();
+                let mut cats: Vec<CategorySummary> = categories.into_values().collect();
+                cats.sort_by_key(|b| std::cmp::Reverse(b.tool_count));
+                let result = CategoriesResult {
+                    total_categories: cats.len(),
+                    categories: cats,
+                };
+                Ok(CallToolResult::text(
+                    serde_json::to_string_pretty(&result).unwrap(),
+                ))
+            }
+        })
+        .build();
+
+    vec![search_tools, similar_tools, tool_categories]
+}
+
+#[cfg(test)]
+mod tests {
+    use jpx_engine::DiscoveryRegistry;
+    use tower_mcp::ToolDefinition;
+    use tower_mcp_types::protocol::ToolAnnotations;
+
+    use super::*;
+
+    fn make_tool(
+        name: &str,
+        description: Option<&str>,
+        annotations: Option<ToolAnnotations>,
+    ) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            title: None,
+            description: description.map(|d| d.to_string()),
+            input_schema: serde_json::json!({"type": "object"}),
+            output_schema: None,
+            icons: None,
+            annotations,
+            execution: None,
+            meta: None,
+        }
+    }
+
+    // -- index_tools tests ---------------------------------------------------
+
+    #[test]
+    fn index_tools_empty_list() {
+        let mut registry = DiscoveryRegistry::new();
+        index_tools(&mut registry, &[], "/");
+        let cats = registry.list_categories();
+        assert!(cats.is_empty());
+    }
+
+    #[test]
+    fn index_tools_groups_by_namespace() {
+        let tools = vec![
+            make_tool("fs/read", Some("Read a file"), None),
+            make_tool("fs/write", Some("Write a file"), None),
+            make_tool("db/query", Some("Run a query"), None),
+        ];
+
+        let mut registry = DiscoveryRegistry::new();
+        index_tools(&mut registry, &tools, "/");
+
+        let cats = registry.list_categories();
+        assert_eq!(cats.len(), 2);
+        assert!(cats.contains_key("fs"));
+        assert!(cats.contains_key("db"));
+    }
+
+    #[test]
+    fn index_tools_no_separator_uses_default_namespace() {
+        let tools = vec![make_tool("standalone", Some("No namespace"), None)];
+
+        let mut registry = DiscoveryRegistry::new();
+        index_tools(&mut registry, &tools, "/");
+
+        // The tool is registered under the "default" server; search finds it
+        let results = registry.query("namespace", 10);
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn index_tools_without_descriptions() {
+        let tools = vec![make_tool("ns/tool", None, None)];
+
+        let mut registry = DiscoveryRegistry::new();
+        index_tools(&mut registry, &tools, "/");
+
+        let cats = registry.list_categories();
+        assert_eq!(cats.len(), 1);
+    }
+
+    #[test]
+    fn index_tools_with_annotations() {
+        let tools = vec![make_tool(
+            "ns/dangerous",
+            Some("Dangerous tool"),
+            Some(ToolAnnotations {
+                title: None,
+                destructive_hint: true,
+                read_only_hint: false,
+                idempotent_hint: false,
+                open_world_hint: true,
+            }),
+        )];
+
+        let mut registry = DiscoveryRegistry::new();
+        index_tools(&mut registry, &tools, "/");
+
+        // The tool was indexed; search for its annotation tag
+        let results = registry.query("destructive", 10);
+        assert!(!results.is_empty());
+    }
+
+    // -- tool_definition_to_spec tests ----------------------------------------
+
+    #[test]
+    fn tool_definition_to_spec_extracts_local_name() {
+        let tool = make_tool("backend/read_file", Some("Reads files"), None);
+        let spec = tool_definition_to_spec(&tool, "/");
+        assert_eq!(spec.name, "read_file");
+        assert_eq!(spec.category.as_deref(), Some("backend"));
+    }
+
+    #[test]
+    fn tool_definition_to_spec_no_separator() {
+        let tool = make_tool("read_file", Some("Reads files"), None);
+        let spec = tool_definition_to_spec(&tool, "/");
+        assert_eq!(spec.name, "read_file");
+        assert!(spec.category.is_none());
+    }
+
+    #[test]
+    fn tool_definition_to_spec_annotation_tags() {
+        let tool = make_tool(
+            "ns/tool",
+            Some("desc"),
+            Some(ToolAnnotations {
+                title: None,
+                destructive_hint: true,
+                read_only_hint: true,
+                idempotent_hint: true,
+                open_world_hint: true,
+            }),
+        );
+        let spec = tool_definition_to_spec(&tool, "/");
+        assert_eq!(spec.tags.len(), 4);
+        assert!(spec.tags.contains(&"destructive".to_string()));
+        assert!(spec.tags.contains(&"read-only".to_string()));
+        assert!(spec.tags.contains(&"idempotent".to_string()));
+        assert!(spec.tags.contains(&"open-world".to_string()));
+    }
+
+    #[test]
+    fn tool_definition_to_spec_no_annotations_no_tags() {
+        let tool = make_tool("ns/tool", Some("desc"), None);
+        let spec = tool_definition_to_spec(&tool, "/");
+        assert!(spec.tags.is_empty());
+    }
+
+    #[test]
+    fn tool_definition_to_spec_preserves_description() {
+        let tool = make_tool("ns/tool", Some("My description"), None);
+        let spec = tool_definition_to_spec(&tool, "/");
+        assert_eq!(spec.summary.as_deref(), Some("My description"));
+        assert_eq!(spec.description.as_deref(), Some("My description"));
+    }
+
+    // -- extract_params tests ------------------------------------------------
+
+    #[test]
+    fn extract_params_empty_schema() {
+        let schema = serde_json::json!({"type": "object"});
+        let params = extract_params(&schema);
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn extract_params_with_properties() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path"
+                },
+                "recursive": {
+                    "type": "boolean"
+                }
+            },
+            "required": ["path"]
+        });
+        let params = extract_params(&schema);
+        assert_eq!(params.len(), 2);
+
+        let path_param = params.iter().find(|p| p.name == "path").unwrap();
+        assert!(path_param.required);
+        assert_eq!(path_param.param_type.as_deref(), Some("string"));
+        assert_eq!(path_param.description.as_deref(), Some("File path"));
+
+        let recursive_param = params.iter().find(|p| p.name == "recursive").unwrap();
+        assert!(!recursive_param.required);
+        assert_eq!(recursive_param.param_type.as_deref(), Some("boolean"));
+    }
+
+    #[test]
+    fn extract_params_no_required_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}
+            }
+        });
+        let params = extract_params(&schema);
+        assert_eq!(params.len(), 1);
+        assert!(!params[0].required);
+    }
+
+    // -- build_discovery_tools tests -----------------------------------------
+
+    #[test]
+    fn build_discovery_tools_returns_three_tools() {
+        let index = Arc::new(RwLock::new(DiscoveryRegistry::new()));
+        let tools = build_discovery_tools(index);
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[0].name, "search_tools");
+        assert_eq!(tools[1].name, "similar_tools");
+        assert_eq!(tools[2].name, "tool_categories");
+    }
+}
