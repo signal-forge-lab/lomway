@@ -3,13 +3,11 @@
 //! Routes:
 //!
 //! * `GET /healthz` — liveness (always `200` while the process serves);
-//! * `GET /readyz` — live backend readiness;
+//! * `GET /readyz` — cached backend readiness;
 //! * `/mcp/*` — the upstream MCP endpoint (client tools only).
 //!
 //! Everything else is `404`. The upstream `/admin/*` management plane is
 //! unreachable both at the top level and through the `/mcp` mount.
-
-use std::time::Duration;
 
 use anyhow::Result;
 use axum::{
@@ -21,25 +19,31 @@ use axum::{
     routing::get,
 };
 use mcp_proxy::Proxy;
-use tower_mcp::proxy::McpProxy;
 
 use crate::config::model::NorthboundOAuthConfig;
+use crate::gateway::reconnect::MonitorHandle;
 
 /// Build the externally served router.
 ///
-/// Readiness is evaluated against the live backend transports rather than a
-/// startup snapshot, so backend restarts correctly drive `/readyz` from 200
-/// to 503 and back to 200 without restarting Lomway.
+/// For legacy external callers without a monitor, readiness uses a snapshot.
+/// Construct a serving gateway via Gateway::build for monitored readiness.
 pub fn gateway_router(proxy: Proxy) -> Router {
-    gateway_router_with_oauth(proxy, None)
+    let monitor = proxy
+        .application_extension::<MonitorHandle>()
+        .map(|monitor| (*monitor).clone())
+        .unwrap_or_else(|| MonitorHandle::snapshot_for_proxy(proxy.mcp_proxy().clone()));
+    gateway_router_with_monitor_and_oauth(proxy, None, monitor)
 }
 
-pub(crate) fn gateway_router_with_oauth(
+pub fn gateway_router_with_monitor(proxy: Proxy, monitor: MonitorHandle) -> Router {
+    gateway_router_with_monitor_and_oauth(proxy, None, monitor)
+}
+
+pub(crate) fn gateway_router_with_monitor_and_oauth(
     proxy: Proxy,
     oauth: Option<NorthboundOAuthConfig>,
+    monitor: MonitorHandle,
 ) -> Router {
-    let readiness_proxy = proxy.mcp_proxy().clone();
-    let expected_backends = readiness_proxy.backend_count();
     let (upstream, _sessions) = proxy.into_router();
     let upstream = upstream.layer(middleware::from_fn(block_upstream_admin));
     let (upstream, metadata) = match oauth {
@@ -51,25 +55,19 @@ pub(crate) fn gateway_router_with_oauth(
         .route(
             "/readyz",
             get(move || {
-                let proxy = readiness_proxy.clone();
-                async move { backend_readiness(proxy, expected_backends).await }
+                let monitor = monitor.clone();
+                async move {
+                    if monitor.ready() {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    }
+                }
             }),
         )
         .merge(metadata)
         .nest("/mcp", upstream)
         .fallback(|| async { StatusCode::NOT_FOUND })
-}
-
-async fn backend_readiness(proxy: McpProxy, expected_backends: usize) -> StatusCode {
-    match tokio::time::timeout(Duration::from_secs(2), proxy.health_check()).await {
-        Ok(statuses)
-            if statuses.len() == expected_backends
-                && statuses.iter().all(|status| status.healthy) =>
-        {
-            StatusCode::OK
-        }
-        _ => StatusCode::SERVICE_UNAVAILABLE,
-    }
 }
 
 async fn block_upstream_admin(request: Request, next: Next) -> Response {

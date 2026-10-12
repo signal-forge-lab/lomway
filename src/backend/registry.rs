@@ -77,6 +77,7 @@ mod tests {
             server: Default::default(),
             observability: Default::default(),
             policy: Default::default(),
+            monitor: Default::default(),
             backends,
         }
     }
