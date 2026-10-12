@@ -92,6 +92,28 @@ Discovery reports tools registered in the raw proxy, not a separate health
 guarantee. If a registered backend goes offline after registration, its call
 can fail normally until the external supervisor restores it.
 
+### Backend reconnect monitor
+
+Both public and legacy TOML accept the optional top-level monitor table:
+
+```toml
+[monitor]
+interval_seconds = 30
+deferred_idle_minutes = 10
+```
+
+The default is a 30-second TCP probe for active direct backends (range 1–300
+seconds). A deferred backend stops background polling until explicitly used
+again after ten idle minutes (range 1–1440 minutes). Outages use exponential
+probe backoff from 1 to 60 seconds, and recovery requires two stable probes.
+The deferred discovery tools check/reconnect their target on demand. A failed
+tool call is **not retried**; a transport error schedules recovery for a
+subsequent call. The upstream library's inaccessible ten-second MCP ping
+thread is disabled in Lomway's pinned adapter. On the MCP 2026-07-28
+protocol, `ping` is unsupported, so Lomway does not run periodic MCP pings.
+`/readyz` reads the monitor's cached direct-backend status, rather than
+issuing network probes per request.
+
 ## 4. CLI reference
 
 The binary implements every core mode itself (exit codes: `0` success, `1` failure, `2` usage error):

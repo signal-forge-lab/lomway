@@ -89,6 +89,27 @@ backendを起動するまで検索対象になりません。起動後はLomway�
 Discoveryはraw proxyへの登録状態を示すもので、独立したhealth保証ではありません。
 登録後にbackendが停止した場合、そのcallは外部Supervisorが復旧するまで通常どおり失敗し得ます。
 
+### backend再接続monitor
+
+公開schemaとlegacy TOMLの両方で、以下のtop-level設定を使用できます。
+
+```toml
+[monitor]
+interval_seconds = 30
+deferred_idle_minutes = 10
+```
+
+direct backendのTCP probeは既定30秒（許容範囲1〜300秒）です。
+deferred backendは10分間未使用になると背景監視を停止します
+（設定範囲1〜1440分）。down時は1秒から最大60秒まで指数backoffし、
+復旧判定には連続2回の安定probeを必要とします。deferredの検索や呼び出し時は
+対象をon-demandで確認・再接続します。失敗したユーザーのtool callそのものは
+**再試行しません**。transport errorは次の呼び出しに向けた再接続を通知します。
+公開されないupstream管理API用の10秒MCP ping threadは、Lomway用adapterで
+無効化しています。MCP 2026-07-28では`ping`が未対応のため、定期MCP pingは
+実施しません。`/readyz`はdirect backendの監視結果のcacheのみ参照し、
+リクエスト毎にbackendへ接続しません。
+
 ## 4. CLIリファレンス
 
 バイナリはcoreの全モードを単体で実装します（exit code: `0` 成功 / `1` 失敗 / `2` usage error）:
