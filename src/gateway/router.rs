@@ -45,6 +45,10 @@ pub(crate) fn gateway_router_with_monitor_and_oauth(
     monitor: MonitorHandle,
 ) -> Router {
     let (upstream, _sessions) = proxy.into_router();
+    // Discovery is behind OAuth: authentication and per-client policy run first.
+    let upstream = upstream.layer(middleware::from_fn(
+        crate::gateway::discovery::server_discover,
+    ));
     let upstream = upstream.layer(middleware::from_fn(block_upstream_admin));
     let (upstream, metadata) = match oauth {
         Some(oauth) => crate::gateway::auth::protect_mcp_router(upstream, oauth),

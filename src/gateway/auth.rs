@@ -180,7 +180,11 @@ async fn restricted_pat_request(
             .unwrap_or(""),
     );
     let should_filter = match method {
-        "initialize" | "ping" | "notifications/initialized" | "notifications/cancelled" => false,
+        "initialize"
+        | "ping"
+        | "server/discover"
+        | "notifications/initialized"
+        | "notifications/cancelled" => false,
         "tools/list" => true,
         "tools/call" => {
             let name = message.pointer("/params/name").and_then(Value::as_str);
