@@ -31,6 +31,7 @@ tmp/
 /.tmp_vendor/
 /.tmp_tower_mcp/
 /sidecar/node_modules/
+/sidecar-mac/node_modules/
 
 # Editors / OS
 .vscode/
