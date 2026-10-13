@@ -9,6 +9,7 @@ import {
 import { resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 
 import { SingleUserOAuthProvider } from "./provider.mjs";
+import { ownerAuthorizedIntrospection } from "./introspection.mjs";
 
 function requiredEnv(name, minimumLength = 1) {
   const value = process.env[name]?.trim();
@@ -89,13 +90,7 @@ app.post("/oauth/introspect", async (req, res) => {
   }
   try {
     const info = await provider.verifyAccessToken(token);
-    res.json({
-      active: true,
-      client_id: info.clientId,
-      scope: info.scopes.join(" "),
-      exp: info.expiresAt,
-      ...(info.resource ? { aud: info.resource.href } : {}),
-    });
+    res.json(ownerAuthorizedIntrospection(info));
   } catch {
     res.json({ active: false });
   }

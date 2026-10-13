@@ -18,6 +18,9 @@ import http from "node:http";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sidecarRoot = join(repoRoot, "sidecar-mac");
+// Node 24 matches the native SQLite module deployed on the Mac host.
+const oauthNode = process.env.LOMWAY_OAUTH_NODE_BINARY || "/opt/homebrew/opt/node@24/bin/node";
+if (!existsSync(oauthNode)) throw new Error("Mac OAuth Node 24 binary is required");
 const home = homedir();
 const port = Number(process.env.LOMWAY_OAUTH_PORT || "7677");
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -127,7 +130,7 @@ function initializeState() {
   chmodSync(stateDir, 0o700);
   if (!existsSync(workbridgeDatabase)) return;
   const result = spawnSync(
-    process.execPath,
+    oauthNode,
     ["src/migrate-state.mjs", workbridgeDatabase, databasePath],
     { cwd: sidecarRoot, encoding: "utf8" },
   );
@@ -164,7 +167,7 @@ async function start() {
   mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
   const stdout = openSync(stdoutPath, "a", 0o600);
   const stderr = openSync(stderrPath, "a", 0o600);
-  const child = spawn(process.execPath, ["src/server.mjs"], {
+  const child = spawn(oauthNode, ["src/server.mjs"], {
     cwd: sidecarRoot,
     detached: true,
     stdio: ["ignore", stdout, stderr],
