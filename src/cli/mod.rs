@@ -43,7 +43,10 @@ pub async fn run(command: Command) -> Result<()> {
             let path = resolve_config_path(config.as_deref())?;
             let config = load_gateway_config(&path)?;
             init_logging(&config);
-            let gateway = Gateway::build(config)
+            // Deferred manifests persist in the per-user state directory
+            // (LOMWAY_STATE_DIR overrides it), never in the repository.
+            let state_dir = crate::gateway::default_state_dir();
+            let gateway = Gateway::build_with_state_dir(config, state_dir)
                 .await
                 .with_context(|| format!("failed to start gateway with {}", path.display()))?;
             print_startup(&gateway);

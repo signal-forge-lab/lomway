@@ -11,6 +11,8 @@
 //! 5. upstream proxy composition with the `proxy` control-plane backend
 //!    removed — refusal to serve if that removal cannot be proven.
 
+use std::path::PathBuf;
+
 use anyhow::{Result, ensure};
 use axum::Router;
 use mcp_proxy::{Proxy, ProxyConfig};
@@ -68,9 +70,20 @@ pub struct Gateway {
 }
 
 impl Gateway {
-    /// Build from the public configuration model.
+    /// Build from the public configuration model. Deferred tool manifests
+    /// are kept in memory only.
     pub async fn build(config: GatewayConfig) -> Result<Self> {
-        Self::finish(config).await
+        Self::finish(config, None).await
+    }
+
+    /// Build and persist deferred tool manifests under `state_dir` so a
+    /// restarted gateway can answer capability searches for idle deferred
+    /// backends without starting them.
+    pub async fn build_with_state_dir(
+        config: GatewayConfig,
+        state_dir: Option<PathBuf>,
+    ) -> Result<Self> {
+        Self::finish(config, state_dir).await
     }
 
     /// Build from a legacy deployment configuration (the current six-backend
@@ -78,10 +91,10 @@ impl Gateway {
     pub async fn build_from_legacy(config: ProxyConfig) -> Result<Self> {
         validate_proxy_policy(&config)?;
         let public = migrate::to_public(&config)?;
-        Self::finish(public).await
+        Self::finish(public, None).await
     }
 
-    async fn finish(public: GatewayConfig) -> Result<Self> {
+    async fn finish(public: GatewayConfig, state_dir: Option<PathBuf>) -> Result<Self> {
         // The registry and probe always operate on the public view of the
         // configuration so both entry points share identical startup
         // semantics. The public model is the probe source of truth, so the
@@ -93,7 +106,8 @@ impl Gateway {
         let registry = BackendRegistry::from_config(&public)?;
         let report = crate::backend::probe::probe_registry(&registry).await?;
         let plan = plan_tools(&report)?;
-        let deferred_catalog = crate::gateway::deferred::DeferredCatalog::from_config(&public);
+        let deferred_catalog = crate::gateway::deferred::DeferredCatalog::from_config(&public)
+            .with_state_dir(state_dir, public.server.port);
         tracing::info!(
             backends = report.healthy.len(),
             degraded = report.unavailable.len(),
