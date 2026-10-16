@@ -8,6 +8,7 @@ All notable changes to Lomway are documented here. The format is based on [Keep 
 
 - Hybrid per-backend tool exposure: frequent backends stay native/direct while low-frequency backends can use `exposure = "deferred"`.
 - Three Lomway-owned safe meta-tools for deferred capabilities: `lomway_search_tools`, `lomway_describe_tool`, and `lomway_call_tool`.
+- Capability search: `lomway_search_tools` now searches direct tools, deferred tools (from a cached manifest with `manifest_seen_at`, or an `unverified` placeholder), and declared internal capabilities, ranked by upstream OSS name, English/Japanese aliases, action, and description (`capabilities/catalog.toml`, [docs/CAPABILITY_SEARCH.md](CAPABILITY_SEARCH.md)). `lomway_describe_tool` also describes direct and internal capabilities.
 
 ### Security
 
@@ -15,6 +16,7 @@ All notable changes to Lomway are documented here. The format is based on [Keep 
 - Configured optional backends skipped at startup remain reconnect candidates, so a later supervisor start can be adopted without restarting Lomway.
 - Backend namespace prefixes must now be non-overlapping as well as unique, preventing prefix-based ownership ambiguity in direct and deferred routing.
 - Upstream `proxy/*` administrative tools remain removed; hybrid exposure does not re-enable dynamic backend/config management.
+- Capability search never activates or reconnects a backend, and its results are filtered by the caller's PAT/OAuth tool allowlist; unauthorized tools are indistinguishable from nonexistent ones.
 
 ## [0.1.0] - 2026-09-13
 
