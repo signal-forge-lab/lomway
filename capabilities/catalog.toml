@@ -1,0 +1,197 @@
+# Lomway capability declarations (schema_version = 1).
+#
+# Declares which upstream OSS project or internal capability sits behind a
+# tool or action, plus English/Japanese aliases, so `lomway_search_tools` can
+# find direct, deferred, and internal capabilities by name, alias, or intent.
+#
+# Public-repository rules: declare names, aliases, and summaries only. Never
+# add machine paths, ports, URLs, hostnames, tokens, or account names here.
+#
+# Matching keys (exactly one per [[capability]]):
+#   tool    = exact client-visible tool name
+#   backend = configured backend id; applies to every tool of that backend
+#             and to its `unverified` placeholder when no manifest is cached
+# [[internal]] entries describe capabilities with no MCP tool of their own,
+# reached through an existing tool named by `via`.
+
+schema_version = 1
+
+# ---------------------------------------------------------------------------
+# Code analysis
+# ---------------------------------------------------------------------------
+
+[[capability]]
+tool = "workbridge_run_semantic_action"
+domain = "code-analysis"
+provider_oss = "Serena"
+aliases = [
+  "serena", "lsp", "language server", "language server protocol",
+  "semantic code search", "code intelligence", "symbol search",
+  "セマンティック検索", "コード解析", "静的解析", "言語サーバー", "シンボル",
+]
+
+[[capability.actions]]
+action = "find_symbol"
+aliases = ["find symbol", "symbol lookup", "search symbol", "シンボル検索", "シンボルを探す", "関数を探す", "クラスを探す"]
+
+[[capability.actions]]
+action = "find_declaration"
+aliases = ["go to definition", "find definition", "declaration", "定義へ移動", "定義を探す", "宣言を探す", "定義元"]
+
+[[capability.actions]]
+action = "find_implementations"
+aliases = ["find implementations", "implementations", "implementors", "実装を探す", "実装一覧", "実装箇所"]
+
+[[capability.actions]]
+action = "find_referencing_symbols"
+aliases = ["find references", "references", "referencing symbols", "who uses", "usages", "参照元", "参照箇所", "参照を探す", "使用箇所", "関数の参照元"]
+
+[[capability.actions]]
+action = "get_symbols_overview"
+aliases = ["symbols overview", "file outline", "outline", "シンボル一覧", "アウトライン", "ファイル構造"]
+
+[[capability.actions]]
+action = "get_diagnostics_for_file"
+aliases = ["diagnostics", "compiler errors", "lint errors", "type errors", "診断", "エラー一覧", "型エラー", "コンパイルエラー"]
+
+[[capability.actions]]
+action = "search_for_pattern"
+aliases = ["search for pattern", "pattern search", "regex search", "パターン検索", "正規表現検索"]
+
+[[capability]]
+tool = "workbridge_run_graft_action"
+domain = "code-analysis"
+provider_oss = "Graft"
+aliases = ["graft", "repository graph", "repo map", "code graph", "リポジトリ構造", "リポジトリマップ", "コードグラフ"]
+
+[[capability.actions]]
+action = "map"
+aliases = ["repository map", "orientation", "hotspots", "全体像", "ホットスポット"]
+
+[[capability.actions]]
+action = "ask"
+aliases = ["conceptual search", "where is", "概念検索"]
+
+[[capability.actions]]
+action = "callers"
+aliases = ["callers", "callees", "call graph", "blast radius", "呼び出し元", "呼び出し先", "影響範囲"]
+
+[[capability.actions]]
+action = "skeleton"
+aliases = ["api surface", "file skeleton", "スケルトン", "公開API"]
+
+[[capability.actions]]
+action = "grep"
+aliases = ["indexed grep", "exhaustive search", "全文検索"]
+
+[[capability.actions]]
+action = "check"
+aliases = ["graph freshness", "index freshness", "鮮度確認"]
+
+[[capability]]
+tool = "workbridge_run_codebase_memory_action"
+domain = "code-analysis"
+provider_oss = "Codebase Memory"
+aliases = ["codebase memory", "codebase-memory", "persistent code graph", "cypher", "コードベースメモリ", "永続コードグラフ"]
+
+[[capability.actions]]
+action = "architecture"
+aliases = ["architecture", "layers", "dependencies", "アーキテクチャ", "依存関係", "レイヤー構造"]
+
+[[capability.actions]]
+action = "search"
+aliases = ["structural search", "bm25", "semantic search", "構造検索"]
+
+[[capability.actions]]
+action = "trace"
+aliases = ["trace", "call path", "data flow", "呼び出し経路", "データフロー"]
+
+[[capability.actions]]
+action = "impact"
+aliases = ["impact analysis", "git diff impact", "変更影響", "影響分析"]
+
+[[capability.actions]]
+action = "snippet"
+aliases = ["source snippet", "ソース取得"]
+
+[[capability.actions]]
+action = "coverage"
+aliases = ["index coverage", "インデックス網羅率"]
+
+[[capability.actions]]
+action = "query"
+aliases = ["graph query", "cypher query", "グラフクエリ"]
+
+# ---------------------------------------------------------------------------
+# Browser and desktop automation
+# ---------------------------------------------------------------------------
+
+[[capability]]
+backend = "browser"
+domain = "browser-automation"
+provider_oss = "Stealth Browser"
+aliases = [
+  "stealth browser", "isolated browser", "separate browser profile", "clean profile",
+  "custom proxy", "user agent", "request interception", "cdp",
+  "ブラウザ操作", "ブラウザ自動化", "別プロファイル", "ステルスブラウザ",
+]
+
+[[capability]]
+backend = "chrome"
+domain = "browser-automation"
+provider_oss = "chrome-devtools-mcp"
+aliases = [
+  "chrome devtools", "devtools", "lighthouse", "network requests", "performance trace",
+  "heap snapshot", "css inspection", "console messages",
+  "開発者ツール", "デベロッパーツール", "パフォーマンス計測", "ネットワーク調査",
+]
+
+[[capability]]
+backend = "cua-windows"
+domain = "desktop-automation"
+provider_oss = "Cua"
+aliases = [
+  "cua", "cua driver", "computer use", "desktop automation", "windows gui", "native gui",
+  "screenshot", "mouse", "keyboard",
+  "デスクトップ操作", "画面操作", "gui操作", "スクリーンショット", "マウス操作",
+]
+
+[[internal]]
+name = "browserskill"
+via = "workbridge_exec_command"
+domain = "browser-automation"
+provider_oss = "BrowserSkill"
+summary = "Default for ordinary web-page interaction on the user's existing authenticated browser. BrowserSkill is a local non-MCP CLI/daemon: run the bsk CLI (or the browser-skill skill) through workbridge_exec_command. It is not a Lomway MCP backend."
+aliases = [
+  "browserskill", "browser skill", "browser-skill", "bsk",
+  "web browsing", "navigate page", "click", "fill form", "page snapshot",
+  "ブラウザ操作", "ウェブ操作", "フォーム入力", "ログイン済みブラウザ",
+]
+
+# ---------------------------------------------------------------------------
+# Memory
+# ---------------------------------------------------------------------------
+
+[[capability]]
+backend = "hindsight"
+domain = "memory"
+provider_oss = "Hindsight"
+aliases = ["hindsight", "long-term memory", "agent memory", "memory bank", "記憶", "長期記憶", "メモリーバンク"]
+
+[[capability]]
+tool = "hindsight_recall"
+domain = "memory"
+provider_oss = "Hindsight"
+aliases = ["recall", "remember", "search memory", "思い出す", "記憶を検索", "記憶の検索", "過去の記憶"]
+
+[[capability]]
+tool = "hindsight_retain"
+domain = "memory"
+provider_oss = "Hindsight"
+aliases = ["retain", "store memory", "save memory", "記憶する", "記憶を保存", "覚えておく"]
+
+[[capability]]
+tool = "hindsight_reflect"
+domain = "memory"
+provider_oss = "Hindsight"
+aliases = ["reflect", "synthesize memories", "振り返り", "記憶から考察"]

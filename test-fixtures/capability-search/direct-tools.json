@@ -1,0 +1,254 @@
+[
+  {
+    "name": "workbridge_open_workspace",
+    "description": "Start work in a project directory or isolated worktree when no usable workspaceId exists for it. During continued work, reuse the existing workspaceId instead of calling this tool again. By default this uses the actual checkout; set mode=\"worktree\" for isolated or parallel work. Responses may include [WORKBRIDGE_SOFT_PAUSE_REQUESTED]. If present, stop at a convenient safe point and report the pause; tools remain available."
+  },
+  {
+    "name": "workbridge_read",
+    "description": "Read a file in a workspace. Use this for file inspection instead of shell commands like cat or sed. Use this tool to inspect relevant AGENTS.md or CLAUDE.md files listed by open_workspace before working in nested directories. If available skills were returned and a task matches one, read that skill's path before proceeding. Skill paths may be outside the workspace; only advertised SKILL.md files and files under already-loaded skill directories are readable."
+  },
+  {
+    "name": "workbridge_apply_patch",
+    "description": "Apply one Codex-style patch in a workspace. Supports adding, overwriting, updating, deleting, and moving files. Use this for all file modifications. Paths must be relative to the workspace. Responses may include [WORKBRIDGE_SOFT_PAUSE_REQUESTED]. If present, stop at a convenient safe point and report the pause; tools remain available."
+  },
+  {
+    "name": "workbridge_exec_command",
+    "description": "Run a command with the local user's authority. Commands are not sandboxed; workspace validation only selects the initial working directory. Returns the result when it exits during the yield window, otherwise returns a sessionId for write_stdin. Use this for file inspection, tests, builds, package scripts, and long-running processes. On Windows, commands run through cmd.exe, not PowerShell. Do not pass PowerShell syntax such as Select-Object, Where-Object, Get-ChildItem, $env:, or [pscustomobject] directly. When PowerShell is required, prefer PowerShell 7 with pwsh -NoProfile -Command \"<PowerShell command>\"; use powershell.exe only when pwsh is unavailable. Responses may include [WORKBRIDGE_SOFT_PAUSE_REQUESTED]. If present, stop at a convenient safe point and report the pause; tools remain available."
+  },
+  {
+    "name": "workbridge_write_stdin",
+    "description": "Poll or write characters to a process returned by exec_command or run_workspace_action. Omit chars or pass an empty string to poll. Pass \\u0003 to send Ctrl-C. Completed exposed sessions can return their retained terminal result after the live-session TTL or a server restart while the durable result is retained. Responses may include [WORKBRIDGE_SOFT_PAUSE_REQUESTED]. If present, stop at a convenient safe point and report the pause; tools remain available."
+  },
+  {
+    "name": "workbridge_show_changes",
+    "description": "Show the changes made in this turn for an open workspace. Call this once after the final related file change and before your final response so the user can review the combined diff. Do not call it after each individual file change. Responses may include [WORKBRIDGE_SOFT_PAUSE_REQUESTED]. If present, stop at a convenient safe point and report the pause; tools remain available."
+  },
+  {
+    "name": "workbridge_run_workspace_action",
+    "description": "Resolve, validate, and run a registered workspace action. Workbridge owns the concrete command, parameter validation, and policy. Use dryRun to inspect the resolved action without executing it. Unsupported actions return the current registry catalog. Pass an existing workspaceId. If a workspaceId for this folder is already available in the current conversation, reuse it instead of calling open_workspace again. Call open_workspace only when no workspaceId is available, switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. Responses may include [WORKBRIDGE_SOFT_PAUSE_REQUESTED]. If present, stop at a convenient safe point and report the pause; tools remain available."
+  },
+  {
+    "name": "workbridge_orchestration_prepare",
+    "description": "Prepare and freeze a governed Workbridge orchestration. The caller supplies only the workspace, objective, and registered profile; Workbridge resolves workflow, backend, routing/effects policy, registry revisions, and the exact target snapshot. Preparing does not start agents. Responses may include [WORKBRIDGE_SOFT_PAUSE_REQUESTED]. If present, stop at a convenient safe point and report the pause; tools remain available."
+  },
+  {
+    "name": "workbridge_orchestration_run",
+    "description": "Start one immutable PreparedPlan. The frozen backend and target are revalidated immediately before launch. Calling this again with the same preparedRunId returns the existing run instead of starting another run. Responses may include [WORKBRIDGE_SOFT_PAUSE_REQUESTED]. If present, stop at a convenient safe point and report the pause; tools remain available."
+  },
+  {
+    "name": "workbridge_orchestration_status",
+    "description": "Read a PreparedPlan and its run state/receipt. Supply exactly one of preparedRunId or runId. Running process state is polled before the response is returned. Responses may include [WORKBRIDGE_SOFT_PAUSE_REQUESTED]. If present, stop at a convenient safe point and report the pause; tools remain available."
+  },
+  {
+    "name": "workbridge_orchestration_control",
+    "description": "Request pause, resume, or cancel for an orchestration run. Workbridge exposes no backend-specific controls; pause/resume fail with CAPABILITY_MISMATCH when the frozen backend cannot perform them for real. Responses may include [WORKBRIDGE_SOFT_PAUSE_REQUESTED]. If present, stop at a convenient safe point and report the pause; tools remain available."
+  },
+  {
+    "name": "workbridge_check_ao_credential_status",
+    "description": "Check whether the canonical AO SOPS credential can be resolved for an open workspace. Returns status only; the credential value is never returned, logged, hashed, or persisted. This tool does not run a workspace command or modify scientific state. Pass an existing workspaceId. If a workspaceId for this folder is already available in the current conversation, reuse it instead of calling open_workspace again. Call open_workspace only when no workspaceId is available, switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. Responses may include [WORKBRIDGE_SOFT_PAUSE_REQUESTED]. If present, stop at a convenient safe point and report the pause; tools remain available."
+  },
+  {
+    "name": "workbridge_run_semantic_action",
+    "description": "Run one read-only Serena semantic query against the exact root of an open workspace. Use this for symbol, declaration, implementation, reference, diagnostics, or semantic pattern queries; use Workbridge read/apply_patch/exec_command for ordinary file access, modifications, and processes. Pass an existing workspaceId. If a workspaceId for this folder is already available in the current conversation, reuse it instead of calling open_workspace again. Call open_workspace only when no workspaceId is available, switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. Responses may include [WORKBRIDGE_SOFT_PAUSE_REQUESTED]. If present, stop at a convenient safe point and report the pause; tools remain available."
+  },
+  {
+    "name": "workbridge_run_graft_action",
+    "description": "Run one read-only Graft repository-graph query against the exact root of an open workspace. Use map for unfamiliar-repository orientation and hotspots, ask for conceptual candidate discovery, callers for compressed caller/callee or blast-radius views, skeleton for a file's API surface, grep for indexed exhaustive search, and check for graph freshness. Prefer Serena for precise symbol/declaration/implementation/reference/diagnostics queries and normal read/rg when the location is already known. Workbridge keeps the Graft graph outside the repository and builds it automatically on first query. Pass an existing workspaceId. If a workspaceId for this folder is already available in the current conversation, reuse it instead of calling open_workspace again. Call open_workspace only when no workspaceId is available, switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. Responses may include [WORKBRIDGE_SOFT_PAUSE_REQUESTED]. If present, stop at a convenient safe point and report the pause; tools remain available."
+  },
+  {
+    "name": "workbridge_run_codebase_memory_action",
+    "description": "Run one read-only Codebase Memory persistent-graph query against the exact root of an open workspace. Use architecture for repository structure and boundaries, search for structural/BM25/semantic discovery, trace for caller/callee paths, impact for Git-diff blast radius, snippet for indexed source retrieval, coverage for best-effort index coverage, and query for read-only Cypher-style graph analysis. Prefer Serena when exact symbol/reference/implementation/diagnostics evidence matters; prefer Graft for lightweight repository orientation and quick graph lookup. Workbridge owns the initial moderate index and ongoing local cache outside the repository. Coverage freshness is best-effort on Windows v0.10.8 and must not replace direct source verification for negative or completeness claims. Pass an existing workspaceId. If a workspaceId for this folder is already available in the current conversation, reuse it instead of calling open_workspace again. Call open_workspace only when no workspaceId is available, switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. Responses may include [WORKBRIDGE_SOFT_PAUSE_REQUESTED]. If present, stop at a convenient safe point and report the pause; tools remain available."
+  },
+  {
+    "name": "workbridge_download_artifact",
+    "description": "Stream one MCP-host-provided native file to a requested relative path inside a workspace. Existing destinations, arbitrary URLs, absolute paths, traversal, symlinked parents, source filesystem paths, and malformed file objects are rejected."
+  },
+  {
+    "name": "praxiom_praxiom_status",
+    "description": "Return Praxiom Runtime lifecycle/transport/WDA status without connecting or mutating the device."
+  },
+  {
+    "name": "praxiom_praxiom_observe",
+    "description": "Capture a fresh Praxiom observation through the existing Runtime. Read-only: returns frame metadata plus bounded accessibility elements; image bytes are not exposed by this MCP boundary. Optionally link a completed Runtime read to an existing Experience attempt, without claiming completed exploration or Question authority."
+  },
+  {
+    "name": "praxiom_praxiom_state",
+    "description": "Return one revision-bound semantic state for a registered domain. Praxiom performs domain perception/state compilation behind the registered provider; raw screenshot bytes are not returned. Optional record_evidence records completion metadata only, not proof of a distinct physical re-observation."
+  },
+  {
+    "name": "praxiom_praxiom_options",
+    "description": "Return bounded legal Operational Goal candidates for one fresh semantic state. Optional expected revision/fingerprint values make the request fail closed when the caller's previous state is stale."
+  },
+  {
+    "name": "praxiom_praxiom_evaluate",
+    "description": "Run one explicitly requested advisory Decision Actor over the fresh, bounded legal Operational Goal set. The actor cannot invent options outside that set and carries no mutation authority. Optional record_evidence records an evaluation receipt, not an LLM replan."
+  },
+  {
+    "name": "praxiom_praxiom_tactical_options",
+    "description": "Accept one currently legal Operational Goal and return bounded, registry-backed Skill/Capability choices. Runtime payload details such as coordinates remain internal to Praxiom."
+  },
+  {
+    "name": "praxiom_praxiom_execute",
+    "description": "Execute one currently legal tactical choice through RunSession, SkillExecutor, Coordinator and Runtime. Pass choice_id=null to allow an already-promoted trusted deterministic/Jev/Capability route inside the already-selected Goal; if no unique trusted route applies, no mutation occurs and tactical selection is still required. Runtime payload/coordinates remain internal."
+  },
+  {
+    "name": "praxiom_praxiom_teach",
+    "description": "Read or update the durable Human Teaching channel during ordinary play. ask creates an idempotent operator question only after an external Decision Actor has exhausted safe self-exploration for a blocked Goal. submit/answer are for explicit operator-provided Teaching, not for an AI to relabel its own inference as human input. review/learn preserve the existing conflict-checked Teaching lifecycle. resume provides fresh read-only Goal options only for a learned answered Question; it never chooses or executes an action. changes reads metadata-only Question updates since a durable cursor; no background Actor wakeup. inspect checks fresh legal Goals and persisted attempts, but cannot prove completed exploration and never grants an automatic question."
+  },
+  {
+    "name": "hindsight_retain",
+    "description": "Store important information to long-term memory.\n\nUse this tool PROACTIVELY whenever the user shares:\n- Personal facts, preferences, or interests\n- Important events or milestones\n- User history, experiences, or background\n- Decisions, opinions, or stated preferences\n- Goals, plans, or future intentions\n- Relationships or people mentioned\n- Work context, projects, or responsibilities"
+  },
+  {
+    "name": "hindsight_sync_retain",
+    "description": "Store information to long-term memory and wait for completion.\n\nUnlike retain (which is asynchronous), this tool blocks until the memory\nis fully stored and immediately available for recall.\n\nArgs:\n    content: The fact/memory to store (be specific and include relevant details)\n    context: Category for the memory (e.g., 'preferences', 'work', 'hobbies', 'family'). Default: 'general'\n    timestamp: When this event/fact occurred (ISO format, e.g., '2024-01-15T10:30:00Z'). Useful for timeline tracking.\n    tags: Optional tags for scoped visibility filtering (e.g., ['project:alpha', 'user:123'])\n    metadata: Optional key-value metadata to attach (e.g., {'source': 'slack', 'channel': 'general'})\n    document_id: Optional document ID to associate this memory with\n    bank_id: Optional bank to store in (defaults to session bank). Use for cross-bank operations.\n    strategy: Optional named retain strategy (e.g., 'exact' for verbatim storage). Strategies are defined in the bank config."
+  },
+  {
+    "name": "hindsight_recall",
+    "description": "Search memories to provide personalized, context-aware responses.\n\nUse this tool PROACTIVELY to:\n- Check user's preferences before making suggestions\n- Recall user's history to provide continuity\n- Remember user's goals and context\n- Personalize responses based on past interactions"
+  },
+  {
+    "name": "hindsight_reflect",
+    "description": "Generate thoughtful analysis by synthesizing stored memories with the bank's personality.\n\nWHEN TO USE THIS TOOL:\nUse reflect when you need reasoned analysis, not just fact retrieval. This tool\nthinks through the question using everything the bank knows and its personality traits.\n\nEXAMPLES OF GOOD QUERIES:\n- \"What patterns have emerged in how I approach debugging?\"\n- \"Based on my past decisions, what architectural style do I prefer?\"\n- \"What might be the best approach for this problem given what you know about me?\"\n- \"How should I prioritize these tasks based on my goals?\"\n\nHOW IT DIFFERS FROM RECALL:\n- recall: Returns raw facts matching your search (fast lookup)\n- reflect: Reasons across memories to form a synthesized answer (deeper analysis)\n\nUse recall for \"what did I say about X?\" and reflect for \"what should I do about X?\"\n\nArgs:\n    query: The question or topic to reflect on\n    context: Optional context about why this reflection is needed\n    budget: Search budget - 'low', 'mid', or 'high' (default: 'low')\n    max_tokens: Maximum tokens for the response (default: 4096)\n    response_schema: Optional JSON schema for structured output. When provided, the response includes a 'structured_output' field.\n    tags: Optional tags to filter memories by (e.g., ['project:alpha'])\n    tags_match: How to match tags - 'any' (match any tag) or 'all' (match all tags). Default: 'any'\n    apply_all_directives: Apply every active directive regardless of tags. By default directives are scoped like memories (untagged always apply; tagged apply only when tags match). Set true to apply all directives, ignoring tag scope.\n    include_based_on: Include source facts used for synthesis. Defaults to false because broad reflections can exceed MCP client result limits.\n    include_trace: Include the reflection's internal trace fields (tool_trace/llm_trace and directives_applied). Defaults to false because the trace can be tens of KB and overflow MCP client context; enable only for debugging.\n    bank_id: Optional bank to reflect in (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_list_banks",
+    "description": "List available memory banks, most recently written first.\n\nUse this tool to discover what memory banks exist in the system.\nEach bank is an isolated memory store (like a separate \"brain\").\n\nArgs:\n    query: Optional case-insensitive substring to match against bank ID and name.\n    limit: Maximum number of banks to return (default 100).\n    offset: Number of banks to skip, for paging through `total`.\n\nReturns:\n    JSON with the page of banks (IDs, names, dispositions, missions) plus\n    the total number of matching banks and the limit/offset used."
+  },
+  {
+    "name": "hindsight_create_bank",
+    "description": "Create a new memory bank or get an existing one.\n\nMemory banks are isolated stores - each one is like a separate \"brain\" for a user/agent.\nBanks are auto-created with default settings if they don't exist.\n\nArgs:\n    bank_id: Unique identifier for the bank (e.g., 'user-123', 'agent-alpha')\n    name: Optional human-friendly name for the bank\n    mission: Optional mission describing who the agent is and what they're trying to accomplish"
+  },
+  {
+    "name": "hindsight_list_mental_models",
+    "description": "List mental models (pinned reflections) for a memory bank.\n\nReturns metadata only (id, name, tags, staleness). To read a model's\nsynthesized content, call get_mental_model with the id from this list.\n\nMental models are living documents that stay current by periodically re-running\na source query through reflect. Use them to maintain up-to-date summaries,\npreferences, or synthesized knowledge.\n\nArgs:\n    tags: Optional tags to filter by (returns models matching any tag)\n    limit: Maximum number of results, 1-1000 (default: 100)\n    offset: Pagination offset (default: 0). Page until the returned items add up to 'total'.\n    bank_id: Optional bank to list from (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_get_mental_model",
+    "description": "Get a specific mental model by ID.\n\nReturns the mental model with the requested detail level. Use list_mental_models\nfirst to discover available model IDs.\n\nArgs:\n    mental_model_id: The ID of the mental model to retrieve\n    detail: Detail level - 'metadata' (names/tags only), 'content' (adds content/config), 'full' (includes reflect_response). Default: 'full'\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_create_mental_model",
+    "description": "Create a new mental model (pinned reflection).\n\nA mental model is a living document generated by running the source_query through\nreflect. The content is auto-generated asynchronously - use the returned operation_id\nto track progress.\n\nEXAMPLES:\n- name=\"Coding Preferences\", source_query=\"What coding patterns and tools does the user prefer?\"\n- name=\"Project Goals\", source_query=\"What are the user's current project goals and priorities?\"\n- name=\"Communication Style\", source_query=\"How does the user prefer to communicate?\"\n\nArgs:\n    name: Human-readable name for the mental model\n    source_query: The query to run through reflect to generate content\n    mental_model_id: Optional custom ID (alphanumeric lowercase with hyphens). Auto-generated if not provided.\n    tags: Optional tags for scoped visibility filtering\n    tags_match: How this model's tags are matched against memories when the content\n        is (re)generated. One of 'any' (match any tag, like recall/reflect), 'all'\n        (match all tags), 'any_strict', 'all_strict', or 'exact'. If omitted, a tagged\n        model defaults to 'all_strict' — a memory must carry EVERY one of the model's\n        tags to be included, which silently filters out memories that only carry a\n        subset. Pass 'any' when your memories use narrow single-topic tags.\n    trigger: Refresh policy for this model — when it rebuilds itself (mode,\n        refresh_after_consolidation, refresh_cron) and what it rebuilds from\n        (fact_types, tags_match, tag_groups, exclude_mental_models,\n        recall_max_tokens, ...). Omitted fields use engine defaults. Prefer\n        this over the flat tags_match/trigger_refresh_after_consolidation\n        shorthands, which are kept only for existing integrations.\n    max_tokens: Maximum tokens for generated content (256-8192, default: 2048)\n    trigger_refresh_after_consolidation: If True, automatically refresh this model after memory consolidation. Default: False\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_update_mental_model",
+    "description": "Update a mental model's metadata.\n\nChanges the name, source query, or tags of an existing mental model.\nTo regenerate the content, use refresh_mental_model after updating the source query.\n\nArgs:\n    mental_model_id: The ID of the mental model to update\n    name: New name (leave None to keep current)\n    source_query: New source query (leave None to keep current)\n    max_tokens: New max tokens for content generation (256-8192, leave None to keep current)\n    tags: New tags (leave None to keep current)\n    trigger: Refresh policy fields to change — mode, refresh_after_consolidation,\n        refresh_cron, fact_types, tags_match, tag_groups, exclude_mental_models,\n        recall_max_tokens, and so on. This is a PATCH: fields you omit keep their\n        current values, so setting a cron schedule does not reset the model's\n        fact_types. Pass an explicit null to clear a setting.\n    tags_match: Legacy shorthand for trigger.tags_match\n    trigger_refresh_after_consolidation: If set, update whether this model auto-refreshes after consolidation\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_delete_mental_model",
+    "description": "Delete a mental model.\n\nPermanently removes a mental model and its generated content.\n\nArgs:\n    mental_model_id: The ID of the mental model to delete\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_refresh_mental_model",
+    "description": "Refresh a mental model by re-running its source query.\n\nSchedules an async task to re-run the source query through reflect and update the\nmental model's content with fresh results. Use this after adding new memories or\nwhen the mental model's content may be stale.\n\nArgs:\n    mental_model_id: The ID of the mental model to refresh\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_clear_mental_model",
+    "description": "Clear a mental model's content so the next refresh performs a full re-synthesis.\n\nThis is useful for delta-mode models that have accumulated drift over many\nincremental refreshes. After clearing, call refresh_mental_model to trigger\na clean full rebuild.\n\nArgs:\n    mental_model_id: The ID of the mental model to clear\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_list_directives",
+    "description": "List directives for a memory bank.\n\nDirectives are instructions that guide how the memory engine processes and\nresponds to queries. They influence reflect behavior and memory organization.\n\nArgs:\n    tags: Optional tags to filter by\n    active_only: If True, only return active directives (default: True)\n    limit: Maximum number of results, 1-1000 (default: 100)\n    offset: Pagination offset (default: 0). Page until the returned items add up to 'total'.\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_create_directive",
+    "description": "Create a new directive for a memory bank.\n\nDirectives guide how the memory engine processes queries and generates reflections.\n\nArgs:\n    name: Human-readable name for the directive\n    content: The directive content/instructions\n    priority: Priority level (higher = more important, default: 0)\n    is_active: Whether the directive is active (default: True)\n    tags: Optional tags for filtering\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_delete_directive",
+    "description": "Delete a directive.\n\nPermanently removes a directive from the memory bank.\n\nArgs:\n    directive_id: The ID of the directive to delete\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_list_memories",
+    "description": "Browse stored memories with optional filtering.\n\nLists memory units (facts) stored in the bank. Unlike recall, this is a direct\nbrowse/search without relevance ranking.\n\nArgs:\n    type: Filter by fact type: 'world', 'experience', or 'observation'\n    q: Optional text search query to filter memories\n    limit: Maximum number of results (default: 100)\n    offset: Pagination offset (default: 0)\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations.\n    tags: Optional list of tag names to filter by.\n    tags_match: How to combine tags: 'any' (OR, default) or 'all' (AND)\n        both also include untagged memories; 'any_strict'/'all_strict'\n        exclude untagged; 'exact' matches the tag set exactly."
+  },
+  {
+    "name": "hindsight_get_memory",
+    "description": "Get a specific memory by ID.\n\nReturns the full memory unit including content, metadata, and timestamps.\n\nArgs:\n    memory_id: The ID of the memory to retrieve\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_update_memory",
+    "description": "\n            Edit a memory unit to correct what was extracted.\n\n            Pass any of text / context / occurred_start / occurred_end / fact_type /\n            entities. For context and the dates, \"\" clears the field and omitting it\n            leaves it unchanged; entities replaces the fact's entity set ([] detaches\n            all). The memory is re-embedded and its derived observations, links, and\n            graph are recomputed automatically.\n\n            resolve_entities controls how the names in entities are matched. The\n            default True behaves like retain and may resolve a name onto a similar\n            entity that already exists, which silently discards a correction when the\n            bank holds a near-duplicate name. Pass False whenever you are correcting a\n            fact deliberately: an existing entity is then reused only on a\n            case-insensitive name match, and any other name becomes its own entity.\n\n            Only raw world/experience facts can be edited; observations are derived.\n            To retire or restore a fact, use invalidate_memory instead.\n    "
+  },
+  {
+    "name": "hindsight_invalidate_memory",
+    "description": "\n            Soft-retire a memory unit (or restore a previously retired one).\n\n            Invalidating moves the fact out of the active set: it's excluded from\n            recall, consolidation, and the knowledge graph, its links are pruned, and\n            its derived observations are recomputed without it — but it's kept for\n            audit and is fully reversible. Pass restore=True to bring it back.\n\n            Only raw world/experience facts can be invalidated; observations are derived.\n    "
+  },
+  {
+    "name": "hindsight_list_documents",
+    "description": "List documents in a memory bank.\n\nDocuments are containers for related memories (e.g., a conversation transcript,\na meeting notes file). Memories created with a document_id are grouped under that document.\n\nArgs:\n    q: Optional search query to filter documents\n    limit: Maximum number of results (default: 100)\n    offset: Pagination offset (default: 0). Page until the returned items add up to 'total'.\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_get_document",
+    "description": "Get a specific document by ID.\n\nReturns document metadata and associated memory information.\n\nArgs:\n    document_id: The ID of the document to retrieve\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_delete_document",
+    "description": "Delete a document and its associated memories.\n\nPermanently removes a document and all memories linked to it.\n\nArgs:\n    document_id: The ID of the document to delete\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_list_operations",
+    "description": "List async operations for a memory bank.\n\nOperations track background tasks like retain processing, mental model refresh, etc.\n\nArgs:\n    status: Filter by status: 'pending', 'running', 'completed', 'failed', 'cancelled'\n    type: Filter by operation type: 'retain', 'consolidation', 'refresh_mental_model',\n        'file_convert_retain', 'webhook_delivery'\n    limit: Maximum number of results, 1-100 (default: 20)\n    offset: Number of operations to skip (default: 0). Page until you reach 'total'.\n    exclude_parents: Exclude parent batch operations (default: False)\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_get_operation",
+    "description": "Get the status of an async operation.\n\nCheck progress of background tasks like retain processing or mental model refresh.\n\nArgs:\n    operation_id: The ID of the operation to check\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_cancel_operation",
+    "description": "Cancel a pending or running async operation.\n\nArgs:\n    operation_id: The ID of the operation to cancel\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_list_tags",
+    "description": "List tags used in a memory bank.\n\nTags are used to organize and filter memories, directives, and mental models.\n\nArgs:\n    q: Optional pattern to filter tags (e.g., 'project:*')\n    limit: Maximum number of results (default: 100)\n    offset: Pagination offset (default: 0). Page until the returned items add up to 'total'.\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_get_bank",
+    "description": "Get the profile of a memory bank.\n\nReturns bank metadata including name, disposition, and mission.\n\nArgs:\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_get_bank_stats",
+    "description": "Get statistics for a memory bank.\n\nReturns counts of nodes, links, and other metrics.\n\nArgs:\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_update_bank",
+    "description": "Update a memory bank's configuration.\n\nUpdates the bank's name and/or any bank-level configuration fields.\nOnly provided fields will be updated; omitted fields remain unchanged.\n\nArgs:\n    name: Human-friendly display name for the bank.\n    mission: Deprecated alias for config_updates.reflect_mission.\n    config_updates: Dictionary of configuration fields to update. Supports all\n        bank-configurable fields including:\n        - reflect_mission: Mission/context for Reflect operations.\n        - retain_mission: Steers what gets extracted during retain().\n        - retain_extraction_mode: 'concise' (default), 'verbose', or 'custom'.\n        - retain_custom_instructions: Custom extraction prompt (active when mode is 'custom').\n        - retain_chunk_size: Target maximum characters for each content chunk.\n        - retain_structured_chunk_size: Maximum characters for a single JSONL line or conversation turn to keep whole.\n        - retain_chunk_batch_size: Number of chunks to process in parallel.\n        - enable_observations: Toggle observation consolidation after retain().\n        - observations_mission: Controls observation synthesis rules.\n        - disposition_skepticism: Critical evaluation level (1-5).\n        - disposition_literalism: Literal vs. abstract interpretation (1-5).\n        - disposition_empathy: Emotional context consideration (1-5).\n        - entity_labels: Controlled vocabulary for entity classification.\n        - entities_allow_free_form: Allow labels outside entity_labels.\n        - recall_include_chunks: Include raw chunks in recall results.\n        - recall_max_tokens: Max tokens for recall results.\n        - mcp_enabled_tools: Tool allowlist for this bank.\n        Any configurable field name is accepted (use Python field names).\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_delete_bank",
+    "description": "Delete a memory bank and all its data.\n\nWARNING: This permanently deletes the bank and all its memories, documents,\nmental models, directives, and other data. This action cannot be undone.\n\nArgs:\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_clear_memories",
+    "description": "Clear all memories from a bank without deleting the bank itself.\n\nOptionally filter by fact type to only clear specific kinds of memories.\n\nArgs:\n    type: Optional fact type filter: 'world', 'experience', or 'observation'. If not specified, clears all.\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_get_knowledge_base_tree",
+    "description": "Browse the knowledge base as a nested tree of folders and pages.\n\nStart here to discover what the bank documents: each page is a living\nmarkdown document synthesized from the bank's memories, and folders\ngroup them. Use get_knowledge_page to read a page's content, or\nsearch_knowledge_base when you know what you are looking for.\n\nPages report `is_stale`: false means the page is provably up to date;\ntrue means something was written since its last refresh, so it MAY be\nout of date.\n\nArgs:\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_search_knowledge_base",
+    "description": "Find knowledge pages by relevance (hybrid keyword + semantic search).\n\nSearches page names and content, returning ranked pages with a short\nsnippet each. Read a hit in full with get_knowledge_page. This searches\nthe curated knowledge base only — use recall to search raw memories.\n\nArgs:\n    query: What to search for\n    limit: Maximum pages to return (1-50, default: 10)\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_get_knowledge_page",
+    "description": "Read a knowledge page as a markdown document.\n\nReturns the page's YAML frontmatter (id, type, title, description,\ntags, timestamp) followed by its synthesized markdown body. Discover\npage ids with get_knowledge_base_tree or search_knowledge_base.\n\nArgs:\n    page_id: The ID of the page to read (a `kp-...` node id)\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_create_knowledge_folder",
+    "description": "Create a folder in the knowledge base.\n\nFolders group pages; they hold no content of their own.\n\nArgs:\n    name: Folder name\n    parent_id: Optional parent folder id (a `kf-...` node id). Omit to create at the top level.\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_create_knowledge_page",
+    "description": "Create a knowledge page — a living document answering a question.\n\nThe page's content is synthesized from the bank's memories by running\nsource_query, asynchronously: use the returned operation_id to track\ncompletion, then read it with get_knowledge_page. By default the page\nkeeps itself current, rebuilding after each consolidation.\n\nEXAMPLES:\n- name=\"Deployment Runbook\", source_query=\"How is this service deployed and rolled back?\"\n- name=\"Team Preferences\", source_query=\"What tools and conventions does the team prefer?\"\n\nArgs:\n    name: Page name (must be unique within its folder)\n    source_query: The question this page answers and rebuilds itself from\n    parent_id: Optional parent folder id (a `kf-...` node id). Omit to create at the top level.\n    tags: Optional tags scoping which memories the page is built from\n    max_tokens: Maximum tokens for the generated content (default: 4096)\n    trigger: Refresh policy for this page — when it rebuilds itself (mode,\n        refresh_after_consolidation, refresh_cron) and what it rebuilds from\n        (fact_types, tags_match, tag_groups, exclude_mental_models,\n        recall_max_tokens, ...). Omitted fields keep the knowledge-page\n        defaults: incremental (delta) rebuilds from consolidated observations\n        after each consolidation, ignoring sibling pages. Set refresh_cron\n        instead to move the page onto a fixed UTC schedule.\n    refresh_after_consolidation: Legacy shorthand for trigger.refresh_after_consolidation.\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_update_knowledge_node",
+    "description": "Rename or move a folder/page, and/or update a page's options.\n\nOnly the arguments you pass are changed; everything else keeps its\ncurrent value. Changing source_query schedules an async refresh so the\npage rebuilds against the new question.\n\nArgs:\n    node_id: The ID of the folder (`kf-...`) or page (`kp-...`) to update\n    name: New name for the node\n    parent_id: Folder id to move the node into, or \"root\" to move it to the top level\n    source_query: Pages only — the new question the page answers\n    tags: Pages only — replacement tag list (pass [] to clear)\n    max_tokens: Pages only — new maximum tokens for the generated content\n    trigger: Pages only — refresh policy fields to change: mode,\n        refresh_after_consolidation, refresh_cron, fact_types, tags_match,\n        tag_groups, exclude_mental_models, recall_max_tokens, and so on. This\n        is a PATCH: fields you omit keep their current values, so putting a\n        page on a cron schedule does not reset its delta mode or its\n        observation-only scope.\n    refresh_after_consolidation: Pages only — legacy shorthand for\n        trigger.refresh_after_consolidation\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  },
+  {
+    "name": "hindsight_delete_knowledge_node",
+    "description": "Delete a knowledge-base folder or page and everything under it.\n\nDeleting a folder also deletes its whole subtree, and each deleted page\ntakes its backing mental model with it. This cannot be undone.\n\nArgs:\n    node_id: The ID of the folder (`kf-...`) or page (`kp-...`) to delete\n    bank_id: Optional bank (defaults to session bank). Use for cross-bank operations."
+  }
+]
