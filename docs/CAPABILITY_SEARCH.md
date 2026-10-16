@@ -19,11 +19,19 @@ already have X?". It searches three surfaces with one ranking:
   A deferred backend whose tools were never observed is returned as a
   `<prefix>*` placeholder with `status = "unverified"`; describing that
   placeholder is the explicit action that connects the backend.
+- **`status` describes provenance, not health.** `listed` means the tool is
+  in the gateway's current `tools/list` catalog (direct tools, or a deferred
+  tool just after an explicit describe); it does not claim the backend is
+  healthy or that a call will succeed. `cached` and `unverified` are as
+  above, and `declared` marks an internal capability.
 - **Results are scoped to the caller.** For PAT and restricted OAuth
   callers, the northbound authorization layer passes the caller's tool
   allowlist to search/describe (overwriting any caller-supplied value).
   Tools the caller may not use are removed before ranking, and describing
-  one returns the same error as a nonexistent tool.
+  one returns the same error as a nonexistent tool. For these callers an
+  unknown `backend` filter returns the same empty result as a configured
+  backend they cannot see; unrestricted callers still get an error for an
+  unknown backend id.
 - **Unrelated queries return nothing.** Results below a score threshold are
   dropped.
 
@@ -41,7 +49,11 @@ lowercasing and folding full-width ASCII. One result is returned per tool;
 per-action aliases for a `tool` (exact name) or a `backend` (every tool of
 that backend, plus its unverified placeholder). `[[internal]]` entries name
 the `via` tool. The file is public: names, aliases, and summaries only.
-Validation rejects URLs, loopback addresses, and machine paths.
+Validation covers every field (including `[[internal]]` `domain`) and
+rejects URLs, loopback/private/link-local/CGNAT IPv4 and IPv6 addresses,
+`host:port` bindings, absolute POSIX paths, `~/` paths, Windows and UNC
+paths, and email addresses. Slashes between ordinary words (`read/write`)
+are allowed.
 
 ## Manifest cache
 
@@ -50,6 +62,12 @@ Validation rejects URLs, loopback addresses, and machine paths.
 Windows, `~/Library/Application Support/Lomway/state` on macOS, and
 `$XDG_STATE_HOME/lomway` (or `~/.local/state/lomway`) elsewhere. One file per
 gateway identity (listener port plus deferred backend ids and prefixes).
+Each backend's cached manifest is also keyed by a SHA-256 fingerprint of
+the settings that decide where the gateway connects (transport and resolved
+URL). When those settings change, the old manifest is ignored and the
+backend is reported as `unverified` until it is observed again. Only the
+hash is written to the file name and cache contents; endpoint values are
+never stored or logged.
 Manifests are refreshed at startup and after explicit describe/call
 activations. Library callers using `Gateway::build` keep manifests in memory
 only.

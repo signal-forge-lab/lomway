@@ -35,7 +35,7 @@ use crate::gateway::capability::{
     CallerAccess, CapabilityCatalog, IndexEntry, Invocation, Status, ToolSource, build_index,
     invocation_guidance, search,
 };
-use crate::gateway::manifest::{ManifestStore, manifest_path};
+use crate::gateway::manifest::{ManifestStore, endpoint_fingerprint, manifest_path};
 use crate::gateway::reconnect::MonitorHandle;
 
 const DEFAULT_LIMIT: usize = 8;
@@ -54,6 +54,8 @@ struct ConfiguredBackend {
     id: String,
     prefix: String,
     deferred: bool,
+    /// SHA-256 of this backend's endpoint settings (never the values).
+    endpoint_sha256: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -72,13 +74,23 @@ impl DeferredCatalog {
                 id: backend.id.clone(),
                 prefix: backend.prefix.clone(),
                 deferred: backend.exposure == BackendExposure::Deferred,
+                // The public model reaches every backend over Streamable HTTP.
+                endpoint_sha256: endpoint_fingerprint("http", &backend.url),
             })
-            .collect();
-        Self {
+            .collect::<Vec<_>>();
+        let mut catalog = Self {
             backends: Arc::new(backends),
             routing_guidance: Arc::new(config.server.instructions.clone()),
-            manifests: ManifestStore::in_memory(),
-        }
+            manifests: ManifestStore::default(),
+        };
+        catalog.manifests = ManifestStore::in_memory(catalog.endpoint_fingerprints());
+        catalog
+    }
+
+    fn endpoint_fingerprints(&self) -> BTreeMap<String, String> {
+        self.deferred_backends()
+            .map(|backend| (backend.id.clone(), backend.endpoint_sha256.clone()))
+            .collect()
     }
 
     /// Persist deferred manifests under `state_dir` (per-user state, never
@@ -89,7 +101,10 @@ impl DeferredCatalog {
                 .deferred_backends()
                 .map(|backend| (backend.id.clone(), backend.prefix.clone()))
                 .collect();
-            self.manifests = ManifestStore::open(manifest_path(&state_dir, port, &deferred));
+            self.manifests = ManifestStore::open(
+                manifest_path(&state_dir, port, &deferred),
+                self.endpoint_fingerprints(),
+            );
         }
         self
     }
@@ -179,7 +194,7 @@ impl DeferredCatalog {
                 name: tool.name.clone(),
                 backend: backend.map_or_else(|| "direct".to_string(), |b| b.id.clone()),
                 invocation: Invocation::Direct,
-                status: Status::Available,
+                status: Status::Listed,
                 manifest_seen_at: None,
                 description: tool.description.clone(),
                 placeholder_prefix: None,
@@ -395,7 +410,7 @@ async fn describe(
             "name": tool.name,
             "backend": backend.id,
             "invocation": Invocation::Deferred,
-            "status": Status::Available,
+            "status": Status::Listed,
             "manifest_seen_at": catalog.manifests.get(&backend.id).map(|m| m.seen_at),
             "description": tool.description,
             "inputSchema": tool.input_schema,
@@ -427,7 +442,7 @@ async fn describe(
         "name": tool.name,
         "backend": entry.map_or_else(|| "lomway".to_string(), |entry| entry.source.backend.clone()),
         "invocation": Invocation::Direct,
-        "status": Status::Available,
+        "status": Status::Listed,
         "manifest_seen_at": serde_json::Value::Null,
         "description": tool.description,
         "inputSchema": tool.input_schema,
@@ -461,7 +476,7 @@ pub(super) async fn register(
         .unwrap_or_default();
     let search = ToolBuilder::new("search_tools")
         .description(format!(
-            "Use this first whenever you are unsure whether a capability exists, before concluding it is missing or proposing to install anything. Searches every capability this caller may use: direct tools already in tools/list, deferred tools hidden behind Lomway deferred exposure (from the last cached manifest; searching never starts a backend), and internal capabilities reached through another tool. Matches upstream OSS names (for example Serena, Graft, Hindsight), English and Japanese aliases, action names, and descriptions. Each result gives invocation (direct|deferred|internal), action, provider_oss, status, manifest_seen_at, and how_to_invoke: call direct results directly by name and never through lomway_call_tool; for deferred results use lomway_describe_tool for the exact schema, then lomway_call_tool. Omit backend when unsure and search everything. Configured deferred backend ids: {deferred_ids}.{routing_guidance}"
+            "Use this first whenever you are unsure whether a capability exists, before concluding it is missing or proposing to install anything. Searches every capability this caller may use: direct tools already in tools/list, deferred tools hidden behind Lomway deferred exposure (from the last cached manifest; searching never starts a backend), and internal capabilities reached through another tool. Matches upstream OSS names (for example Serena, Graft, Hindsight), English and Japanese aliases, action names, and descriptions. Each result gives invocation (direct|deferred|internal), action, provider_oss, status (listed = in tools/list now, not a health check; cached; unverified; declared), manifest_seen_at, and how_to_invoke: call direct results directly by name and never through lomway_call_tool; for deferred results use lomway_describe_tool for the exact schema, then lomway_call_tool. Omit backend when unsure and search everything. Configured deferred backend ids: {deferred_ids}.{routing_guidance}"
         ))
         .handler(move |input: SearchInput| {
             let catalog = search_catalog.clone();
@@ -470,9 +485,18 @@ pub(super) async fn register(
                 if input.query.trim().is_empty() {
                     return Err(tower_mcp::Error::tool("search query must not be empty"));
                 }
+                let restricted = input.caller_allowed_tools.is_some();
                 if let Some(backend) = input.backend.as_deref()
                     && !catalog.backend_is_configured(backend)
                 {
+                    // A restricted caller gets the same empty result for an
+                    // unknown backend id as for a configured backend it may
+                    // not see, so backend registration is not observable.
+                    if restricted {
+                        return Ok(CallToolResult::text(serde_json::to_string_pretty(
+                            &Vec::<serde_json::Value>::new(),
+                        )?));
+                    }
                     return Err(tower_mcp::Error::tool(format!(
                         "backend '{backend}' is not a configured Lomway backend"
                     )));
@@ -715,6 +739,7 @@ exposure = "deferred"
         assert_eq!(found[0]["name"], "workbridge_run_semantic_action");
         assert_eq!(found[0]["invocation"], "direct");
         assert_eq!(found[0]["provider_oss"], "Serena");
+        assert_eq!(found[0]["status"], "listed");
         assert!(
             found[0]["how_to_invoke"]
                 .as_str()
@@ -840,6 +865,115 @@ exposure = "deferred"
     }
 
     #[tokio::test]
+    async fn restricted_caller_cannot_tell_unknown_backends_from_hidden_ones() {
+        let (proxy, monitor) = gateway(true).await;
+        let restricted = json!(["lomway_search_tools", "browser_navigate"]);
+        let search_backend = |backend: &'static str| {
+            let proxy = proxy.clone();
+            let restricted = restricted.clone();
+            async move {
+                call(
+                    &proxy,
+                    "lomway_search_tools",
+                    json!({"query": "Serena", "backend": backend, "_lomway_allowed_tools": restricted}),
+                )
+                .await
+            }
+        };
+        let unknown = search_backend("no-such-backend").await;
+        let hidden_direct = search_backend("workbridge").await;
+        let hidden_deferred = search_backend("chrome").await;
+        for result in [&unknown, &hidden_direct, &hidden_deferred] {
+            assert!(!result.is_error, "{}", result.all_text());
+        }
+        assert_eq!(unknown.all_text(), hidden_direct.all_text());
+        assert_eq!(unknown.all_text(), hidden_deferred.all_text());
+        assert!(results(&unknown).is_empty());
+
+        // Unrestricted callers keep the explicit configuration error.
+        let owner = call(
+            &proxy,
+            "lomway_search_tools",
+            json!({"query": "Serena", "backend": "no-such-backend"}),
+        )
+        .await;
+        assert!(owner.is_error);
+        assert!(owner.all_text().contains("not a configured Lomway backend"));
+        let owner_known = results(
+            &call(
+                &proxy,
+                "lomway_search_tools",
+                json!({"query": "Serena", "backend": "workbridge"}),
+            )
+            .await,
+        );
+        assert_eq!(owner_known[0]["name"], "workbridge_run_semantic_action");
+        assert_eq!(owner_known[0]["status"], "listed");
+        assert_eq!(monitor.activation_count(), 0);
+    }
+
+    fn definition(name: &str) -> ToolDefinition {
+        serde_json::from_value(json!({
+            "name": name,
+            "description": "Navigate a browser page",
+            "inputSchema": {"type": "object"}
+        }))
+        .expect("tool definition")
+    }
+
+    fn deferred_status(catalog: &DeferredCatalog) -> (String, String) {
+        let source = catalog
+            .sources(&[])
+            .into_iter()
+            .find(|source| source.backend == "browser")
+            .expect("browser source");
+        let status = serde_json::to_value(source.status).expect("status");
+        (source.name, status.as_str().unwrap_or_default().to_string())
+    }
+
+    #[test]
+    fn manifest_cache_is_bound_to_the_backend_endpoint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let original = config(false);
+        let catalog = DeferredCatalog::from_config(&original)
+            .with_state_dir(Some(dir.path().to_path_buf()), 17777);
+        catalog.observe_deferred(&[definition("browser_navigate")]);
+
+        // Same settings after a restart: the cache is reused.
+        let same = DeferredCatalog::from_config(&original)
+            .with_state_dir(Some(dir.path().to_path_buf()), 17777);
+        assert_eq!(
+            deferred_status(&same),
+            ("browser_navigate".to_string(), "cached".to_string())
+        );
+
+        // Same id, prefix and port but a different endpoint: unverified.
+        let mut moved = original.clone();
+        moved
+            .backends
+            .iter_mut()
+            .find(|backend| backend.id == "browser")
+            .expect("browser backend")
+            .url = "http://127.0.0.1:18099/mcp".to_string();
+        let changed = DeferredCatalog::from_config(&moved)
+            .with_state_dir(Some(dir.path().to_path_buf()), 17777);
+        assert_eq!(
+            deferred_status(&changed),
+            ("browser_*".to_string(), "unverified".to_string())
+        );
+
+        // Neither the cache file names nor their contents carry endpoints.
+        for entry in std::fs::read_dir(dir.path()).expect("state dir") {
+            let entry = entry.expect("entry");
+            let name = entry.file_name().to_string_lossy().to_string();
+            assert!(name.starts_with("deferred-manifest-") && !name.contains("127.0.0.1"));
+            let body = std::fs::read_to_string(entry.path()).expect("cache body");
+            assert!(!body.contains("127.0.0.1"), "{body}");
+            assert!(!body.contains("/mcp"), "{body}");
+        }
+    }
+
+    #[tokio::test]
     async fn describe_explains_direct_tools_without_activation() {
         let (proxy, monitor) = gateway(false).await;
         let described = call(
@@ -852,6 +986,7 @@ exposure = "deferred"
         let body: Value = serde_json::from_str(&described.all_text()).expect("json");
         assert_eq!(body["invocation"], "direct");
         assert_eq!(body["backend"], "workbridge");
+        assert_eq!(body["status"], "listed");
         assert_eq!(body["provider_oss"], "Serena");
         assert!(body["inputSchema"].is_object());
         assert!(

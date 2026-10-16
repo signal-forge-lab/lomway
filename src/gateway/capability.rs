@@ -146,6 +146,7 @@ impl CapabilityCatalog {
             texts.push(&internal.via);
             texts.extend(internal.summary.as_deref());
             texts.extend(internal.provider_oss.as_deref());
+            texts.extend(internal.domain.as_deref());
             for text in texts {
                 reject_machine_specific(text)?;
             }
@@ -204,23 +205,156 @@ impl CapabilityCatalog {
 }
 
 /// Repository declarations are public: refuse anything that looks like a
-/// URL, loopback address, port binding, or absolute machine path.
+/// URL, a loopback/private/link-local/CGNAT address, a `host:port` binding,
+/// an absolute or home-relative machine path (POSIX, Windows, UNC), or an
+/// email address. Ordinary slashes between words (`read/write`, `CLI/daemon`,
+/// a lone `/`) are not paths and stay allowed.
 fn reject_machine_specific(text: &str) -> Result<()> {
-    let lower = text.to_ascii_lowercase();
-    let forbidden = [
-        "://",
-        "127.0.0.1",
-        "localhost",
-        "\\",
-        ":/",
-        "~/",
-        "/users/",
-        "/home/",
-    ];
-    if forbidden.iter().any(|needle| lower.contains(needle)) {
-        bail!("capability declarations must not contain machine-specific locations: {text:?}");
+    if let Some(reason) = machine_specific_reason(text) {
+        bail!(
+            "capability declarations must not contain machine-specific locations ({reason}): {text:?}"
+        );
     }
     Ok(())
+}
+
+fn machine_specific_reason(text: &str) -> Option<&'static str> {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("://") {
+        return Some("URL");
+    }
+    if lower.contains("localhost") {
+        return Some("loopback host");
+    }
+    if lower.contains('\\') {
+        return Some("Windows or UNC path");
+    }
+    if lower.contains(":/") {
+        return Some("drive or scheme path");
+    }
+    if lower.contains("~/") {
+        return Some("home-relative path");
+    }
+    for token in lower
+        .split(|ch: char| ch.is_whitespace() || is_token_delimiter(ch))
+        .filter(|token| !token.is_empty())
+    {
+        if looks_like_absolute_posix_path(token) {
+            return Some("absolute path");
+        }
+        if looks_like_email(token) {
+            return Some("email address");
+        }
+        if looks_like_host_port(token) {
+            return Some("host:port");
+        }
+    }
+    if contains_non_public_ip(&lower) {
+        return Some("loopback, private, link-local, or CGNAT address");
+    }
+    None
+}
+
+fn is_token_delimiter(ch: char) -> bool {
+    matches!(
+        ch,
+        ',' | ';' | '"' | '\'' | '`' | '(' | ')' | '{' | '}' | '<' | '>' | '|' | '='
+    ) || (!ch.is_ascii() && !ch.is_alphanumeric())
+}
+
+/// `/etc/secrets`, `/mcp`, `/.config` — but not a lone `/` or `//`.
+fn looks_like_absolute_posix_path(token: &str) -> bool {
+    let token = token.trim_start_matches(['[', '*']);
+    let mut chars = token.chars();
+    chars.next() == Some('/')
+        && chars.next().is_some_and(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '~' | '$')
+        })
+}
+
+fn looks_like_email(token: &str) -> bool {
+    let Some((local, domain)) = token.split_once('@') else {
+        return false;
+    };
+    let domain = domain.trim_end_matches(['.', ']', ':']);
+    !local.is_empty()
+        && local
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '+' | '-' | '%'))
+        && domain.contains('.')
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        })
+}
+
+/// `host:8080`, `10.0.0.1:8080`, `[::1]:8080`. A bare ratio or clock time
+/// such as `16:9` or `10:30` has no host-like part and is not matched.
+fn looks_like_host_port(token: &str) -> bool {
+    let token = token.trim_end_matches(['.', ']']);
+    let Some((host, port)) = token.rsplit_once(':') else {
+        return false;
+    };
+    if port.is_empty()
+        || port.len() > 5
+        || !port.chars().all(|ch| ch.is_ascii_digit())
+        || !port.parse::<u32>().is_ok_and(|port| port <= 65_535)
+    {
+        return false;
+    }
+    if let Some(inner) = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+    {
+        return inner.parse::<std::net::Ipv6Addr>().is_ok();
+    }
+    !host.is_empty()
+        && host
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-'))
+        && (host.contains('.') || host.chars().any(|ch| ch.is_ascii_alphabetic()))
+}
+
+fn contains_non_public_ip(lower: &str) -> bool {
+    let v4 = lower
+        .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .map(|candidate| candidate.trim_matches('.'))
+        .filter_map(|candidate| candidate.parse::<std::net::Ipv4Addr>().ok())
+        .any(non_public_v4);
+    if v4 {
+        return true;
+    }
+    lower
+        .split(|ch: char| !(ch.is_ascii_hexdigit() || matches!(ch, ':' | '.' | '%')))
+        .filter(|candidate| candidate.contains(':'))
+        .map(|candidate| candidate.split('%').next().unwrap_or_default())
+        .filter_map(|candidate| candidate.parse::<std::net::Ipv6Addr>().ok())
+        .any(non_public_v6)
+}
+
+fn non_public_v4(ip: std::net::Ipv4Addr) -> bool {
+    let [a, b, ..] = ip.octets();
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        // CGNAT shared address space 100.64.0.0/10.
+        || (a == 100 && (64..=127).contains(&b))
+}
+
+fn non_public_v6(ip: std::net::Ipv6Addr) -> bool {
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return non_public_v4(v4);
+    }
+    let first = ip.segments()[0];
+    ip.is_loopback()
+        || ip.is_unspecified()
+        // Unique local fc00::/7 and link-local fe80::/10.
+        || (first & 0xfe00) == 0xfc00
+        || (first & 0xffc0) == 0xfe80
 }
 
 #[derive(Debug, Clone, Default)]
@@ -284,8 +418,10 @@ pub(super) enum Invocation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(super) enum Status {
-    /// Listed by the gateway's live `tools/list` catalog right now.
-    Available,
+    /// Present in the gateway's current `tools/list` catalog. This says
+    /// only that the tool is listed: it does not claim the backend is
+    /// healthy or that a call will succeed.
+    Listed,
     /// Deferred definition from the last observed manifest.
     Cached,
     /// Deferred backend whose tools have never been observed.
@@ -710,7 +846,7 @@ mod tests {
                 backend: tool.name.split('_').next().unwrap_or_default().to_string(),
                 name: tool.name,
                 invocation: Invocation::Direct,
-                status: Status::Available,
+                status: Status::Listed,
                 manifest_seen_at: None,
                 description: tool.description,
                 placeholder_prefix: None,
@@ -808,6 +944,116 @@ mod tests {
         ] {
             assert!(CapabilityCatalog::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    fn capability_with_alias(alias: &str) -> String {
+        format!(
+            "schema_version = 1\n[[capability]]\ntool = \"x\"\naliases = [{}]\n",
+            toml::Value::String(alias.to_string())
+        )
+    }
+
+    #[test]
+    fn catalog_rejects_posix_paths_private_ips_host_ports_and_emails() {
+        for bad in [
+            "/etc/secrets",
+            "read /etc/secrets first",
+            "/mcp",
+            "~/notes",
+            "C:/Users/me",
+            "\\\\server\\share",
+            "192.168.0.187",
+            "10.0.0.1:8080",
+            "10.0.0.1",
+            "172.16.4.2",
+            "169.254.169.254",
+            "100.64.0.1",
+            "127.0.0.2",
+            "0.0.0.0",
+            "::1",
+            "fe80::1%eth0",
+            "fd12:3456::1",
+            "::ffff:192.168.1.1",
+            "[::1]:8080",
+            "devbox:17777",
+            "gateway.internal:443",
+            "owner@example.com",
+            "localhost",
+            "https://example.com",
+        ] {
+            assert!(
+                CapabilityCatalog::parse(&capability_with_alias(bad)).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+        for ok in [
+            "read/write",
+            "CLI/daemon",
+            "TCP/IP",
+            "A / B",
+            "16:9",
+            "10:30",
+            "v1.2.3",
+            "シンボル検索",
+            "@mention",
+            "8.8.8.8",
+        ] {
+            assert!(
+                CapabilityCatalog::parse(&capability_with_alias(ok)).is_ok(),
+                "{ok:?} must stay allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_validates_every_internal_field_including_domain() {
+        let internal = |field: &str, value: &str| {
+            let mut fields = std::collections::BTreeMap::from([
+                ("name", "tool-x"),
+                ("via", "workbridge_exec_command"),
+                ("domain", "browser"),
+                ("provider_oss", "X"),
+                ("summary", "Summary"),
+            ]);
+            fields.insert(field, value);
+            let mut text = String::from("schema_version = 1\n[[internal]]\n");
+            for (key, value) in fields {
+                text.push_str(&format!(
+                    "{key} = {}\n",
+                    toml::Value::String(value.to_string())
+                ));
+            }
+            text.push_str("aliases = [\"x\"]\n");
+            text
+        };
+        assert!(CapabilityCatalog::parse(&internal("domain", "browser")).is_ok());
+        for field in ["name", "via", "domain", "provider_oss", "summary"] {
+            for bad in ["/etc/secrets", "192.168.0.187", "10.0.0.1:8080"] {
+                assert!(
+                    CapabilityCatalog::parse(&internal(field, bad)).is_err(),
+                    "[[internal]] {field} = {bad:?} must be rejected"
+                );
+            }
+        }
+        // Every [[capability]] field is validated too, domain included.
+        for field in ["tool", "domain", "provider_oss"] {
+            let text = format!(
+                "schema_version = 1\n[[capability]]\n{}{field} = \"/etc/secrets\"\n",
+                if field == "tool" {
+                    ""
+                } else {
+                    "tool = \"x\"\n"
+                }
+            );
+            assert!(CapabilityCatalog::parse(&text).is_err(), "{field}");
+        }
+        let action = "schema_version = 1\n[[capability]]\ntool = \"x\"\n[[capability.actions]]\naction = \"a\"\naliases = [\"192.168.0.187\"]\n";
+        assert!(CapabilityCatalog::parse(action).is_err());
+    }
+
+    #[test]
+    fn repository_catalog_passes_strict_validation() {
+        assert!(CapabilityCatalog::parse(CATALOG_SOURCE).is_ok());
     }
 
     #[test]

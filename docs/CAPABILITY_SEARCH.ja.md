@@ -18,9 +18,15 @@
   一度もツールを観測していない Deferred バックエンドは `<prefix>*` のプレースホルダー
   （`status = "unverified"`）として返す。そのプレースホルダーを describe することが、
   バックエンドへ接続する明示的な操作になる。
+- **`status` は出どころを表し、正常性は表さない。** `listed` は gateway の現在の `tools/list` に
+  載っていること（Direct ツール、または明示的な describe 直後の Deferred ツール）だけを意味し、
+  バックエンドが正常であることや呼び出しが成功することは示さない。`cached` と `unverified` は上のとおりで、
+  `declared` は internal の機能を表す。
 - **結果は呼び出し主体の権限に限定される。** PAT と制限付き OAuth の呼び出しでは、
   北側の認可レイヤーが呼び出し主体の許可リストを search/describe に渡す（呼び出し側が渡した値は上書きする）。
   使えないツールはランキング前に除外し、describe しても存在しないツールと同じエラーを返す。
+  これらの呼び出し主体では、未知の `backend` を指定しても、見えないバックエンドを指定したときと同じ空の結果を返す。
+  制限のない呼び出し主体には、未知の backend id は従来どおりエラーになる。
 - **無関係なクエリには何も返さない。** スコアが閾値未満の結果は捨てる。
 
 ## ランキング
@@ -34,7 +40,9 @@
 `capabilities/catalog.toml` に、`tool`（完全なツール名）または `backend`（そのバックエンドの全ツールと
 unverified プレースホルダー）ごとに、OSS 名・分野・別名・action ごとの別名を宣言する。
 `[[internal]]` は `via` のツールを指定する。このファイルは公開されるため、名前・別名・要約だけを書く。
-URL、ループバックアドレス、マシン上のパスは検証で拒否する。
+検証はすべてのフィールド（`[[internal]]` の `domain` を含む）に対して行い、URL、ループバック・private・
+リンクローカル・CGNAT の IPv4/IPv6 アドレス、`host:port`、POSIX の絶対パス、`~/`、Windows のパスと UNC、
+メールアドレスを拒否する。通常の語の区切りとしてのスラッシュ（`read/write` など）は許可する。
 
 ## マニフェストキャッシュ
 
@@ -42,5 +50,8 @@ URL、ループバックアドレス、マシン上のパスは検証で拒否�
 `LOMWAY_STATE_DIR` があればそこ、なければ Windows は `%LOCALAPPDATA%\Lomway\state`、
 macOS は `~/Library/Application Support/Lomway/state`、それ以外は `$XDG_STATE_HOME/lomway`
 （または `~/.local/state/lomway`）。gateway の識別（待ち受けポートと Deferred バックエンドの id・prefix）ごとに 1 ファイル。
+各バックエンドのマニフェストは、接続先を決める設定（トランスポートと解決後の URL）の SHA-256 フィンガープリントでも
+識別する。この設定が変わると古いマニフェストは使わず、再び観測されるまで `unverified` として返す。
+ファイル名とキャッシュの中身にはハッシュだけを書き、接続先の値そのものは保存もログ出力もしない。
 起動時と、describe/call による明示的な有効化のあとに更新する。`Gateway::build` を使うライブラリ利用では
 メモリ内だけに保持する。
