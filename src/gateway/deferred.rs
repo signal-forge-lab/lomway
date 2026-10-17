@@ -53,9 +53,25 @@ pub(super) const ACCESS_SCOPED_META_TOOLS: [&str; 2] =
 struct ConfiguredBackend {
     id: String,
     prefix: String,
+    /// Name under which `mcp-proxy` and the reconnect monitor (supervisor)
+    /// register this backend: the prefix stem, which differs from `id` for
+    /// backends such as `cua-windows` (`cua_windows`) or `jev-ultrafast`
+    /// (`jev`). Every monitor call (activation, transport failure, health)
+    /// must use this name; `id` stays the public, client-visible identifier
+    /// and the manifest-cache key.
+    supervisor_name: String,
     deferred: bool,
     /// SHA-256 of this backend's endpoint settings (never the values).
     endpoint_sha256: String,
+}
+
+/// The single mapping from a configured backend to its supervisor name.
+/// Mirrors `config::migrate::to_legacy`, which names the `mcp-proxy`
+/// backend after the validated prefix stem.
+fn supervisor_name(id: &str, prefix: &str) -> String {
+    crate::namespace::mcp_name_from_prefix(prefix)
+        .unwrap_or(id)
+        .to_string()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -72,6 +88,7 @@ impl DeferredCatalog {
             .map(|backend| ConfiguredBackend {
                 id: backend.id.clone(),
                 prefix: backend.prefix.clone(),
+                supervisor_name: supervisor_name(&backend.id, &backend.prefix),
                 deferred: backend.exposure == BackendExposure::Deferred,
                 // The public model reaches every backend over Streamable HTTP.
                 endpoint_sha256: endpoint_fingerprint("http", &backend.url),
@@ -349,7 +366,7 @@ async fn describe(
             return Err(not_registered(&name));
         }
         monitor
-            .activate(&backend.id)
+            .activate(&backend.supervisor_name)
             .await
             .map_err(|e| tower_mcp::Error::tool(e.to_string()))?;
         let tools = current_tools(proxy).await?;
@@ -384,7 +401,7 @@ async fn describe(
 
     if let Some(backend) = catalog.deferred_backend_for_name(&name) {
         monitor
-            .activate(&backend.id)
+            .activate(&backend.supervisor_name)
             .await
             .map_err(|e| tower_mcp::Error::tool(e.to_string()))?;
         let tools = current_tools(proxy).await?;
@@ -536,20 +553,22 @@ pub(super) async fn register(
             let mut proxy = call_proxy.clone();
             let monitor = call_monitor.clone();
             async move {
-                let backend_id = catalog
+                // Supervisor name, not the public id: the monitor tracks
+                // backends by their mcp-proxy namespace.
+                let supervisor = catalog
                     .deferred_backend_for_name(&input.name)
-                    .map(|b| b.id.clone());
-                if let Some(backend) = backend_id.as_deref() {
+                    .map(|b| b.supervisor_name.clone());
+                if let Some(backend) = supervisor.as_deref() {
                     monitor
                         .activate(backend)
                         .await
                         .map_err(|e| tower_mcp::Error::tool(e.to_string()))?;
                 }
                 let tools = current_tools(&proxy).await?;
-                if backend_id.is_some() {
+                if supervisor.is_some() {
                     catalog.observe_deferred(&tools);
                 }
-                if backend_id.is_none() || !tools.iter().any(|tool| tool.name == input.name) {
+                if supervisor.is_none() || !tools.iter().any(|tool| tool.name == input.name) {
                     return Err(tower_mcp::Error::tool(format!(
                         "tool '{}' is not a currently registered deferred Lomway tool",
                         input.name
@@ -577,7 +596,7 @@ pub(super) async fn register(
                             if (error.message.to_ascii_lowercase().contains("transport")
                                 || error.message.to_ascii_lowercase().contains("session")
                                 || error.message.to_ascii_lowercase().contains("connection"))
-                                && let Some(backend) = backend_id.as_deref()
+                                && let Some(backend) = supervisor.as_deref()
                             {
                                 monitor.transport_failure(backend);
                             }
@@ -585,7 +604,7 @@ pub(super) async fn register(
                         }
                     },
                     Err(_) => {
-                        if let Some(backend) = backend_id.as_deref() {
+                        if let Some(backend) = supervisor.as_deref() {
                             monitor.transport_failure(backend);
                         }
                         Err(tower_mcp::Error::tool(
@@ -1078,5 +1097,141 @@ exposure = "deferred"
                 "{name} echoes deployment instructions"
             );
         }
+    }
+
+    #[test]
+    fn supervisor_name_follows_the_prefix_stem_not_the_id() {
+        let config: GatewayConfig = toml::from_str(
+            r#"
+schema_version = 1
+
+[[backends]]
+id = "cua-windows"
+prefix = "cua_windows_"
+url = "http://127.0.0.1:18005/mcp"
+exposure = "deferred"
+
+[[backends]]
+id = "jev-ultrafast"
+prefix = "jev_"
+url = "http://127.0.0.1:18006/mcp"
+exposure = "deferred"
+
+[[backends]]
+id = "browser"
+prefix = "browser_"
+url = "http://127.0.0.1:18002/mcp"
+exposure = "deferred"
+"#,
+        )
+        .expect("config");
+        let catalog = DeferredCatalog::from_config(&config);
+        let names: Vec<(&str, &str)> = catalog
+            .backends
+            .iter()
+            .map(|backend| (backend.id.as_str(), backend.supervisor_name.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("cua-windows", "cua_windows"),
+                ("jev-ultrafast", "jev"),
+                ("browser", "browser"),
+            ]
+        );
+        // Same rule as the mcp-proxy configuration the supervisor is built from.
+        let legacy = crate::config::migrate::to_legacy(&config).expect("legacy config");
+        let legacy_names: Vec<&str> = legacy.backends.iter().map(|b| b.name.as_str()).collect();
+        for backend in catalog.backends.iter() {
+            assert!(
+                legacy_names.contains(&backend.supervisor_name.as_str()),
+                "{} is not registered under {}",
+                backend.id,
+                backend.supervisor_name
+            );
+        }
+    }
+
+    /// Hyphenated id whose prefix stem differs (`cua-windows` /
+    /// `cua_windows_`): describe and call must activate the supervisor name.
+    #[tokio::test]
+    async fn deferred_backend_with_hyphenated_id_can_be_described_and_called() {
+        let config: GatewayConfig = toml::from_str(
+            r#"
+schema_version = 1
+
+[[backends]]
+id = "workbridge"
+prefix = "workbridge_"
+url = "http://127.0.0.1:18001/mcp"
+
+[[backends]]
+id = "cua-windows"
+prefix = "cua_windows_"
+url = "http://127.0.0.1:18005/mcp"
+exposure = "deferred"
+"#,
+        )
+        .expect("config");
+        let proxy = McpProxy::builder("lomway-test", "1.0.0")
+            .separator("_")
+            .backend(
+                "workbridge",
+                ChannelTransport::new(backend_router(
+                    "workbridge",
+                    &[("read", "Read a file in a workspace.")],
+                )),
+            )
+            .await
+            .backend(
+                "cua_windows",
+                ChannelTransport::new(backend_router(
+                    "cua_windows",
+                    &[("get_screen_size", "Return the screen size")],
+                )),
+            )
+            .await
+            .build_strict()
+            .await
+            .expect("test proxy");
+        // The supervisor knows the backend only by its mcp-proxy namespace.
+        let monitor = MonitorHandle::connected_for_test(proxy.clone(), &["cua_windows"]);
+        register(
+            &proxy,
+            DeferredCatalog::from_config(&config),
+            monitor.clone(),
+        )
+        .await
+        .expect("register meta-tools");
+
+        let described = call(
+            &proxy,
+            "lomway_describe_tool",
+            json!({"name": "cua_windows_get_screen_size"}),
+        )
+        .await;
+        assert!(!described.is_error, "{}", described.all_text());
+        let body: Value = serde_json::from_str(&described.all_text()).expect("json");
+        assert_eq!(body["backend"], "cua-windows", "public id stays the id");
+        assert_eq!(body["invocation"], "deferred");
+        assert!(body["inputSchema"].is_object());
+
+        let placeholder = call(
+            &proxy,
+            "lomway_describe_tool",
+            json!({"name": "cua_windows_*"}),
+        )
+        .await;
+        assert!(!placeholder.is_error, "{}", placeholder.all_text());
+
+        let called = call(
+            &proxy,
+            "lomway_call_tool",
+            json!({"name": "cua_windows_get_screen_size", "arguments": {}}),
+        )
+        .await;
+        assert!(!called.is_error, "{}", called.all_text());
+        assert_eq!(called.all_text(), "ok");
+        assert_eq!(monitor.activation_count(), 3);
     }
 }
