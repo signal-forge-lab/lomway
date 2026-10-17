@@ -132,6 +132,41 @@ impl MonitorHandle {
         }
     }
 
+    /// Test monitor whose deferred backends (by supervisor name) are
+    /// connected and recently used, so `activate` resolves the name without
+    /// probing a port or rebuilding a transport.
+    #[cfg(test)]
+    pub(crate) fn connected_for_test(proxy: McpProxy, deferred: &[&str]) -> Self {
+        let now = Instant::now();
+        let specs = deferred
+            .iter()
+            .map(|name| BackendReconnectSpec {
+                name: (*name).to_string(),
+                url: "http://127.0.0.1:9/mcp".to_string(),
+                port: 9,
+                bearer_token: None,
+                timeout_seconds: None,
+                deferred: true,
+            })
+            .collect();
+        let states = deferred
+            .iter()
+            .map(|name| {
+                let mut state = BackendReconnectState::new(true);
+                state.last_used = Some(now);
+                ((*name).to_string(), state)
+            })
+            .collect();
+        Self {
+            states: Arc::new(Mutex::new(states)),
+            specs: Arc::new(specs),
+            settings: MonitorConfig::default(),
+            proxy,
+            reconnect_lock: Arc::new(AsyncMutex::new(())),
+            activations: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
     /// Explicit deferred use. Refresh a previously-idle transport before
     /// discovery/dispatch; never retry the *user's* tool invocation.
     pub async fn activate(&self, name: &str) -> Result<()> {
