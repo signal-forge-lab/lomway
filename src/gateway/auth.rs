@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::config::model::NorthboundOAuthConfig;
+use crate::gateway::deferred::{ACCESS_SCOPED_META_TOOLS, CALLER_ALLOWLIST_ARGUMENT};
 
 #[derive(Clone)]
 struct OAuthState {
@@ -124,7 +125,17 @@ async fn unrestricted_audited_request(request: Request, next: Next, actor: &str)
     let Ok(bytes) = to_bytes(body, 1_048_576).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
-    let message = serde_json::from_slice::<Value>(&bytes).ok();
+    let mut message = serde_json::from_slice::<Value>(&bytes).ok();
+    // Unrestricted callers see every capability: never honor a
+    // caller-supplied allowlist value on their behalf.
+    let stripped = message.as_mut().is_some_and(strip_caller_allowlist);
+    let bytes = match (stripped, message.as_ref()) {
+        (true, Some(message)) => match serde_json::to_vec(message) {
+            Ok(encoded) => axum::body::Bytes::from(encoded),
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+        },
+        _ => bytes,
+    };
     let method = message
         .as_ref()
         .and_then(|v| v.get("method"))
@@ -161,24 +172,34 @@ async fn restricted_pat_request(
         Ok(bytes) => bytes,
         Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
     };
-    let Ok(message) = serde_json::from_slice::<Value>(&bytes) else {
+    let Ok(mut message) = serde_json::from_slice::<Value>(&bytes) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let Some(method) = message.get("method").and_then(Value::as_str) else {
+    let Some(method) = message
+        .get("method")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
         // Batch JSON-RPC and opaque calls are deliberately denied.
         return StatusCode::FORBIDDEN.into_response();
     };
-    let tool = message
-        .pointer("/params/name")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let tool = audit_field(tool);
+    let method = method.as_str();
+    let tool = audit_field(
+        message
+            .pointer("/params/name")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    )
+    .to_owned();
+    let tool = tool.as_str();
     let deferred_target = audit_field(
         message
             .pointer("/params/arguments/name")
             .and_then(Value::as_str)
             .unwrap_or(""),
-    );
+    )
+    .to_owned();
+    let deferred_target = deferred_target.as_str();
     let should_filter = match method {
         "initialize"
         | "ping"
@@ -213,6 +234,16 @@ async fn restricted_pat_request(
             return StatusCode::FORBIDDEN.into_response();
         }
     };
+    // Capability search/describe results are scoped to this caller: the
+    // authoritative allowlist overwrites any caller-supplied value.
+    let bytes = if inject_caller_allowlist(&mut message, method == "tools/call", allowed) {
+        match serde_json::to_vec(&message) {
+            Ok(encoded) => axum::body::Bytes::from(encoded),
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+        }
+    } else {
+        bytes
+    };
     let response = next
         .run(Request::from_parts(parts, Body::from(bytes)))
         .await;
@@ -243,7 +274,7 @@ fn permitted_pat_call(name: &str, message: &Value, allowed: &[String]) -> bool {
     true
 }
 
-fn pat_tool_allowed(allowed: &[String], name: &str) -> bool {
+pub(super) fn pat_tool_allowed(allowed: &[String], name: &str) -> bool {
     // Wildcard permission is intentionally explicit and does not grant
     // administrative proxy endpoints.
     if name.is_empty()
@@ -253,6 +284,43 @@ fn pat_tool_allowed(allowed: &[String], name: &str) -> bool {
         return false;
     }
     allowed.iter().any(|tool| tool == "*" || tool == name)
+}
+
+fn scoped_meta_tool(message: &Value) -> bool {
+    message
+        .pointer("/params/name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| ACCESS_SCOPED_META_TOOLS.contains(&name))
+}
+
+/// Overwrite the hidden allowlist argument of a capability search/describe
+/// call. Returns whether the message changed.
+fn inject_caller_allowlist(message: &mut Value, is_call: bool, allowed: &[String]) -> bool {
+    if !is_call || !scoped_meta_tool(message) {
+        return false;
+    }
+    let Some(params) = message.get_mut("params").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    let arguments = params
+        .entry("arguments")
+        .or_insert_with(|| Value::Object(Default::default()));
+    if arguments.is_null() {
+        *arguments = Value::Object(Default::default());
+    }
+    let Some(arguments) = arguments.as_object_mut() else {
+        return false;
+    };
+    arguments.insert(CALLER_ALLOWLIST_ARGUMENT.to_string(), json!(allowed));
+    true
+}
+
+/// Remove any caller-supplied hidden allowlist argument.
+fn strip_caller_allowlist(message: &mut Value) -> bool {
+    message
+        .pointer_mut("/params/arguments")
+        .and_then(Value::as_object_mut)
+        .is_some_and(|arguments| arguments.remove(CALLER_ALLOWLIST_ARGUMENT).is_some())
 }
 
 fn audit_field(value: &str) -> &str {
@@ -452,6 +520,15 @@ mod tests {
                             "pat": true,
                             "client_id": "pat:synthetic",
                             "allowed_tools": ["safe_status", "lomway_call_tool"]
+                        }),
+                        Some("pat-search") => json!({
+                            "active": true,
+                            "aud": resource,
+                            "scope": "devspace",
+                            "exp": now + 3600,
+                            "pat": true,
+                            "client_id": "pat:search-synthetic",
+                            "allowed_tools": ["lomway_search_tools", "lomway_describe_tool", "safe_status"]
                         }),
                         Some("pat-all") => json!({
                             "active": true,
@@ -780,6 +857,115 @@ mod tests {
             .await
             .expect("limited OAuth request");
         assert_eq!(allowed.status(), reqwest::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn capability_search_receives_the_callers_authoritative_allowlist() {
+        let resource = "https://lomway.example/mcp".to_string();
+        let introspection = spawn_introspection(resource.clone()).await;
+        let config = NorthboundOAuthConfig {
+            resource_url: resource,
+            introspection_url: format!("http://{introspection}/oauth/introspect"),
+            required_scope: "devspace".to_string(),
+        };
+        // The upstream echoes the request it received.
+        let upstream = Router::new().fallback(|body: axum::body::Bytes| async move {
+            ([(header::CONTENT_TYPE, "application/json")], body)
+        });
+        let (upstream, _) = protect_mcp_router(upstream, config);
+        let app = Router::new().nest("/mcp", upstream);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}/mcp");
+        let spoofed = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"lomway_search_tools",
+            "arguments":{"query":"Serena","_lomway_allowed_tools":["*"]}
+        }});
+
+        let restricted: Value = client
+            .post(&base)
+            .bearer_auth("pat-search")
+            .json(&spoofed)
+            .send()
+            .await
+            .expect("restricted search")
+            .json()
+            .await
+            .expect("echo");
+        assert_eq!(
+            restricted.pointer("/params/arguments/_lomway_allowed_tools"),
+            Some(&json!([
+                "lomway_search_tools",
+                "lomway_describe_tool",
+                "safe_status"
+            ])),
+            "a restricted caller must not widen its own search scope"
+        );
+        assert_eq!(
+            restricted.pointer("/params/arguments/query"),
+            Some(&json!("Serena"))
+        );
+
+        let describe: Value = client
+            .post(&base)
+            .bearer_auth("pat-search")
+            .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+                "params":{"name":"lomway_describe_tool"}}))
+            .send()
+            .await
+            .expect("restricted describe")
+            .json()
+            .await
+            .expect("echo");
+        assert!(
+            describe
+                .pointer("/params/arguments/_lomway_allowed_tools")
+                .is_some()
+        );
+
+        let other: Value = client
+            .post(&base)
+            .bearer_auth("pat-search")
+            .json(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{"name":"safe_status","arguments":{}}}))
+            .send()
+            .await
+            .expect("ordinary call")
+            .json()
+            .await
+            .expect("echo");
+        assert!(
+            other
+                .pointer("/params/arguments/_lomway_allowed_tools")
+                .is_none(),
+            "ordinary tool arguments are forwarded unchanged"
+        );
+
+        let unrestricted: Value = client
+            .post(&base)
+            .bearer_auth("valid")
+            .json(&spoofed)
+            .send()
+            .await
+            .expect("unrestricted search")
+            .json()
+            .await
+            .expect("echo");
+        assert!(
+            unrestricted
+                .pointer("/params/arguments/_lomway_allowed_tools")
+                .is_none()
+        );
+        assert_eq!(
+            unrestricted.pointer("/params/arguments/query"),
+            Some(&json!("Serena"))
+        );
     }
 
     #[tokio::test]

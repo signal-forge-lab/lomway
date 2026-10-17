@@ -597,7 +597,7 @@ max_argument_size = 1048576
 }
 
 #[tokio::test]
-async fn deferred_backend_started_after_gateway_start_becomes_searchable_without_restart() {
+async fn deferred_backend_started_after_gateway_start_becomes_searchable_after_explicit_describe() {
     let (direct_addr, direct_task) = spawn_status_backend("direct").await;
     let reserved = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -649,30 +649,55 @@ exposure = "deferred"
         .expect("bind late deferred backend");
     let deferred_task = spawn_status_backend_on(listener, "late");
 
+    // Search never starts or reconnects a deferred backend: a backend that
+    // was offline at startup is reported as an unverified placeholder.
+    let placeholder = client
+        .call_tool(
+            "lomway_search_tools",
+            serde_json::json!({"query": "browser", "backend": "browser", "limit": 5}),
+        )
+        .await
+        .expect("search offline deferred backend");
+    let placeholder_text = placeholder.all_text();
+    assert!(
+        placeholder_text.contains("\"browser_*\"") && placeholder_text.contains("unverified"),
+        "{placeholder_text}"
+    );
+    assert!(!placeholder_text.contains("browser_status"));
+
+    // Describing the placeholder is the explicit use that connects it.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
-    let search_text = loop {
+    let described = loop {
         let result = client
             .call_tool(
-                "lomway_search_tools",
-                serde_json::json!({
-                    "query": "status",
-                    "backend": "browser",
-                    "limit": 5
-                }),
+                "lomway_describe_tool",
+                serde_json::json!({"name": "browser_*"}),
             )
             .await
-            .expect("search late deferred backend");
+            .expect("describe late deferred backend");
         let text = result.all_text();
-        if text.contains("browser_status") {
+        if !result.is_error && text.contains("browser_status") {
             break text;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "late deferred backend never became searchable: {text}"
+            "late deferred backend never became describable: {text}"
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     };
-    assert!(search_text.contains("browser_status"));
+    assert!(described.contains("browser_status"));
+
+    // Afterwards search serves it from the cached manifest.
+    let search_text = client
+        .call_tool(
+            "lomway_search_tools",
+            serde_json::json!({"query": "status", "backend": "browser", "limit": 5}),
+        )
+        .await
+        .expect("search late deferred backend")
+        .all_text();
+    assert!(search_text.contains("browser_status"), "{search_text}");
+    assert!(search_text.contains("cached"), "{search_text}");
 
     let tools = client
         .list_tools()
@@ -1312,7 +1337,19 @@ exposure = "deferred"
             .expect("serve mixed gateway router");
     });
 
-    let client = connect_client(gateway_addr).await;
+    let transport = HttpClientTransport::new(format!("http://{gateway_addr}/mcp"));
+    let client = McpClient::connect(transport)
+        .await
+        .expect("connect MCP client");
+    let initialized = client
+        .initialize("lomway-test", "1.0.0")
+        .await
+        .expect("initialize MCP client");
+    assert_eq!(
+        initialized.instructions.as_deref(),
+        Some("Use the browser deferred backend for web-page automation."),
+        "deployment routing guidance reaches clients through MCP instructions"
+    );
     let tools = client.list_tools().await.expect("list mixed gateway tools");
     let names: Vec<_> = tools.tools.iter().map(|tool| tool.name.as_str()).collect();
 
@@ -1330,22 +1367,26 @@ exposure = "deferred"
         .description
         .as_deref()
         .expect("search meta-tool has routing guidance");
+    // tools/list is visible to every caller (including restricted PATs), so
+    // the description names no backend ids and does not echo deployment
+    // instructions; it states the routing rule instead.
     assert!(
-        search_description.contains("browser"),
-        "configured deferred backend ids must be visible to the agent: {search_description}"
+        !search_description.contains("browser") && !search_description.contains("direct_"),
+        "configured backend ids must not appear in the search description: {search_description}"
     );
     assert!(
-        search_description.contains("Omit backend when unsure"),
-        "agent should be told it can search all deferred backends: {search_description}"
+        !search_description.contains("Use the browser deferred backend"),
+        "deployment instructions must not be embedded in the search description: {search_description}"
+    );
+    assert!(
+        search_description.contains("Omit backend"),
+        "agent should be told it can search everything: {search_description}"
     );
     assert!(
         search_description.contains("lomway_describe_tool")
-            && search_description.contains("lomway_call_tool"),
-        "agent should be told the search -> describe -> call flow: {search_description}"
-    );
-    assert!(
-        search_description.contains("Use the browser deferred backend for web-page automation."),
-        "deployment routing guidance must be visible in the search tool description: {search_description}"
+            && search_description.contains("lomway_call_tool")
+            && search_description.contains("Only deferred results"),
+        "agent should be told only deferred results use describe -> call: {search_description}"
     );
     assert!(
         names.iter().all(|name| !name.starts_with("proxy_")),

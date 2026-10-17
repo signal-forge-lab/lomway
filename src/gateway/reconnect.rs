@@ -6,7 +6,10 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -89,9 +92,18 @@ pub struct MonitorHandle {
     settings: MonitorConfig,
     proxy: McpProxy,
     reconnect_lock: Arc<AsyncMutex<()>>,
+    /// Explicit deferred activations requested so far (tests assert that
+    /// capability search never adds to this).
+    activations: Arc<AtomicU64>,
 }
 
 impl MonitorHandle {
+    /// Number of explicit deferred activations requested since construction.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn activation_count(&self) -> u64 {
+        self.activations.load(Ordering::SeqCst)
+    }
+
     fn commit_observation(&self, name: &str, state: BackendReconnectState) {
         let mut states = self.states.lock().expect("monitor lock poisoned");
         if states
@@ -116,12 +128,14 @@ impl MonitorHandle {
             settings: MonitorConfig::default(),
             proxy,
             reconnect_lock: Arc::new(AsyncMutex::new(())),
+            activations: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// Explicit deferred use. Refresh a previously-idle transport before
     /// discovery/dispatch; never retry the *user's* tool invocation.
     pub async fn activate(&self, name: &str) -> Result<()> {
+        self.activations.fetch_add(1, Ordering::SeqCst);
         let spec = self
             .specs
             .iter()
@@ -237,6 +251,7 @@ pub(super) fn spawn(
         settings,
         proxy,
         reconnect_lock: Arc::new(AsyncMutex::new(())),
+        activations: Arc::new(AtomicU64::new(0)),
     };
     if !handle.specs.is_empty() {
         let cloned = handle.clone();
