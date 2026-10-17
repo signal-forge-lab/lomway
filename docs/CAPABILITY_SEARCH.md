@@ -32,6 +32,13 @@ already have X?". It searches three surfaces with one ranking:
   unknown `backend` filter returns the same empty result as a configured
   backend they cannot see; unrestricted callers still get an error for an
   unknown backend id.
+- **Meta-tool descriptions are generic.** `tools/list` is visible to every
+  caller, so the `lomway_search_tools`, `lomway_describe_tool`, and
+  `lomway_call_tool` descriptions name no configured backend ids and do not
+  repeat `server.instructions` (which reaches clients through the MCP
+  `instructions` field). They state the routing rule instead: direct results
+  are called directly, internal results through their `via` tool, and only
+  deferred results use describe then call.
 - **Unrelated queries return nothing.** Results below a score threshold are
   dropped.
 

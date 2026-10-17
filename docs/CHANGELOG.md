@@ -19,6 +19,7 @@ All notable changes to Lomway are documented here. The format is based on [Keep 
 - Capability search never activates or reconnects a backend, and its results are filtered by the caller's PAT/OAuth tool allowlist; unauthorized tools are indistinguishable from nonexistent ones, and restricted callers get the same empty result for unknown and hidden `backend` filters.
 - Capability declarations are validated strictly (every field, including `[[internal]]` `domain`): private/loopback/link-local/CGNAT addresses, `host:port`, absolute and home paths, UNC paths, and email addresses are rejected.
 - Cached deferred manifests are bound to a SHA-256 fingerprint of each backend's endpoint settings; a changed endpoint invalidates its cache (`unverified`) and only the hash is persisted.
+- The `lomway_search_tools` description no longer lists configured deferred backend ids or embeds `server.instructions`, so restricted callers cannot enumerate backends from `tools/list`; the three meta-tool descriptions now state one consistent routing rule.
 
 ## [0.1.0] - 2026-09-13
 

@@ -61,7 +61,6 @@ struct ConfiguredBackend {
 #[derive(Debug, Clone, Default)]
 pub(super) struct DeferredCatalog {
     backends: Arc<Vec<ConfiguredBackend>>,
-    routing_guidance: Arc<Option<String>>,
     manifests: ManifestStore,
 }
 
@@ -80,7 +79,6 @@ impl DeferredCatalog {
             .collect::<Vec<_>>();
         let mut catalog = Self {
             backends: Arc::new(backends),
-            routing_guidance: Arc::new(config.server.instructions.clone()),
             manifests: ManifestStore::default(),
         };
         catalog.manifests = ManifestStore::in_memory(catalog.endpoint_fingerprints());
@@ -135,16 +133,6 @@ impl DeferredCatalog {
 
     fn backend_is_configured(&self, id: &str) -> bool {
         id == "internal" || self.backends.iter().any(|backend| backend.id == id)
-    }
-
-    fn deferred_ids(&self) -> Vec<String> {
-        self.deferred_backends()
-            .map(|backend| backend.id.clone())
-            .collect()
-    }
-
-    fn routing_guidance(&self) -> Option<&str> {
-        self.routing_guidance.as_deref()
     }
 
     fn group_deferred(&self, tools: &[ToolDefinition]) -> BTreeMap<String, Vec<ToolDefinition>> {
@@ -454,6 +442,12 @@ async fn describe(
     Ok(CallToolResult::text(serde_json::to_string_pretty(&body)?))
 }
 
+const SEARCH_TOOL_DESCRIPTION: &str = "Use this first whenever you are unsure whether a capability exists, before concluding it is missing or proposing to install anything. Searches across every capability this caller may use: direct tools already in tools/list, deferred tools behind Lomway deferred exposure, and internal capabilities reached through another tool, matching upstream OSS names, English and Japanese aliases, action names, and descriptions. Searching never starts a backend; deferred results come from the last cached manifest. Each result gives invocation (direct|deferred|internal), action, provider_oss, status (listed = in tools/list now, not a health check; cached; unverified; declared), manifest_seen_at, and how_to_invoke. Call direct results directly by name (passing action when one is given), never through lomway_call_tool. Use internal results through the tool named in via. Only deferred results use lomway_describe_tool for the exact schema and then lomway_call_tool. Omit backend unless a previous result gave you its id.";
+
+const DESCRIBE_TOOL_DESCRIPTION: &str = "Use after lomway_search_tools, or whenever arguments are uncertain. Return the exact current MCP description and input/output schema for one name from a search result: a direct tool, a deferred tool, an internal capability, or a deferred `<prefix>*` placeholder. Describing a deferred tool may start its backend. Call direct tools directly by name and internal capabilities through their via tool; only deferred tools go through lomway_call_tool.";
+
+const CALL_TOOL_DESCRIPTION: &str = "Invoke one exact deferred Lomway tool from a lomway_search_tools result, with arguments matching the schema returned by lomway_describe_tool. Deferred tools only: call direct tools directly by name and internal capabilities through their via tool; direct and control-plane tools are rejected here.";
+
 /// Register the safe discovery backend under the reserved lomway namespace.
 /// Upstream proxy/admin tools remain removed.
 pub(super) async fn register(
@@ -469,15 +463,12 @@ pub(super) async fn register(
 
     let search_catalog = catalog.clone();
     let search_proxy = proxy.clone();
-    let deferred_ids = catalog.deferred_ids().join(", ");
-    let routing_guidance = catalog
-        .routing_guidance()
-        .map(|guidance| format!(" Deployment routing guidance: {guidance}"))
-        .unwrap_or_default();
+    // Tool descriptions are visible to every caller through tools/list,
+    // including restricted PATs, so they stay generic: no configured backend
+    // ids and no deployment instructions (those reach clients through the
+    // MCP `instructions` field instead).
     let search = ToolBuilder::new("search_tools")
-        .description(format!(
-            "Use this first whenever you are unsure whether a capability exists, before concluding it is missing or proposing to install anything. Searches every capability this caller may use: direct tools already in tools/list, deferred tools hidden behind Lomway deferred exposure (from the last cached manifest; searching never starts a backend), and internal capabilities reached through another tool. Matches upstream OSS names (for example Serena, Graft, Hindsight), English and Japanese aliases, action names, and descriptions. Each result gives invocation (direct|deferred|internal), action, provider_oss, status (listed = in tools/list now, not a health check; cached; unverified; declared), manifest_seen_at, and how_to_invoke: call direct results directly by name and never through lomway_call_tool; for deferred results use lomway_describe_tool for the exact schema, then lomway_call_tool. Omit backend when unsure and search everything. Configured deferred backend ids: {deferred_ids}.{routing_guidance}"
-        ))
+        .description(SEARCH_TOOL_DESCRIPTION)
         .handler(move |input: SearchInput| {
             let catalog = search_catalog.clone();
             let proxy = search_proxy.clone();
@@ -493,9 +484,10 @@ pub(super) async fn register(
                     // unknown backend id as for a configured backend it may
                     // not see, so backend registration is not observable.
                     if restricted {
-                        return Ok(CallToolResult::text(serde_json::to_string_pretty(
-                            &Vec::<serde_json::Value>::new(),
-                        )?));
+                        return Ok(CallToolResult::text(serde_json::to_string_pretty(&Vec::<
+                            serde_json::Value,
+                        >::new(
+                        ))?));
                     }
                     return Err(tower_mcp::Error::tool(format!(
                         "backend '{backend}' is not a configured Lomway backend"
@@ -514,7 +506,9 @@ pub(super) async fn register(
                     &access,
                     input.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT),
                 );
-                Ok(CallToolResult::text(serde_json::to_string_pretty(&results)?))
+                Ok(CallToolResult::text(serde_json::to_string_pretty(
+                    &results,
+                )?))
             }
         })
         .build();
@@ -523,9 +517,7 @@ pub(super) async fn register(
     let describe_proxy = proxy.clone();
     let describe_monitor = monitor.clone();
     let describe_tool = ToolBuilder::new("describe_tool")
-        .description(
-            "Use after lomway_search_tools, or whenever arguments are uncertain. Return the exact current MCP description and input/output schema for one Lomway tool (direct or deferred), an internal capability, or a deferred `<prefix>*` placeholder. Direct tools are called directly; only deferred tools use lomway_call_tool.",
-        )
+        .description(DESCRIBE_TOOL_DESCRIPTION)
         .handler(move |input: DescribeInput| {
             let catalog = describe_catalog.clone();
             let proxy = describe_proxy.clone();
@@ -538,17 +530,20 @@ pub(super) async fn register(
     let call_proxy = proxy.clone();
     let call_monitor = monitor;
     let call = ToolBuilder::new("call_tool")
-        .description(
-            "Invoke one exact currently available deferred Lomway tool using arguments that match the schema returned by lomway_describe_tool. Normally use after lomway_search_tools and lomway_describe_tool. Direct/control-plane tools are rejected.",
-        )
+        .description(CALL_TOOL_DESCRIPTION)
         .handler(move |input: CallInput| {
             let catalog = call_catalog.clone();
             let mut proxy = call_proxy.clone();
             let monitor = call_monitor.clone();
             async move {
-                let backend_id = catalog.deferred_backend_for_name(&input.name).map(|b| b.id.clone());
+                let backend_id = catalog
+                    .deferred_backend_for_name(&input.name)
+                    .map(|b| b.id.clone());
                 if let Some(backend) = backend_id.as_deref() {
-                    monitor.activate(backend).await.map_err(|e| tower_mcp::Error::tool(e.to_string()))?;
+                    monitor
+                        .activate(backend)
+                        .await
+                        .map_err(|e| tower_mcp::Error::tool(e.to_string()))?;
                 }
                 let tools = current_tools(&proxy).await?;
                 if backend_id.is_some() {
@@ -593,8 +588,10 @@ pub(super) async fn register(
                         if let Some(backend) = backend_id.as_deref() {
                             monitor.transport_failure(backend);
                         }
-                        Err(tower_mcp::Error::tool("internal deferred tool dispatch failed"))
-                    },
+                        Err(tower_mcp::Error::tool(
+                            "internal deferred tool dispatch failed",
+                        ))
+                    }
                 }
             }
         })
@@ -665,6 +662,10 @@ exposure = "deferred"
     }
 
     async fn gateway(with_offline_deferred: bool) -> (McpProxy, MonitorHandle) {
+        gateway_with_config(config(with_offline_deferred)).await
+    }
+
+    async fn gateway_with_config(config: GatewayConfig) -> (McpProxy, MonitorHandle) {
         let proxy = McpProxy::builder("lomway-test", "1.0.0")
             .separator("_")
             .backend(
@@ -693,7 +694,7 @@ exposure = "deferred"
             .await
             .expect("test proxy");
         let monitor = MonitorHandle::snapshot_for_proxy(proxy.clone());
-        let catalog = DeferredCatalog::from_config(&config(with_offline_deferred));
+        let catalog = DeferredCatalog::from_config(&config);
         register(&proxy, catalog, monitor.clone())
             .await
             .expect("register meta-tools");
@@ -1022,6 +1023,59 @@ exposure = "deferred"
                     .to_string()
                     .contains(CALLER_ALLOWLIST_ARGUMENT),
                 "{name} schema leaks the hidden argument"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn meta_tool_descriptions_do_not_reveal_backend_ids() {
+        let mut config = config(true);
+        let mut extra: GatewayConfig = toml::from_str(
+            r#"
+schema_version = 1
+
+[[backends]]
+id = "zq-private-ops"
+prefix = "zqops_"
+url = "http://127.0.0.1:18004/mcp"
+exposure = "deferred"
+"#,
+        )
+        .expect("extra config");
+        config.backends.append(&mut extra.backends);
+        config.server.instructions =
+            Some("Deferred backends in this profile: browser, chrome, zq-private-ops.".to_string());
+        let backend_ids: Vec<String> = config
+            .backends
+            .iter()
+            .flat_map(|backend| [backend.id.to_lowercase(), backend.prefix.to_lowercase()])
+            .collect();
+        let (proxy, _) = gateway_with_config(config).await;
+        let tools = current_tools(&proxy).await.expect("tools");
+        for name in [
+            "lomway_search_tools",
+            "lomway_describe_tool",
+            "lomway_call_tool",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .expect("meta tool");
+            let text = format!(
+                "{} {}",
+                tool.description.clone().unwrap_or_default(),
+                tool.input_schema
+            )
+            .to_lowercase();
+            for id in &backend_ids {
+                assert!(
+                    !text.contains(id.as_str()),
+                    "{name} reveals backend id or prefix '{id}'"
+                );
+            }
+            assert!(
+                !text.contains("deferred backends in this profile"),
+                "{name} echoes deployment instructions"
             );
         }
     }

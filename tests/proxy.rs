@@ -1337,7 +1337,19 @@ exposure = "deferred"
             .expect("serve mixed gateway router");
     });
 
-    let client = connect_client(gateway_addr).await;
+    let transport = HttpClientTransport::new(format!("http://{gateway_addr}/mcp"));
+    let client = McpClient::connect(transport)
+        .await
+        .expect("connect MCP client");
+    let initialized = client
+        .initialize("lomway-test", "1.0.0")
+        .await
+        .expect("initialize MCP client");
+    assert_eq!(
+        initialized.instructions.as_deref(),
+        Some("Use the browser deferred backend for web-page automation."),
+        "deployment routing guidance reaches clients through MCP instructions"
+    );
     let tools = client.list_tools().await.expect("list mixed gateway tools");
     let names: Vec<_> = tools.tools.iter().map(|tool| tool.name.as_str()).collect();
 
@@ -1355,22 +1367,26 @@ exposure = "deferred"
         .description
         .as_deref()
         .expect("search meta-tool has routing guidance");
+    // tools/list is visible to every caller (including restricted PATs), so
+    // the description names no backend ids and does not echo deployment
+    // instructions; it states the routing rule instead.
     assert!(
-        search_description.contains("browser"),
-        "configured deferred backend ids must be visible to the agent: {search_description}"
+        !search_description.contains("browser") && !search_description.contains("direct_"),
+        "configured backend ids must not appear in the search description: {search_description}"
     );
     assert!(
-        search_description.contains("Omit backend when unsure"),
-        "agent should be told it can search all deferred backends: {search_description}"
+        !search_description.contains("Use the browser deferred backend"),
+        "deployment instructions must not be embedded in the search description: {search_description}"
+    );
+    assert!(
+        search_description.contains("Omit backend"),
+        "agent should be told it can search everything: {search_description}"
     );
     assert!(
         search_description.contains("lomway_describe_tool")
-            && search_description.contains("lomway_call_tool"),
-        "agent should be told the search -> describe -> call flow: {search_description}"
-    );
-    assert!(
-        search_description.contains("Use the browser deferred backend for web-page automation."),
-        "deployment routing guidance must be visible in the search tool description: {search_description}"
+            && search_description.contains("lomway_call_tool")
+            && search_description.contains("Only deferred results"),
+        "agent should be told only deferred results use describe -> call: {search_description}"
     );
     assert!(
         names.iter().all(|name| !name.starts_with("proxy_")),

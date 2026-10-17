@@ -27,6 +27,10 @@
   使えないツールはランキング前に除外し、describe しても存在しないツールと同じエラーを返す。
   これらの呼び出し主体では、未知の `backend` を指定しても、見えないバックエンドを指定したときと同じ空の結果を返す。
   制限のない呼び出し主体には、未知の backend id は従来どおりエラーになる。
+- **メタツールの説明文は一般的な文にとどめる。** `tools/list` はすべての呼び出し主体に見えるため、
+  `lomway_search_tools`・`lomway_describe_tool`・`lomway_call_tool` の説明文には設定済みの backend id を書かず、
+  `server.instructions` も繰り返さない（こちらは MCP の `instructions` フィールドでクライアントに届く）。
+  代わりに「Direct の結果は直接呼ぶ、internal は `via` のツール経由、Deferred の結果だけ describe→call」という規則を書く。
 - **無関係なクエリには何も返さない。** スコアが閾値未満の結果は捨てる。
 
 ## ランキング
