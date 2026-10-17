@@ -725,6 +725,161 @@ exposure = "deferred"
     deferred_task.abort();
 }
 
+/// A deferred browser may be restarted externally by its supervisor while
+/// the gateway and caller sessions remain alive. Re-entry must not hang on
+/// a stale MCP session or require restarting the gateway.
+#[tokio::test]
+async fn deferred_backend_recovers_after_external_restart() {
+    let (direct_addr, direct_task) = spawn_status_backend("direct").await;
+    let (backend_addr, backend_task) = spawn_status_backend("before").await;
+    let config = parse_public_config(format!(
+        r#"
+schema_version = 1
+
+[[backends]]
+id = "direct"
+prefix = "direct_"
+url = "http://{direct_addr}/mcp"
+timeout_seconds = 2
+
+[[backends]]
+id = "browser"
+prefix = "browser_"
+url = "http://{backend_addr}/mcp"
+timeout_seconds = 2
+exposure = "deferred"
+"#
+    ));
+    let gateway = Gateway::build(config)
+        .await
+        .expect("build deferred gateway");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind gateway listener");
+    let gateway_addr = listener.local_addr().expect("gateway address");
+    let gateway_task = tokio::spawn(async move {
+        axum::serve(listener, gateway.router())
+            .await
+            .expect("serve gateway");
+    });
+    let client = connect_client(gateway_addr).await;
+    let input = serde_json::json!({"name": "browser_status", "arguments": {}});
+
+    let first = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.call_tool("lomway_call_tool", input.clone()),
+    )
+    .await
+    .expect("initial deferred dispatch must be bounded")
+    .expect("initial deferred dispatch works");
+    assert_eq!(first.all_text(), "before");
+
+    backend_task.abort();
+    let _ = backend_task.await;
+    let listener = tokio::net::TcpListener::bind(backend_addr)
+        .await
+        .expect("rebind browser backend on original address");
+    let restarted_backend_task = spawn_status_backend_on(listener, "after");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            client.call_tool("lomway_call_tool", input.clone()),
+        )
+        .await;
+        if let Ok(Ok(response)) = result
+            && !response.is_error
+            && response.all_text() == "after"
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "deferred browser tool must recover after backend restart"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    gateway_task.abort();
+    restarted_backend_task.abort();
+    direct_task.abort();
+}
+
+/// A backend's MCP session can expire without its port going down.
+/// The first failed request may fail; later deferred uses must rebuild
+/// the transport, and no call may hang forever.
+#[tokio::test]
+async fn deferred_backend_recovers_from_expired_mcp_session() {
+    let (direct_addr, direct_task) = spawn_status_backend("direct").await;
+    let (backend_addr, expire_session, backend_task) =
+        spawn_session_expiring_backend("session-recovered").await;
+    let config = parse_public_config(format!(
+        r#"
+schema_version = 1
+
+[[backends]]
+id = "direct"
+prefix = "direct_"
+url = "http://{direct_addr}/mcp"
+timeout_seconds = 2
+
+[[backends]]
+id = "browser"
+prefix = "browser_"
+url = "http://{backend_addr}/mcp"
+timeout_seconds = 2
+exposure = "deferred"
+"#
+    ));
+    let gateway = Gateway::build(config)
+        .await
+        .expect("build deferred gateway with expiring session");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind gateway listener");
+    let gateway_addr = listener.local_addr().expect("gateway address");
+    let gateway_task = tokio::spawn(async move {
+        axum::serve(listener, gateway.router())
+            .await
+            .expect("serve gateway");
+    });
+    let client = connect_client(gateway_addr).await;
+    let input = serde_json::json!({"name": "browser_status", "arguments": {}});
+    let initial = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.call_tool("lomway_call_tool", input.clone()),
+    )
+    .await
+    .expect("initial call bounded")
+    .expect("initial call works");
+    assert_eq!(initial.all_text(), "session-recovered");
+    expire_session.store(true, Ordering::SeqCst);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let response = tokio::time::timeout(
+            Duration::from_secs(3),
+            client.call_tool("lomway_call_tool", input.clone()),
+        )
+        .await;
+        if let Ok(Ok(result)) = response
+            && !result.is_error
+            && result.all_text() == "session-recovered"
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "deferred backend must recover from an invalidated MCP session"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    gateway_task.abort();
+    backend_task.abort();
+    direct_task.abort();
+}
+
 #[tokio::test]
 async fn backend_skipped_at_startup_recovers_without_gateway_restart() {
     let (healthy_addr, healthy_task) = spawn_status_backend("healthy").await;
