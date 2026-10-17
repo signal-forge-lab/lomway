@@ -62,3 +62,22 @@ process was changed.
    changing reconnect policies or introducing a whole-call timeout.
 
 No automatic retries of non-idempotent browser actions are allowed.
+
+## Later live recheck (approximately 23:16 JST)
+
+Lomway's deferred browser discovery successfully returned a cached
+`browser_list_instances` descriptor, and an immediate read-only
+`lomway_call_tool` invocation returned `{"result":[]}` without a
+timeout. This shows the browser deferred path can recover in the
+current live session without restarting the browser backend.
+It does not identify why earlier calls timed out or prove durable
+reliability across future backend restarts. No code or production
+config was changed for this recheck.
+
+A separate previously advertised direct `workbridge_exec_command`
+capability now returned `Unknown tool: workbridge_exec_command` from
+the connected Lomway tool surface, while the browser deferred call
+succeeded. Device-level Windows inspection continued via the
+already-connected Desktop Commander on the Windows host. Distinguish this direct
+tool registration mismatch from the earlier browser MCP timeout;
+there is not yet evidence of a common cause.
