@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::config::model::BackendEntry;
+use crate::config::model::{BackendEntry, BackendToken};
 use crate::config::validate;
 
 /// A fully validated backend description.
@@ -19,6 +19,8 @@ pub struct BackendDescriptor {
     url: String,
     required: bool,
     timeout: Duration,
+    /// Redacted in `Debug`; only the transport reads the value.
+    bearer_token: Option<BackendToken>,
 }
 
 impl BackendDescriptor {
@@ -41,12 +43,21 @@ impl BackendDescriptor {
                 entry.prefix
             )
         })?;
+        match (&entry.bearer_token_env, &entry.bearer_token) {
+            (Some(name), Some(_)) => validate::validate_bearer_token_env_name(&entry.id, name)?,
+            (None, None) => {}
+            _ => anyhow::bail!(
+                "backend '{}' bearer_token_env must be set and resolved together; the gateway fails closed instead of connecting without credentials",
+                entry.id
+            ),
+        }
         Ok(Self {
             id: entry.id.clone(),
             prefix: entry.prefix.clone(),
             url: entry.url.clone(),
             required: entry.required,
             timeout: Duration::from_secs(entry.timeout_seconds.max(1)),
+            bearer_token: entry.bearer_token.clone(),
         })
     }
 
@@ -73,6 +84,11 @@ impl BackendDescriptor {
     /// Request and probe timeout.
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// Bearer token sent to this backend, if one is configured.
+    pub(crate) fn bearer_token(&self) -> Option<&BackendToken> {
+        self.bearer_token.as_ref()
     }
 }
 
@@ -123,5 +139,22 @@ mod tests {
         })
         .expect_err("zero timeout must be rejected");
         assert!(bad_timeout.to_string().contains("timeout_seconds"));
+
+        let secret = "descriptor-secret-0123456789abcdefghij";
+        let with_token = BackendDescriptor::try_from_entry(&BackendEntry {
+            bearer_token_env: Some("LOMWAY_BACKEND_FS_TOKEN".to_string()),
+            bearer_token: Some(BackendToken::new(secret).expect("token")),
+            ..entry("fs", "fs_", "http://127.0.0.1:18701/mcp")
+        })
+        .expect("resolved credential");
+        assert!(with_token.bearer_token().is_some());
+        assert!(!format!("{with_token:?}").contains(secret));
+
+        let unresolved = BackendDescriptor::try_from_entry(&BackendEntry {
+            bearer_token_env: Some("LOMWAY_BACKEND_FS_TOKEN".to_string()),
+            ..entry("fs", "fs_", "http://127.0.0.1:18701/mcp")
+        })
+        .expect_err("unresolved credential must not build a descriptor");
+        assert!(unresolved.to_string().contains("fails closed"));
     }
 }

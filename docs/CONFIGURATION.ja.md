@@ -57,11 +57,48 @@ url = "http://127.0.0.1:8001/mcp"   # loopbackのみ。${VAR} 可
 required = true                     # 既定true。falseはdegrade-on-outage
 timeout_seconds = 30                # 既定30
 exposure = "direct"                 # direct（既定）またはdeferred
+bearer_token_env = "LOMWAY_BACKEND_FS_TOKEN"  # 任意。環境変数の「名前」だけを書く
 ```
 
 既定値: `[server]` は `127.0.0.1:17777` でlisten。`[policy]` / `[observability]` / `backends` は完全に省略可能です（公開schemaは0 backendを受け入れますが、デプロイゲートは1つ以上のbackendを要求し続けます）。未知のkeyは全レベルで検証に失敗します。
 
 namespace prefix規則: 空でない小文字stem + `_`、backend間で一意かつ非包含（あるprefixが別prefixを内包しない）、暗黙の正規化なし。reserved prefix（`proxy_`、`lomway_`、旧 `lmg_`）は拒否されます。
+
+### 3b. backendのbearer token（`bearer_token_env`）
+
+`Authorization: Bearer <token>` を要求するbackend（例: `--auth-token` または
+`CODING_TOOLS_MCP_AUTH_TOKEN` 付きで起動したCoding Tools MCP）には、tokenの値ではなく
+**環境変数の名前**を設定します。
+
+```toml
+[[backends]]
+id = "coding-tools"
+prefix = "coding_tools_"
+url = "http://127.0.0.1:17684/mcp"
+bearer_token_env = "LOMWAY_BACKEND_CODING_TOOLS_TOKEN"
+```
+
+- 名前は `LOMWAY_BACKEND_[A-Z0-9_]+`（128文字以内）に限ります。無関係なsecretを
+  backendへ渡す設定は書けません。
+- 値は設定の読み込み時（`serve` と `check`）にgatewayの環境から読みます。32〜4096文字の
+  可視ASCIIに限ります。そのbackendへのすべての要求（起動時probe、proxyのsession、
+  再接続、deferredのactivation）に付けます。
+- **fail closed:** 変数が未設定または不正なら、変数名（値は出さない）を示して読み込みを
+  失敗させ、gatewayは起動しません。認証なしで接続したり、黙ってbackendを外したりは
+  しません。isolated deploymentは稼働中のgatewayを止める前に `check` を実行するので、
+  tokenが無ければ切り替え前に止まります。
+- ファイルに直接書いたcredentialは解析前に拒否します。`[[backends]]` 内（公開schemaと
+  legacyの両方）の `bearer_token`、`token`、`auth_token`、`access_token`、
+  `authorization`、`api_key`、`password`、`secret`、`headers` は、値を含まない
+  メッセージで失敗します。TOMLの構文エラーは行番号とparserのメッセージだけを出し、
+  該当行は出しません。
+- 解決したtokenはシリアライズせず（migration出力、`check`、`list-backends`）、ログにも、
+  MCPの `instructions`、`tools/list`、capability search、describe、deferred manifestの
+  キャッシュにも出ません。`check` は変数名だけを表示します。
+- `scripts/start.ps1` と `scripts/deploy-gateway-isolated.ps1` は、参照されている
+  `LOMWAY_BACKEND_*` が未設定なら任意のSOPS連携（`integrations/sops/Import-SopsSecrets.ps1`）
+  から補い、gatewayプロセスにだけ渡します。`scripts/provision-backend-token.ps1 -Name <VAR>`
+  はtokenを生成し、SOPSストアにだけ保存します。
 
 ### 3a. Hybrid tool exposure
 

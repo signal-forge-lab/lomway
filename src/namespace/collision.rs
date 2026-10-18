@@ -66,6 +66,8 @@ mod tests {
             required: true,
             timeout_seconds: 5,
             exposure: Default::default(),
+            bearer_token_env: None,
+            bearer_token: None,
         })
         .expect("valid descriptor")
     }

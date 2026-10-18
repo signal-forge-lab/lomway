@@ -20,13 +20,21 @@ if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
 New-Item -ItemType Directory -Force -Path $Script:RuntimeDir, $Script:LogDir | Out-Null
 $stdout = Join-Path $Script:LogDir 'gateway.stdout.log'
 $stderr = Join-Path $Script:LogDir 'gateway.stderr.log'
-$process = Start-Process -FilePath $Script:Exe `
-    -ArgumentList @('serve', '--config', ('"{0}"' -f $configPath)) `
-    -WorkingDirectory $Script:RepoRoot `
-    -WindowStyle Hidden `
-    -RedirectStandardOutput $stdout `
-    -RedirectStandardError $stderr `
-    -PassThru
+# Backend tokens referenced by bearer_token_env are inherited by the gateway
+# process only; the copies in this launcher are cleared right after spawning.
+. (Join-Path $PSScriptRoot 'backend-tokens.ps1')
+$importedTokens = Import-LomwayBackendTokens -ConfigPath $configPath
+try {
+    $process = Start-Process -FilePath $Script:Exe `
+        -ArgumentList @('serve', '--config', ('"{0}"' -f $configPath)) `
+        -WorkingDirectory $Script:RepoRoot `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $stdout `
+        -RedirectStandardError $stderr `
+        -PassThru
+} finally {
+    Clear-LomwayBackendTokens $importedTokens
+}
 Set-Content -LiteralPath $Script:PidFile -Value $process.Id -NoNewline
 
 for ($i = 0; $i -lt 40; $i++) {

@@ -1766,3 +1766,326 @@ max_argument_size = 1048576
     gateway_task.abort();
     err_task.abort();
 }
+
+// ---------------------------------------------------------------------------
+// Backend bearer tokens (`bearer_token_env`)
+// ---------------------------------------------------------------------------
+
+const BACKEND_TOKEN: &str = "integration-backend-token-0123456789abcdef";
+const BACKEND_TOKEN_ENV: &str = "LOMWAY_BACKEND_SECURED_TOKEN";
+
+#[derive(Clone, Default)]
+struct BearerLog {
+    authorized: Arc<AtomicUsize>,
+    rejected: Arc<AtomicUsize>,
+}
+
+async fn require_backend_bearer(
+    State(log): State<BearerLog>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let expected = format!("Bearer {BACKEND_TOKEN}");
+    let presented = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    if presented == Some(expected.as_str()) {
+        log.authorized.fetch_add(1, Ordering::SeqCst);
+        next.run(request).await
+    } else {
+        log.rejected.fetch_add(1, Ordering::SeqCst);
+        StatusCode::UNAUTHORIZED.into_response()
+    }
+}
+
+/// A backend that, like Coding Tools MCP with `--auth-token`, answers every
+/// request without the exact bearer token with HTTP 401.
+fn spawn_bearer_backend_on(
+    listener: tokio::net::TcpListener,
+    label: &'static str,
+    log: BearerLog,
+) -> tokio::task::JoinHandle<()> {
+    let tool = ToolBuilder::new("status")
+        .description("Return labeled status from a token-protected backend")
+        .handler(move |_: StatusInput| async move { Ok(CallToolResult::text(label)) })
+        .build();
+    let router = McpRouter::new()
+        .server_info(format!("secured-{label}"), "1.0.0")
+        .tool(tool);
+    let app = HttpTransport::new(router)
+        .into_router_at("/mcp")
+        .layer(middleware::from_fn_with_state(log, require_backend_bearer));
+    tokio::spawn(async move {
+        serve(listener, app).await.expect("serve bearer backend");
+    })
+}
+
+async fn spawn_bearer_backend(
+    label: &'static str,
+    log: BearerLog,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind bearer backend");
+    let addr = listener.local_addr().expect("bearer backend address");
+    (addr, spawn_bearer_backend_on(listener, label, log))
+}
+
+fn with_backend_tokens(text: String) -> GatewayConfig {
+    let mut config = parse_public_config(text);
+    lomway::config::load::resolve_backend_tokens_with(&mut config, |name| {
+        (name == BACKEND_TOKEN_ENV).then(|| BACKEND_TOKEN.to_string())
+    })
+    .expect("resolve backend tokens");
+    config
+}
+
+async fn serve_gateway(gateway: Gateway) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind gateway listener");
+    let addr = listener.local_addr().expect("gateway address");
+    let task = tokio::spawn(async move {
+        axum::serve(listener, gateway.router())
+            .await
+            .expect("serve gateway");
+    });
+    (addr, task)
+}
+
+fn read_tree(dir: &std::path::Path, out: &mut String) {
+    for entry in fs::read_dir(dir).expect("read state dir").flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            read_tree(&path, out);
+        } else if let Ok(bytes) = fs::read(&path) {
+            out.push_str(&String::from_utf8_lossy(&bytes));
+        }
+    }
+}
+
+#[tokio::test]
+async fn backend_bearer_token_is_sent_on_every_request_and_never_surfaces() {
+    let log = BearerLog::default();
+    let (direct_addr, direct_task) = spawn_bearer_backend("secured", log.clone()).await;
+    let (deferred_addr, deferred_task) = spawn_bearer_backend("vaulted", log.clone()).await;
+
+    // Sanity: the mock really refuses an unauthenticated client.
+    let unauthenticated = reqwest::Client::new()
+        .post(format!("http://{direct_addr}/mcp"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .body(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#)
+        .send()
+        .await
+        .expect("unauthenticated request");
+    assert_eq!(unauthenticated.status(), reqwest::StatusCode::UNAUTHORIZED);
+    log.rejected.store(0, Ordering::SeqCst);
+
+    let config = with_backend_tokens(format!(
+        r#"
+schema_version = 1
+
+[server]
+instructions = "Gateway for the bearer token test."
+
+[[backends]]
+id = "secured"
+prefix = "secured_"
+url = "http://{direct_addr}/mcp"
+timeout_seconds = 5
+bearer_token_env = "{BACKEND_TOKEN_ENV}"
+
+[[backends]]
+id = "vaulted"
+prefix = "vaulted_"
+url = "http://{deferred_addr}/mcp"
+timeout_seconds = 5
+exposure = "deferred"
+bearer_token_env = "{BACKEND_TOKEN_ENV}"
+"#
+    ));
+    assert!(!format!("{config:?}").contains(BACKEND_TOKEN));
+    let state = tempfile::tempdir().expect("state dir");
+    let gateway = Gateway::build_with_state_dir(config, Some(state.path().to_path_buf()))
+        .await
+        .expect("build gateway with token-protected backends");
+    let (gateway_addr, gateway_task) = serve_gateway(gateway).await;
+
+    let transport = HttpClientTransport::new(format!("http://{gateway_addr}/mcp"));
+    let client = McpClient::connect(transport).await.expect("connect");
+    let initialized = client
+        .initialize("lomway-test", "1.0.0")
+        .await
+        .expect("initialize");
+    let mut surfaces = format!("{initialized:?}");
+
+    let tools = client.list_tools().await.expect("list tools");
+    surfaces.push_str(&format!("{tools:?}"));
+    assert!(
+        tools.tools.iter().any(|tool| tool.name == "secured_status"),
+        "{tools:?}"
+    );
+    assert_eq!(
+        client
+            .call_tool("secured_status", serde_json::json!({}))
+            .await
+            .expect("direct call through token-protected backend")
+            .all_text(),
+        "secured"
+    );
+
+    for (tool, arguments) in [
+        (
+            "lomway_search_tools",
+            serde_json::json!({"query": "status"}),
+        ),
+        (
+            "lomway_search_tools",
+            serde_json::json!({"query": "secured"}),
+        ),
+        (
+            "lomway_describe_tool",
+            serde_json::json!({"name": "vaulted_status"}),
+        ),
+        (
+            "lomway_describe_tool",
+            serde_json::json!({"name": "secured_status"}),
+        ),
+    ] {
+        let result = client.call_tool(tool, arguments).await.expect("meta tool");
+        surfaces.push_str(&result.all_text());
+    }
+    // Deferred activation rebuilds the transport; the token must survive it.
+    let routed = client
+        .call_tool(
+            "lomway_call_tool",
+            serde_json::json!({"name": "vaulted_status", "arguments": {}}),
+        )
+        .await
+        .expect("deferred call through token-protected backend");
+    assert_eq!(routed.all_text(), "vaulted", "{routed:?}");
+
+    // A failing call reports an error without the credential.
+    let failure = client
+        .call_tool(
+            "lomway_call_tool",
+            serde_json::json!({"name": "vaulted_missing", "arguments": {}}),
+        )
+        .await;
+    surfaces.push_str(&format!("{failure:?}"));
+
+    read_tree(state.path(), &mut surfaces);
+    assert!(
+        surfaces.contains("vaulted_status"),
+        "the manifest cache and search results were inspected"
+    );
+    assert!(
+        !surfaces.contains(BACKEND_TOKEN),
+        "the backend token leaked into a client-visible surface or the manifest cache"
+    );
+    assert!(log.authorized.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        log.rejected.load(Ordering::SeqCst),
+        0,
+        "every gateway request to a token-protected backend must carry the token"
+    );
+
+    gateway_task.abort();
+    direct_task.abort();
+    deferred_task.abort();
+}
+
+/// Operating Coding Tools only on demand: the backend may be stopped when
+/// the gateway starts, start later, stop again, and come back. The gateway
+/// connects with the token each time without being restarted.
+#[tokio::test]
+async fn token_protected_backend_started_later_and_restarted_is_reconnected_with_its_token() {
+    let (plain_addr, plain_task) = spawn_status_backend("plain").await;
+    let reserved = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve secured backend port");
+    let secured_addr = reserved.local_addr().expect("secured backend address");
+    drop(reserved);
+
+    let config = with_backend_tokens(format!(
+        r#"
+schema_version = 1
+
+[monitor]
+interval_seconds = 1
+
+[[backends]]
+id = "plain"
+prefix = "plain_"
+url = "http://{plain_addr}/mcp"
+timeout_seconds = 5
+
+[[backends]]
+id = "secured"
+prefix = "secured_"
+url = "http://{secured_addr}/mcp"
+required = false
+timeout_seconds = 2
+bearer_token_env = "{BACKEND_TOKEN_ENV}"
+"#
+    ));
+    let gateway = Gateway::build(config)
+        .await
+        .expect("an optional token-protected backend may be down at startup");
+    let (gateway_addr, gateway_task) = serve_gateway(gateway).await;
+    let client = connect_client(gateway_addr).await;
+
+    let tools = client.list_tools().await.expect("list tools while down");
+    assert!(
+        tools.tools.iter().all(|tool| tool.name != "secured_status"),
+        "a backend that was down at startup is not listed: {tools:?}"
+    );
+    let search = client
+        .call_tool(
+            "lomway_search_tools",
+            serde_json::json!({"query": "secured status"}),
+        )
+        .await
+        .expect("search while down")
+        .all_text();
+    assert!(!search.contains("secured_status"), "{search}");
+
+    let log = BearerLog::default();
+    let listener = tokio::net::TcpListener::bind(secured_addr)
+        .await
+        .expect("bind late secured backend");
+    let first = spawn_bearer_backend_on(listener, "late", log.clone());
+    wait_for_tool_text(&client, "secured_status", "late", Duration::from_secs(15)).await;
+
+    // Stopped again: the cached tool stays listed, but calls fail.
+    first.abort();
+    let _ = first.await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let tools = client.list_tools().await.expect("list tools after stop");
+    assert!(
+        tools.tools.iter().any(|tool| tool.name == "secured_status"),
+        "the proxy keeps the last tool list while the backend is stopped: {tools:?}"
+    );
+    let stopped = client
+        .call_tool("secured_status", serde_json::json!({}))
+        .await;
+    assert!(
+        stopped.is_err() || stopped.as_ref().is_ok_and(|result| result.is_error),
+        "a call to a stopped backend must fail: {stopped:?}"
+    );
+
+    let listener = tokio::net::TcpListener::bind(secured_addr)
+        .await
+        .expect("rebind secured backend");
+    let second = spawn_bearer_backend_on(listener, "again", log.clone());
+    wait_for_tool_text(&client, "secured_status", "again", Duration::from_secs(15)).await;
+
+    assert!(log.authorized.load(Ordering::SeqCst) > 0);
+    assert_eq!(log.rejected.load(Ordering::SeqCst), 0);
+
+    gateway_task.abort();
+    plain_task.abort();
+    second.abort();
+}

@@ -34,7 +34,13 @@ upstream HTTP routerは `/admin/*` も持ちますが、project-owned routerか�
 
 ## 4. Secrets
 
-Gateway runtime自体にはsecret不要です。Secure Tunnel setup/runtimeだけが以下を使います。
+Gateway runtimeがsecretを使うのは、backendに `bearer_token_env` を設定した場合だけです。
+gatewayはその `LOMWAY_BACKEND_*` 変数を自分の環境から読み、そのloopback backendへの
+`Authorization: Bearer` としてだけ送り、未設定なら起動しません（fail closed）。tokenの値は
+設定ファイルに書くと拒否され、ログ、エラー、`check`、MCPの応答、キャッシュには出ません
+（CONFIGURATION 3b）。
+
+Secure Tunnel setup/runtimeは以下を使います。
 
 - `OPENAI_ADMIN_KEY`: one-time remote tunnel create/reuse
 - `CONTROL_PLANE_API_KEY`: managed local tunnel runtime

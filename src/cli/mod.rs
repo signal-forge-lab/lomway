@@ -123,8 +123,14 @@ async fn check_report(
     ));
     report.push_str(&format!("Backends: {}\n", config.backends.len()));
     for backend in &config.backends {
+        // Only the variable name is reported, never the credential.
+        let credential = backend
+            .bearer_token_env
+            .as_deref()
+            .map(|name| format!(", bearer token from {name}"))
+            .unwrap_or_default();
         report.push_str(&format!(
-            "- {} (prefix {}, {}, {})\n",
+            "- {} (prefix {}, {}, {}{credential})\n",
             backend.id,
             backend.prefix,
             if backend.required {
@@ -243,6 +249,28 @@ required = false
             report.contains("legacy schema, migrated in memory"),
             "{report}"
         );
+    }
+
+    #[tokio::test]
+    async fn check_names_the_token_variable_but_never_the_token() {
+        let mut config: GatewayConfig = toml::from_str(PUBLIC_CONFIG).expect("parse fixture");
+        let secret = "check-report-secret-0123456789abcdefgh";
+        config.backends[1].bearer_token_env = Some("LOMWAY_BACKEND_CALC_TOKEN".to_string());
+        config.backends[1].bearer_token =
+            Some(crate::config::model::BackendToken::new(secret).expect("token"));
+        let report = check_report(
+            Path::new("public.toml"),
+            ConfigFormat::Public,
+            &config,
+            false,
+        )
+        .await
+        .expect("check report");
+        assert!(
+            report.contains("bearer token from LOMWAY_BACKEND_CALC_TOKEN"),
+            "{report}"
+        );
+        assert!(!report.contains(secret), "{report}");
     }
 
     #[test]
