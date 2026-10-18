@@ -34,7 +34,14 @@ Consequences:
 
 ## 4. Secrets
 
-The gateway runtime needs no secret. Secure Tunnel setup/runtime needs:
+The gateway runtime needs a secret only when a backend is configured with
+`bearer_token_env`: the gateway reads that `LOMWAY_BACKEND_*` variable from
+its own environment, sends it only as `Authorization: Bearer` to that
+loopback backend, and fails closed when it is missing. Token values are
+refused inside configuration files and never appear in logs, errors,
+`check`, MCP responses, or caches (see CONFIGURATION section 3b).
+
+Secure Tunnel setup/runtime needs:
 
 - `OPENAI_ADMIN_KEY` for one-time remote tunnel create/reuse;
 - `CONTROL_PLANE_API_KEY` for the managed local tunnel runtime.

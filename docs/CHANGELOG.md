@@ -8,6 +8,7 @@ All notable changes to Lomway are documented here. The format is based on [Keep 
 
 - Hybrid per-backend tool exposure: frequent backends stay native/direct while low-frequency backends can use `exposure = "deferred"`.
 - Three Lomway-owned safe meta-tools for deferred capabilities: `lomway_search_tools`, `lomway_describe_tool`, and `lomway_call_tool`.
+- Backend bearer tokens by reference: `bearer_token_env = "LOMWAY_BACKEND_..."` sends `Authorization: Bearer <token>` to a loopback backend (for example Coding Tools MCP with `--auth-token`) on the startup probe, proxied requests, reconnects, and deferred activations. `scripts/provision-backend-token.ps1` stores a generated token only in SOPS, and `scripts/start.ps1` / `scripts/deploy-gateway-isolated.ps1` supply referenced variables to the gateway process only.
 - Capability search: `lomway_search_tools` now searches direct tools, deferred tools (from a cached manifest with `manifest_seen_at`, or an `unverified` placeholder), and declared internal capabilities, ranked by upstream OSS name, English/Japanese aliases, action, and description (`capabilities/catalog.toml`, [docs/CAPABILITY_SEARCH.md](CAPABILITY_SEARCH.md)). `lomway_describe_tool` also describes direct and internal capabilities. Result `status` is `listed` (in the current `tools/list`; not a health claim), `cached`, `unverified`, or `declared`.
 
 ### Security
@@ -22,6 +23,7 @@ All notable changes to Lomway are documented here. The format is based on [Keep 
 - The `lomway_search_tools` description no longer lists configured deferred backend ids or embeds `server.instructions`, so restricted callers cannot enumerate backends from `tools/list`; the three meta-tool descriptions now state one consistent routing rule.
 - Restricted principals (PATs and limited OAuth clients without the `*` grant) now receive a generic MCP `initialize` instruction instead of the deployment's `server.instructions`, which name deferred backend ids and roles. Unrestricted owners and `*` grants keep the full instructions.
 - Internal capabilities are offered only through a `via` tool that is currently listed as a direct tool (`via` may list candidates in preference order); the built-in catalog declares Coding Tools MCP and routes BrowserSkill through `coding_tools_exec_command` or `workbridge_exec_command`, whichever the profile exposes.
+- Backend credentials can only be referenced by environment variable name. Inline `bearer_token`/`token`/`authorization`/`api_key`/`headers`-style keys in `[[backends]]` (public and legacy) are refused without echoing the value, legacy `bearer_token` is no longer dropped silently by migration, TOML syntax errors no longer echo the offending line, and an unset or malformed `bearer_token_env` variable fails the load (no unauthenticated fallback). Resolved tokens are redacted in `Debug` and never serialized.
 - Deferred manifest cache writes use a unique staging file per process and write and are serialized in-process, so concurrent observations cannot corrupt the cache or leave an older snapshot behind.
 
 ## [0.1.0] - 2026-09-13

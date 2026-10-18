@@ -57,11 +57,54 @@ url = "http://127.0.0.1:8001/mcp"   # loopback only; ${VAR} supported
 required = true                     # default true; false = degrade-on-outage
 timeout_seconds = 30                # default 30
 exposure = "direct"                 # direct (default) or deferred
+bearer_token_env = "LOMWAY_BACKEND_FS_TOKEN"  # optional; variable NAME only
 ```
 
 Defaults: `[server]` listens on `127.0.0.1:17777`; `[policy]`, `[observability]`, and `backends` may be omitted entirely (the public schema accepts zero backends, while the deployment gate keeps requiring at least one). Unknown keys fail validation at every level.
 
 Namespace prefix rules: non-empty lowercase stem + `_`, unique and non-overlapping across backends (one prefix may not contain another), never normalized; reserved prefixes (`proxy_`, `lomway_`, legacy `lmg_`) are rejected.
+
+### 3b. Backend bearer tokens (`bearer_token_env`)
+
+A backend that requires `Authorization: Bearer <token>` (for example Coding
+Tools MCP started with `--auth-token` or `CODING_TOOLS_MCP_AUTH_TOKEN`) is
+configured with the **name** of an environment variable, never with the
+token:
+
+```toml
+[[backends]]
+id = "coding-tools"
+prefix = "coding_tools_"
+url = "http://127.0.0.1:17684/mcp"
+bearer_token_env = "LOMWAY_BACKEND_CODING_TOOLS_TOKEN"
+```
+
+- The name must match `LOMWAY_BACKEND_[A-Z0-9_]+` (at most 128 characters),
+  so a configuration cannot hand an unrelated secret to a backend.
+- The value is read from the gateway's environment when the configuration is
+  loaded (`serve` and `check`). It must be 32 to 4096 visible ASCII
+  characters. It is sent on every request to that backend: the startup probe,
+  the proxied session, reconnects, and deferred activations.
+- **Fail closed:** an unset or malformed variable is a load error naming the
+  variable (never the value). The gateway does not start, rather than
+  starting the backend unauthenticated or silently dropping it. Because the
+  isolated deployment runs `check` before stopping the running gateway, a
+  missing token stops a deployment before cutover.
+- Credentials written into the file are refused before parsing:
+  `bearer_token`, `token`, `auth_token`, `access_token`, `authorization`,
+  `api_key`, `password`, `secret`, and `headers` inside a `[[backends]]`
+  entry (public or legacy) fail with a message that does not include the
+  value. TOML syntax errors report only a line number and the parser message,
+  never the offending line.
+- The resolved token is never serialized (migration output, `check`,
+  `list-backends`), never logged, and never appears in MCP `instructions`,
+  `tools/list`, capability search, describe output, or the deferred manifest
+  cache. `check` prints only the variable name.
+- `scripts/start.ps1` and `scripts/deploy-gateway-isolated.ps1` fill in
+  referenced `LOMWAY_BACKEND_*` variables that are not already set from the
+  optional SOPS integration (`integrations/sops/Import-SopsSecrets.ps1`) and
+  pass them only to the gateway process. `scripts/provision-backend-token.ps1
+  -Name <VAR>` generates a token and stores it only in the SOPS store.
 
 ### 3a. Hybrid tool exposure
 
