@@ -45,9 +45,13 @@ function Get-ProcessImagePath([int]$ProcessId) {
     $handle = [LomwayOps.ProcessImage]::OpenProcess(0x1000, $false, $ProcessId)
     if ($handle -eq [IntPtr]::Zero) { return $null }
     try {
-        $buffer = New-Object System.Text.StringBuilder 1024
-        $size = 1024
-        if ([LomwayOps.ProcessImage]::QueryFullProcessImageName($handle, 0, $buffer, [ref]$size)) { return $buffer.ToString() }
+        # Retry once with the maximum path length (a path longer than 1024
+        # characters fails with ERROR_INSUFFICIENT_BUFFER).
+        foreach ($capacity in 1024, 32768) {
+            $buffer = New-Object System.Text.StringBuilder $capacity
+            $size = $capacity
+            if ([LomwayOps.ProcessImage]::QueryFullProcessImageName($handle, 0, $buffer, [ref]$size)) { return $buffer.ToString() }
+        }
         return $null
     } finally {
         [void][LomwayOps.ProcessImage]::CloseHandle($handle)
