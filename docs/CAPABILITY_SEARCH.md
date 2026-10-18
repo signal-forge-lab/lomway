@@ -55,7 +55,13 @@ lowercasing and folding full-width ASCII. One result is returned per tool;
 `capabilities/catalog.toml` declares OSS names, domains, aliases, and
 per-action aliases for a `tool` (exact name) or a `backend` (every tool of
 that backend, plus its unverified placeholder). `[[internal]]` entries name
-the `via` tool. The file is public: names, aliases, and summaries only.
+the `via` tool, or an ordered list of candidate tools. An internal
+capability is indexed (and describable) only while one of its `via`
+candidates is a direct tool in the gateway's current `tools/list`; the first
+listed candidate is reported. A profile that exposes none of them never
+offers the capability, so search cannot route a caller to a tool that does
+not exist. Tool-keyed declarations likewise only annotate tools that are
+listed. The file is public: names, aliases, and summaries only.
 Validation covers every field (including `[[internal]]` `domain`) and
 rejects URLs, loopback/private/link-local/CGNAT IPv4 and IPv6 addresses,
 `host:port` bindings, absolute POSIX paths, `~/` paths, Windows and UNC
@@ -75,6 +81,10 @@ URL). When those settings change, the old manifest is ignored and the
 backend is reported as `unverified` until it is observed again. Only the
 hash is written to the file name and cache contents; endpoint values are
 never stored or logged.
+Writes stage into a temporary file unique to the process and write, are
+serialized within the process, and are renamed over the cache file, so
+concurrent observations cannot truncate each other or leave an older
+snapshot in place.
 Manifests are refreshed at startup and after explicit describe/call
 activations. Library callers using `Gateway::build` keep manifests in memory
 only.
