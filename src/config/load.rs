@@ -195,7 +195,9 @@ pub fn resolve_backend_tokens_with(
             continue;
         };
         validate::validate_bearer_token_env_name(&backend.id, name)?;
-        let Some(value) = lookup(name) else {
+        // An empty value counts as unset: launchers that "clear" a variable
+        // may leave it present but empty.
+        let Some(value) = lookup(name).filter(|value| !value.is_empty()) else {
             bail!(
                 "backend '{}' requires environment variable {name} (bearer_token_env), which is not set; the gateway fails closed instead of connecting without credentials",
                 backend.id
@@ -736,16 +738,19 @@ json_logs = false
         let (_dir, path) = write_temp(&token_config(
             "bearer_token_env = \"LOMWAY_BACKEND_CODING_TOOLS_TOKEN\"",
         ));
-        let error = load_gateway_config_with_lookup(&path, |_| None).expect_err("unset variable");
-        let message = format!("{error:#}");
-        assert!(
-            message.contains("LOMWAY_BACKEND_CODING_TOOLS_TOKEN"),
-            "{message}"
-        );
-        assert!(message.contains("fails closed"), "{message}");
+        for unset in [None, Some(String::new())] {
+            let error = load_gateway_config_with_lookup(&path, |_| unset.clone())
+                .expect_err("unset variable");
+            let message = format!("{error:#}");
+            assert!(
+                message.contains("LOMWAY_BACKEND_CODING_TOOLS_TOKEN"),
+                "{message}"
+            );
+            assert!(message.contains("is not set"), "{message}");
+            assert!(message.contains("fails closed"), "{message}");
+        }
 
         for bad in [
-            "",
             "too-short",
             "with space in the middle of a long token value",
         ] {
@@ -753,9 +758,7 @@ json_logs = false
                 .expect_err("malformed token");
             let message = format!("{error:#}");
             assert!(message.contains("not shown"), "{message}");
-            if !bad.is_empty() {
-                assert!(!message.contains(bad), "{message}");
-            }
+            assert!(!message.contains(bad), "{message}");
         }
     }
 

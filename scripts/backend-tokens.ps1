@@ -51,7 +51,7 @@ function Clear-LomwayBackendTokens {
     param([string[]]$Names)
     foreach ($name in @($Names)) {
         if ($name -cmatch $Script:LomwayBackendTokenPattern) {
-            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+            Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue
         }
     }
 }
