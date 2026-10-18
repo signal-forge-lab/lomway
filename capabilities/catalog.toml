@@ -1,4 +1,3 @@
-# Lomway capability declarations (schema_version = 1).
 #
 # Declares which upstream OSS project or internal capability sits behind a
 # tool or action, plus English/Japanese aliases, so `lomway_search_tools` can
@@ -12,12 +11,113 @@
 #   backend = configured backend id; applies to every tool of that backend
 #             and to its `unverified` placeholder when no manifest is cached
 # [[internal]] entries describe capabilities with no MCP tool of their own,
-# reached through an existing tool named by `via`.
+# reached through an existing tool named by `via`. `via` is one tool name or
+# an ordered list; the first one present in the gateway's current direct
+# tools/list is used, and the entry is omitted entirely when none is present,
+# so search never routes callers to a tool this deployment does not expose.
+#
+# Tool-keyed [[capability]] entries only annotate tools that are actually
+# listed: a declaration for a tool the running profile does not expose (for
+# example workbridge_* in a Coding-Tools-only profile) contributes nothing.
 
 schema_version = 1
 
 # ---------------------------------------------------------------------------
+# Coding tools (workspace files, text search, shell, git)
+# ---------------------------------------------------------------------------
+
+[[capability]]
+backend = "coding-tools"
+domain = "coding"
+provider_oss = "Coding Tools MCP"
+aliases = [
+  "coding tools", "coding-tools", "coding tools mcp", "coding-tools-mcp",
+  "workspace tools", "file tools",
+  "コーディングツール", "ファイル操作", "ワークスペース操作",
+]
+
+[[capability]]
+tool = "coding_tools_exec_command"
+domain = "coding"
+aliases = [
+  "exec command", "run command", "shell", "shell command", "terminal", "command line",
+  "powershell", "cmd", "run tests", "run a cli",
+  "コマンド実行", "シェル", "ターミナル", "コマンドライン", "テスト実行",
+]
+
+[[capability]]
+tool = "coding_tools_write_stdin"
+domain = "coding"
+aliases = ["poll command", "command output", "stdin", "標準入力", "コマンド出力"]
+
+[[capability]]
+tool = "coding_tools_read_file"
+domain = "coding"
+aliases = ["read file", "open file", "view file", "ファイル読み取り", "ファイルを読む", "ファイル表示"]
+
+[[capability]]
+tool = "coding_tools_list_files"
+domain = "coding"
+aliases = ["list files", "find files", "glob", "file list", "ファイル一覧", "ファイル検索"]
+
+[[capability]]
+tool = "coding_tools_list_dir"
+domain = "coding"
+aliases = ["list directory", "directory listing", "ディレクトリ一覧", "フォルダ一覧"]
+
+[[capability]]
+tool = "coding_tools_search_text"
+domain = "coding"
+aliases = ["search text", "grep", "text search", "regex search", "find in files", "テキスト検索", "文字列検索", "全文検索", "正規表現検索"]
+
+[[capability]]
+tool = "coding_tools_apply_patch"
+domain = "coding"
+aliases = ["apply patch", "edit file", "patch", "ファイル編集", "パッチ適用"]
+
+[[capability]]
+tool = "coding_tools_apply_changes"
+domain = "coding"
+aliases = ["apply changes", "edit lines", "write file", "create file", "ファイル編集", "ファイル作成", "行編集"]
+
+[[capability]]
+tool = "coding_tools_git_status"
+domain = "coding"
+aliases = ["git status", "working tree status", "変更状況"]
+
+[[capability]]
+tool = "coding_tools_git_diff"
+domain = "coding"
+aliases = ["git diff", "diff", "差分", "変更差分"]
+
+[[capability]]
+tool = "coding_tools_git_log"
+domain = "coding"
+aliases = ["git log", "commit history", "コミット履歴"]
+
+[[capability]]
+tool = "coding_tools_git_show"
+domain = "coding"
+aliases = ["git show", "show commit", "コミット内容"]
+
+[[capability]]
+tool = "coding_tools_git_blame"
+domain = "coding"
+aliases = ["git blame", "blame", "行ごとの変更者"]
+
+[[capability]]
+tool = "coding_tools_view_image"
+domain = "coding"
+aliases = ["view image", "show image", "画像表示", "画像を見る"]
+
+# ---------------------------------------------------------------------------
 # Code analysis
+#
+# These tools exist only in gateway profiles that expose Workbridge as a
+# direct backend (for example the example profile and the macOS desktop
+# profile). In a profile without workbridge_* they are not listed, so these
+# declarations add nothing and searching for Serena, Graft, or Codebase
+# Memory returns no route through Lomway.
 # ---------------------------------------------------------------------------
 
 [[capability]]
@@ -158,10 +258,10 @@ aliases = [
 
 [[internal]]
 name = "browserskill"
-via = "workbridge_exec_command"
+via = ["coding_tools_exec_command", "workbridge_exec_command"]
 domain = "browser-automation"
 provider_oss = "BrowserSkill"
-summary = "Default for ordinary web-page interaction on the user's existing authenticated browser. BrowserSkill is a local non-MCP CLI/daemon: run the bsk CLI (or the browser-skill skill) through workbridge_exec_command. It is not a Lomway MCP backend."
+summary = "Default for ordinary web-page interaction on the user's existing authenticated browser. BrowserSkill is a local non-MCP CLI/daemon: run the bsk CLI (or the browser-skill skill) through the shell tool named in via. It is not a Lomway MCP backend."
 aliases = [
   "browserskill", "browser skill", "browser-skill", "bsk",
   "web browsing", "navigate page", "click", "fill form", "page snapshot",
