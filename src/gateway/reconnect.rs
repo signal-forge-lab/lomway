@@ -82,6 +82,20 @@ impl BackendReconnectState {
         self.next_probe = now + self.down_backoff;
         self.down_backoff = (self.down_backoff * 2).min(MAX_DOWN_BACKOFF);
     }
+
+    /// State after a successful transport rebuild. The revision MUST carry
+    /// over: `commit_observation` only stores a state whose revision matches
+    /// the current one, so a fresh revision of 0 was silently dropped once a
+    /// transport failure had bumped it, leaving `reconnect_pending` set and
+    /// rebuilding the transport every RECOVERY_TICK (seen 2026-10-19 as a
+    /// once-per-second reconnect loop with intermittent "Unknown tool").
+    fn after_reconnect(&self, now: Instant, interval: Duration) -> Self {
+        let mut next = Self::new(true);
+        next.last_used = self.last_used;
+        next.revision = self.revision;
+        next.next_probe = now + interval;
+        next
+    }
 }
 
 /// Shared monitor snapshot. /readyz only reads this cache, never probes a backend.
@@ -106,12 +120,7 @@ impl MonitorHandle {
 
     fn commit_observation(&self, name: &str, state: BackendReconnectState) {
         let mut states = self.states.lock().expect("monitor lock poisoned");
-        if states
-            .get(name)
-            .is_some_and(|current| current.revision == state.revision)
-        {
-            states.insert(name.to_string(), state);
-        }
+        commit_if_current(&mut states, name, state);
     }
     pub fn ready(&self) -> bool {
         let states = self.states.lock().expect("monitor lock poisoned");
@@ -246,6 +255,24 @@ fn loopback_port(url: &str) -> Option<u16> {
     crate::config::validate::loopback_mcp_port(url)
 }
 
+/// Store `state` only when nothing changed the entry since it was read.
+/// Returns whether it was stored.
+fn commit_if_current(
+    states: &mut HashMap<String, BackendReconnectState>,
+    name: &str,
+    state: BackendReconnectState,
+) -> bool {
+    if states
+        .get(name)
+        .is_some_and(|current| current.revision == state.revision)
+    {
+        states.insert(name.to_string(), state);
+        true
+    } else {
+        false
+    }
+}
+
 pub(super) fn specs(config: &ProxyConfig) -> Vec<BackendReconnectSpec> {
     config
         .backends
@@ -372,11 +399,10 @@ async fn monitor(handle: MonitorHandle) {
                         "backend transport reconnected after MCP health failure"
                     };
                     tracing::info!(backend = %spec.name, "{reason}");
-                    let last_used = state.last_used;
-                    state = BackendReconnectState::new(true);
-                    state.last_used = last_used;
-                    state.next_probe =
-                        Instant::now() + Duration::from_secs(handle.settings.interval_seconds);
+                    state = state.after_reconnect(
+                        Instant::now(),
+                        Duration::from_secs(handle.settings.interval_seconds),
+                    );
                 }
                 Err(error) => {
                     tracing::warn!(backend = %spec.name, error = %error, "backend transport reconnect failed; will retry");
@@ -458,5 +484,61 @@ mod tests {
         assert!(state.stable_up_probes < RECONNECT_STABLE_PROBES);
         state.stable_up_probes += 1;
         assert_eq!(state.stable_up_probes, RECONNECT_STABLE_PROBES);
+    }
+
+    #[test]
+    fn reconnect_after_transport_failures_is_committed_and_not_repeated() {
+        let name = "coding_tools";
+        let mut states = HashMap::new();
+        states.insert(name.to_string(), BackendReconnectState::new(true));
+        // Two failed tool transports (what `transport_failure` records).
+        for _ in 0..RECONNECT_UNHEALTHY_PROBES {
+            let state = states.get_mut(name).unwrap();
+            state.revision = state.revision.wrapping_add(1);
+            state.ready = false;
+            state.unhealthy_probes += 1;
+            if state.unhealthy_probes >= RECONNECT_UNHEALTHY_PROBES {
+                state.reconnect_pending = true;
+            }
+        }
+        let observed = states.get(name).cloned().unwrap();
+        assert!(observed.reconnect_pending && observed.revision > 0);
+
+        // The old reset (fresh state, revision 0) is refused by the commit,
+        // which is what kept `reconnect_pending` set and looped every tick.
+        assert!(!commit_if_current(
+            &mut states,
+            name,
+            BackendReconnectState::new(true)
+        ));
+        assert!(states[name].reconnect_pending);
+
+        let now = Instant::now();
+        let interval = Duration::from_secs(30);
+        assert!(commit_if_current(
+            &mut states,
+            name,
+            observed.after_reconnect(now, interval)
+        ));
+        let stored = &states[name];
+        assert!(stored.ready && !stored.reconnect_pending && !stored.observed_down);
+        assert_eq!(stored.unhealthy_probes, 0);
+        assert_eq!(stored.next_probe, now + interval);
+        assert_eq!(stored.last_used, observed.last_used);
+    }
+
+    #[test]
+    fn a_failure_during_the_rebuild_still_wins() {
+        let name = "coding_tools";
+        let mut states = HashMap::new();
+        states.insert(name.to_string(), BackendReconnectState::new(true));
+        let observed = states.get(name).cloned().unwrap();
+        // A new transport failure lands while the transport is being rebuilt.
+        states.get_mut(name).unwrap().revision += 1;
+        assert!(!commit_if_current(
+            &mut states,
+            name,
+            observed.after_reconnect(Instant::now(), Duration::from_secs(30))
+        ));
     }
 }
