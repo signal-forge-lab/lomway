@@ -19,7 +19,10 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -70,6 +73,10 @@ pub(super) struct ManifestStore {
     /// Current endpoint fingerprint per backend id.
     fingerprints: Arc<BTreeMap<String, String>>,
     inner: Arc<Mutex<BTreeMap<String, BackendManifest>>>,
+    /// Serializes snapshot + write + rename so the file always ends with the
+    /// newest in-process snapshot (an older snapshot can never be renamed
+    /// over a newer one).
+    persist_lock: Arc<Mutex<()>>,
 }
 
 impl ManifestStore {
@@ -110,6 +117,7 @@ impl ManifestStore {
             path: Some(Arc::new(path)),
             fingerprints: Arc::new(fingerprints),
             inner: Arc::new(Mutex::new(backends)),
+            persist_lock: Arc::default(),
         }
     }
 
@@ -133,7 +141,7 @@ impl ManifestStore {
         let Some(endpoint_sha256) = self.fingerprints.get(backend).cloned() else {
             return;
         };
-        let snapshot = {
+        {
             let mut inner = self.inner.lock().expect("manifest lock poisoned");
             inner.insert(
                 backend.to_string(),
@@ -143,14 +151,35 @@ impl ManifestStore {
                     tools,
                 },
             );
-            inner.clone()
+        }
+        let Some(path) = &self.path else {
+            return;
         };
-        if let Some(path) = &self.path
-            && let Err(error) = persist(path, snapshot)
-        {
+        let _persisting = self.persist_lock.lock().expect("persist lock poisoned");
+        // Snapshot under the persist lock: whoever writes last writes the
+        // newest state, including observations made by concurrent callers.
+        let snapshot = self.inner.lock().expect("manifest lock poisoned").clone();
+        if let Err(error) = persist(path, snapshot) {
             tracing::warn!(%error, "could not persist deferred tool manifest cache");
         }
     }
+}
+
+/// A temporary file name unique to this process and write, next to `path`,
+/// so concurrent writers (threads or a second gateway process during an
+/// isolated deployment) never share or truncate each other's staging file.
+fn temporary_path(path: &Path) -> PathBuf {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.subsec_nanos());
+    let mut name = path
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .unwrap_or_default();
+    name.push(format!(".{}.{sequence}.{nanos:09}.tmp", std::process::id()));
+    path.with_file_name(name)
 }
 
 fn persist(path: &Path, backends: BTreeMap<String, BackendManifest>) -> std::io::Result<()> {
@@ -162,9 +191,12 @@ fn persist(path: &Path, backends: BTreeMap<String, BackendManifest>) -> std::io:
         backends,
     })
     .map_err(std::io::Error::other)?;
-    let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, body)?;
-    std::fs::rename(&temporary, path)
+    let temporary = temporary_path(path);
+    let result = std::fs::write(&temporary, body).and_then(|()| std::fs::rename(&temporary, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// Default per-user state directory: `LOMWAY_STATE_DIR`, otherwise the
@@ -296,6 +328,76 @@ mod tests {
                 .get("browser")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn temporary_paths_are_unique_and_beside_the_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("deferred-manifest-x.json");
+        let first = temporary_path(&path);
+        let second = temporary_path(&path);
+        assert_ne!(first, second);
+        for temporary in [&first, &second] {
+            assert_eq!(temporary.parent(), path.parent());
+            let name = temporary
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            assert!(name.starts_with("deferred-manifest-x.json."), "{name}");
+            assert!(name.ends_with(".tmp"), "{name}");
+        }
+    }
+
+    #[test]
+    fn concurrent_observations_persist_without_losing_writes() {
+        const WRITERS: usize = 16;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("deferred-manifest-concurrent.json");
+        let url = "http://127.0.0.1:18002/mcp";
+        let fingerprints: BTreeMap<String, String> = (0..WRITERS)
+            .map(|index| {
+                let backend = format!("backend{index}");
+                let fingerprint = endpoint_fingerprint("http", &format!("{url}/{index}"));
+                (backend, fingerprint)
+            })
+            .collect();
+        let store = ManifestStore::open(path.clone(), fingerprints.clone());
+        let barrier = Arc::new(std::sync::Barrier::new(WRITERS));
+        let handles: Vec<_> = (0..WRITERS)
+            .map(|index| {
+                let store = store.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for round in 0..8 {
+                        store.observe(
+                            &format!("backend{index}"),
+                            vec![tool(&format!("backend{index}_tool{round}"))],
+                        );
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("writer thread");
+        }
+        // Every backend's final observation reached the file, and no staging
+        // file was left behind.
+        let reopened = ManifestStore::open(path.clone(), fingerprints);
+        for index in 0..WRITERS {
+            let manifest = reopened
+                .get(&format!("backend{index}"))
+                .unwrap_or_else(|| panic!("backend{index} lost"));
+            assert_eq!(manifest.tools[0].name, format!("backend{index}_tool7"));
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
     #[test]
