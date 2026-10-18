@@ -20,6 +20,9 @@ All notable changes to Lomway are documented here. The format is based on [Keep 
 - Capability declarations are validated strictly (every field, including `[[internal]]` `domain`): private/loopback/link-local/CGNAT addresses, `host:port`, absolute and home paths, UNC paths, and email addresses are rejected.
 - Cached deferred manifests are bound to a SHA-256 fingerprint of each backend's endpoint settings; a changed endpoint invalidates its cache (`unverified`) and only the hash is persisted.
 - The `lomway_search_tools` description no longer lists configured deferred backend ids or embeds `server.instructions`, so restricted callers cannot enumerate backends from `tools/list`; the three meta-tool descriptions now state one consistent routing rule.
+- Restricted principals (PATs and limited OAuth clients without the `*` grant) now receive a generic MCP `initialize` instruction instead of the deployment's `server.instructions`, which name deferred backend ids and roles. Unrestricted owners and `*` grants keep the full instructions.
+- Internal capabilities are offered only through a `via` tool that is currently listed as a direct tool (`via` may list candidates in preference order); the built-in catalog declares Coding Tools MCP and routes BrowserSkill through `coding_tools_exec_command` or `workbridge_exec_command`, whichever the profile exposes.
+- Deferred manifest cache writes use a unique staging file per process and write and are serialized in-process, so concurrent observations cannot corrupt the cache or leave an older snapshot behind.
 
 ## [0.1.0] - 2026-09-13
 

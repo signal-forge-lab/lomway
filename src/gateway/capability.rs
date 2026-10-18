@@ -7,7 +7,9 @@
 //!   reconnecting a backend), or a per-backend `unverified` placeholder when
 //!   no manifest has ever been observed;
 //! * **internal** capabilities that have no MCP tool of their own and are
-//!   reached through an existing tool (for example a CLI behind Workbridge).
+//!   reached through an existing tool (for example a CLI run through a
+//!   shell tool). An internal capability is indexed only while one of its
+//!   `via` tools is in the current direct catalog.
 //!
 //! Declarations live in `capabilities/catalog.toml` and carry upstream OSS
 //! names plus English/Japanese aliases per tool or per action. They contain
@@ -84,7 +86,9 @@ pub(super) struct ActionDeclaration {
 #[serde(deny_unknown_fields)]
 pub(super) struct InternalDeclaration {
     pub(super) name: String,
-    pub(super) via: String,
+    /// Candidate tools in preference order; `via = "x"` or `via = ["x", "y"]`.
+    #[serde(deserialize_with = "one_or_many")]
+    pub(super) via: Vec<String>,
     #[serde(default)]
     pub(super) domain: Option<String>,
     #[serde(default)]
@@ -93,6 +97,32 @@ pub(super) struct InternalDeclaration {
     pub(super) summary: Option<String>,
     #[serde(default)]
     pub(super) aliases: Vec<String>,
+}
+
+impl InternalDeclaration {
+    /// The first `via` candidate for which `listed` holds, if any.
+    pub(super) fn resolve_via(&self, listed: impl Fn(&str) -> bool) -> Option<&str> {
+        self.via
+            .iter()
+            .map(String::as_str)
+            .find(|candidate| listed(candidate))
+    }
+}
+
+fn one_or_many<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(one) => vec![one],
+        OneOrMany::Many(many) => many,
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -138,12 +168,14 @@ impl CapabilityCatalog {
         }
         for internal in &file.internal {
             ensure!(
-                !internal.name.trim().is_empty() && !internal.via.trim().is_empty(),
+                !internal.name.trim().is_empty()
+                    && !internal.via.is_empty()
+                    && internal.via.iter().all(|via| !via.trim().is_empty()),
                 "each [[internal]] needs `name` and `via`"
             );
             let mut texts: Vec<&str> = internal.aliases.iter().map(String::as_str).collect();
             texts.push(&internal.name);
-            texts.push(&internal.via);
+            texts.extend(internal.via.iter().map(String::as_str));
             texts.extend(internal.summary.as_deref());
             texts.extend(internal.provider_oss.as_deref());
             texts.extend(internal.domain.as_deref());
@@ -455,6 +487,16 @@ pub(super) fn build_index(
     catalog: &CapabilityCatalog,
     sources: Vec<ToolSource>,
 ) -> Vec<IndexEntry> {
+    // Internal capabilities are reachable only through a tool the caller can
+    // actually call directly right now; deferred and placeholder entries do
+    // not count as a route.
+    let listed: BTreeSet<String> = sources
+        .iter()
+        .filter(|source| {
+            source.invocation == Invocation::Direct && source.placeholder_prefix.is_none()
+        })
+        .map(|source| source.name.clone())
+        .collect();
     let mut entries: Vec<IndexEntry> = sources
         .into_iter()
         .map(|source| {
@@ -467,6 +509,9 @@ pub(super) fn build_index(
         })
         .collect();
     for internal in catalog.internal() {
+        let Some(via) = internal.resolve_via(|candidate| listed.contains(candidate)) else {
+            continue;
+        };
         entries.push(IndexEntry {
             source: ToolSource {
                 name: internal.name.clone(),
@@ -476,7 +521,7 @@ pub(super) fn build_index(
                 manifest_seen_at: None,
                 description: internal.summary.clone(),
                 placeholder_prefix: None,
-                via: Some(internal.via.clone()),
+                via: Some(via.to_string()),
             },
             metadata: Metadata {
                 provider_oss: internal.provider_oss.clone(),
@@ -836,14 +881,39 @@ mod tests {
     /// Direct tool names and descriptions as served by a real deployment
     /// (input schemas removed), plus unverified deferred placeholders.
     fn fixture_entries() -> Vec<IndexEntry> {
-        let tools: Vec<FixtureTool> = serde_json::from_str(include_str!(
+        fixture_entries_from(include_str!(
             "../../test-fixtures/capability-search/direct-tools.json"
         ))
-        .expect("fixture parses");
+    }
+
+    /// The Coding-Tools-only deployment (2026-10-18): coding_tools_*,
+    /// hindsight_*, praxiom_* direct, no workbridge_* at all.
+    fn coding_tools_fixture_entries() -> Vec<IndexEntry> {
+        fixture_entries_from(include_str!(
+            "../../test-fixtures/capability-search/direct-tools-coding-tools.json"
+        ))
+    }
+
+    fn fixture_backend(name: &str) -> String {
+        for (prefix, backend) in [
+            ("coding_tools_", "coding-tools"),
+            ("hindsight_", "hindsight"),
+            ("praxiom_", "praxiom"),
+            ("workbridge_", "workbridge"),
+        ] {
+            if name.starts_with(prefix) {
+                return backend.to_string();
+            }
+        }
+        name.split('_').next().unwrap_or_default().to_string()
+    }
+
+    fn fixture_entries_from(json: &str) -> Vec<IndexEntry> {
+        let tools: Vec<FixtureTool> = serde_json::from_str(json).expect("fixture parses");
         let mut sources: Vec<ToolSource> = tools
             .into_iter()
             .map(|tool| ToolSource {
-                backend: tool.name.split('_').next().unwrap_or_default().to_string(),
+                backend: fixture_backend(&tool.name),
                 name: tool.name,
                 invocation: Invocation::Direct,
                 status: Status::Listed,
@@ -874,7 +944,11 @@ mod tests {
     }
 
     fn top(query: &str, access: &CallerAccess) -> Vec<SearchResult> {
-        let results = search(&fixture_entries(), query, None, access, 8);
+        top_in(&fixture_entries(), query, access)
+    }
+
+    fn top_in(entries: &[IndexEntry], query: &str, access: &CallerAccess) -> Vec<SearchResult> {
+        let results = search(entries, query, None, access, 8);
         let summary: Vec<String> = results
             .iter()
             .take(3)
@@ -1148,6 +1222,147 @@ mod tests {
         );
         assert_eq!(top("長期記憶", &access)[0].backend, "hindsight");
         assert_eq!(top("recall memory", &access)[0].name, "hindsight_recall");
+    }
+
+    #[test]
+    fn coding_tools_only_profile_acceptance() {
+        let entries = coding_tools_fixture_entries();
+        let listed: BTreeSet<&str> = entries
+            .iter()
+            .filter(|entry| entry.source.invocation == Invocation::Direct)
+            .map(|entry| entry.source.name.as_str())
+            .collect();
+        assert!(listed.contains("coding_tools_exec_command"));
+        assert!(!listed.iter().any(|name| name.starts_with("workbridge_")));
+        let access = CallerAccess::default();
+
+        // Every internal route points at a tool this profile lists.
+        for entry in &entries {
+            if let Some(via) = &entry.source.via {
+                assert!(
+                    listed.contains(via.as_str()),
+                    "{} via {via}",
+                    entry.source.name
+                );
+            }
+        }
+
+        let browserskill = top_in(&entries, "BrowserSkill", &access);
+        assert_eq!(browserskill[0].name, "browserskill");
+        assert_eq!(browserskill[0].invocation, Invocation::Internal);
+        assert_eq!(
+            browserskill[0].via.as_deref(),
+            Some("coding_tools_exec_command")
+        );
+        assert!(
+            browserskill[0]
+                .how_to_invoke
+                .contains("coding_tools_exec_command")
+        );
+        assert!(
+            !browserskill[0]
+                .description
+                .as_deref()
+                .unwrap_or_default()
+                .contains("workbridge")
+        );
+
+        let coding = top_in(&entries, "Coding Tools", &access);
+        assert!(!coding.is_empty());
+        assert!(coding.iter().all(|result| {
+            result.backend == "coding-tools"
+                && result.provider_oss.as_deref() == Some("Coding Tools MCP")
+                && result.invocation == Invocation::Direct
+        }));
+        for (query, expected) in [
+            ("コマンド実行", "coding_tools_exec_command"),
+            ("run command", "coding_tools_exec_command"),
+            ("ファイルを読む", "coding_tools_read_file"),
+            ("grep", "coding_tools_search_text"),
+            ("git diff", "coding_tools_git_diff"),
+        ] {
+            assert_eq!(
+                top_in(&entries, query, &access)[0].name,
+                expected,
+                "{query}"
+            );
+        }
+
+        // Serena, Graft, and Codebase Memory have no route in this profile:
+        // nothing may be offered for them, neither directly nor via a tool.
+        for query in ["Serena", "Graft", "Codebase Memory", "コード解析", "LSP"] {
+            let found = top_in(&entries, query, &access);
+            assert!(
+                found.iter().all(|result| {
+                    !matches!(
+                        result.provider_oss.as_deref(),
+                        Some("Serena" | "Graft" | "Codebase Memory")
+                    ) && !result.name.starts_with("workbridge_")
+                        && result.via.as_deref().is_none_or(|via| listed.contains(via))
+                }),
+                "{query}: {:?}",
+                found.iter().map(|result| &result.name).collect::<Vec<_>>()
+            );
+        }
+
+        // A restricted caller without the shell tool sees neither the shell
+        // nor the BrowserSkill route through it.
+        let limited = CallerAccess::new(Some(vec!["hindsight_recall".to_string()]));
+        assert!(top_in(&entries, "BrowserSkill", &limited).is_empty());
+        assert!(top_in(&entries, "Coding Tools", &limited).is_empty());
+    }
+
+    #[test]
+    fn internal_capability_needs_a_listed_via_tool() {
+        let catalog = CapabilityCatalog::parse(
+            "schema_version = 1\n[[internal]]\nname = \"cli-x\"\nvia = [\"tool_a\", \"tool_b\"]\naliases = [\"cli x\"]\n",
+        )
+        .expect("list via parses");
+        let direct = |name: &str| ToolSource {
+            name: name.to_string(),
+            backend: "b".to_string(),
+            invocation: Invocation::Direct,
+            status: Status::Listed,
+            manifest_seen_at: None,
+            description: None,
+            placeholder_prefix: None,
+            via: None,
+        };
+        let via_of = |sources: Vec<ToolSource>| {
+            build_index(&catalog, sources)
+                .into_iter()
+                .find(|entry| entry.source.name == "cli-x")
+                .and_then(|entry| entry.source.via)
+        };
+        assert_eq!(via_of(vec![]), None);
+        assert_eq!(via_of(vec![direct("tool_b")]).as_deref(), Some("tool_b"));
+        assert_eq!(
+            via_of(vec![direct("tool_b"), direct("tool_a")]).as_deref(),
+            Some("tool_a"),
+            "first listed candidate in declaration order wins"
+        );
+        // A deferred tool or placeholder is not a route.
+        let mut deferred = direct("tool_a");
+        deferred.invocation = Invocation::Deferred;
+        deferred.status = Status::Cached;
+        assert_eq!(via_of(vec![deferred]), None);
+        // A single string still parses; an empty list does not.
+        assert!(
+            CapabilityCatalog::parse(
+                "schema_version = 1\n[[internal]]\nname = \"x\"\nvia = \"tool_a\"\n"
+            )
+            .is_ok()
+        );
+        assert!(
+            CapabilityCatalog::parse("schema_version = 1\n[[internal]]\nname = \"x\"\nvia = []\n")
+                .is_err()
+        );
+        assert!(
+            CapabilityCatalog::parse(
+                "schema_version = 1\n[[internal]]\nname = \"x\"\nvia = [\"ok\", \"/etc/secrets\"]\n"
+            )
+            .is_err()
+        );
     }
 
     #[test]

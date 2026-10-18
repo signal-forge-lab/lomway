@@ -340,7 +340,21 @@ async fn describe(
     let name = input.name;
 
     if let Some(internal) = CapabilityCatalog::builtin().internal_named(&name) {
-        if !access.tool(&internal.via) {
+        // Same rule as the search index: only a via tool listed directly in
+        // this gateway's catalog right now is a route. Unknown, unlisted, and
+        // unauthorized all answer identically.
+        let tools = current_tools(proxy).await?;
+        let listed = |candidate: &str| {
+            !candidate.starts_with(META_TOOL_PREFIX)
+                && catalog
+                    .backend_for_name(candidate)
+                    .is_none_or(|backend| !backend.deferred)
+                && tools.iter().any(|tool| tool.name == candidate)
+        };
+        let Some(via) = internal.resolve_via(listed) else {
+            return Err(not_registered(&name));
+        };
+        if !access.tool(via) {
             return Err(not_registered(&name));
         }
         let body = serde_json::json!({
@@ -348,14 +362,13 @@ async fn describe(
             "backend": "internal",
             "invocation": Invocation::Internal,
             "status": Status::Declared,
-            "via": internal.via,
+            "via": via,
             "provider_oss": internal.provider_oss,
             "domain": internal.domain,
             "aliases": internal.aliases,
             "description": internal.summary,
             "how_to_invoke": format!(
-                "Internal capability without its own MCP tool: reach it through `{}`.",
-                internal.via
+                "Internal capability without its own MCP tool: reach it through `{via}`."
             ),
         });
         return Ok(CallToolResult::text(serde_json::to_string_pretty(&body)?));
@@ -697,6 +710,7 @@ exposure = "deferred"
                             "Run one read-only Serena semantic query against the exact root of an open workspace.",
                         ),
                         ("read", "Read a file in a workspace."),
+                        ("exec_command", "Run a command in a workspace."),
                     ],
                 )),
             )
@@ -1025,6 +1039,243 @@ exposure = "deferred"
         assert_eq!(internal["invocation"], "internal");
         assert_eq!(internal["via"], "workbridge_exec_command");
         assert_eq!(monitor.activation_count(), 0);
+    }
+
+    /// The deployed profile shape: Coding Tools and Hindsight as direct
+    /// backends, browser deferred, and no Workbridge at all.
+    async fn coding_tools_only_gateway() -> (McpProxy, MonitorHandle) {
+        let config: GatewayConfig = toml::from_str(
+            r#"
+schema_version = 1
+
+[[backends]]
+id = "coding-tools"
+prefix = "coding_tools_"
+url = "http://127.0.0.1:18011/mcp"
+
+[[backends]]
+id = "hindsight"
+prefix = "hindsight_"
+url = "http://127.0.0.1:18012/mcp"
+
+[[backends]]
+id = "browser"
+prefix = "browser_"
+url = "http://127.0.0.1:18013/mcp"
+exposure = "deferred"
+"#,
+        )
+        .expect("coding-tools config");
+        let proxy = McpProxy::builder("lomway-test", "1.0.0")
+            .separator("_")
+            .backend(
+                "coding_tools",
+                ChannelTransport::new(backend_router(
+                    "coding_tools",
+                    &[
+                        (
+                            "exec_command",
+                            "Run a bounded command under runtime policy.",
+                        ),
+                        (
+                            "read_file",
+                            "Read a UTF-8 text file slice inside the configured workspace.",
+                        ),
+                        (
+                            "search_text",
+                            "Search UTF-8 workspace files for text or regex matches.",
+                        ),
+                    ],
+                )),
+            )
+            .await
+            .backend(
+                "hindsight",
+                ChannelTransport::new(backend_router(
+                    "hindsight",
+                    &[("recall", "Search memories.")],
+                )),
+            )
+            .await
+            .backend(
+                "browser",
+                ChannelTransport::new(backend_router(
+                    "browser",
+                    &[("navigate", "Navigate a browser page")],
+                )),
+            )
+            .await
+            .build_strict()
+            .await
+            .expect("test proxy");
+        let monitor = MonitorHandle::snapshot_for_proxy(proxy.clone());
+        register(
+            &proxy,
+            DeferredCatalog::from_config(&config),
+            monitor.clone(),
+        )
+        .await
+        .expect("register meta-tools");
+        (proxy, monitor)
+    }
+
+    #[tokio::test]
+    async fn coding_tools_only_profile_routes_internal_capabilities_through_listed_tools() {
+        let (proxy, monitor) = coding_tools_only_gateway().await;
+
+        let browserskill = results(
+            &call(
+                &proxy,
+                "lomway_search_tools",
+                json!({"query": "BrowserSkill"}),
+            )
+            .await,
+        );
+        assert_eq!(browserskill[0]["name"], "browserskill");
+        assert_eq!(browserskill[0]["invocation"], "internal");
+        assert_eq!(browserskill[0]["via"], "coding_tools_exec_command");
+        let guidance = browserskill[0]["how_to_invoke"].as_str().unwrap();
+        assert!(guidance.contains("coding_tools_exec_command"), "{guidance}");
+        assert!(!guidance.contains("workbridge"), "{guidance}");
+
+        let described = call(
+            &proxy,
+            "lomway_describe_tool",
+            json!({"name": "browserskill"}),
+        )
+        .await;
+        assert!(!described.is_error, "{}", described.all_text());
+        let described: Value = serde_json::from_str(&described.all_text()).expect("json");
+        assert_eq!(described["via"], "coding_tools_exec_command");
+        assert!(!described.to_string().contains("workbridge_exec_command"));
+
+        let coding = results(
+            &call(
+                &proxy,
+                "lomway_search_tools",
+                json!({"query": "Coding Tools"}),
+            )
+            .await,
+        );
+        assert!(!coding.is_empty());
+        for result in &coding {
+            assert_eq!(result["backend"], "coding-tools", "{result}");
+            assert_eq!(result["invocation"], "direct");
+            assert_eq!(result["provider_oss"], "Coding Tools MCP");
+        }
+        let shell = results(
+            &call(
+                &proxy,
+                "lomway_search_tools",
+                json!({"query": "コマンド実行"}),
+            )
+            .await,
+        );
+        assert_eq!(shell[0]["name"], "coding_tools_exec_command");
+
+        // Nothing in this profile reaches Serena, Graft, or Codebase Memory,
+        // so none of them may be offered, directly or via another tool.
+        for query in ["Serena", "Graft", "Codebase Memory", "コード解析"] {
+            let found =
+                results(&call(&proxy, "lomway_search_tools", json!({"query": query})).await);
+            assert!(
+                found.iter().all(|result| {
+                    !result.to_string().contains("workbridge")
+                        && result["provider_oss"] != "Serena"
+                        && result["provider_oss"] != "Graft"
+                        && result["provider_oss"] != "Codebase Memory"
+                }),
+                "{query}: {found:?}"
+            );
+        }
+        for name in ["workbridge_run_semantic_action", "workbridge_exec_command"] {
+            let described = call(&proxy, "lomway_describe_tool", json!({"name": name})).await;
+            assert!(described.is_error, "{name}: {}", described.all_text());
+        }
+
+        // A restricted caller without the shell tool does not see the route.
+        let limited = json!([
+            "lomway_search_tools",
+            "lomway_describe_tool",
+            "hindsight_recall"
+        ]);
+        let hidden = results(
+            &call(
+                &proxy,
+                "lomway_search_tools",
+                json!({"query": "BrowserSkill", "_lomway_allowed_tools": limited}),
+            )
+            .await,
+        );
+        assert!(hidden.iter().all(|result| result["name"] != "browserskill"));
+        let hidden = call(
+            &proxy,
+            "lomway_describe_tool",
+            json!({"name": "browserskill", "_lomway_allowed_tools": limited}),
+        )
+        .await;
+        assert!(hidden.is_error);
+        assert_eq!(monitor.activation_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn internal_capability_without_a_listed_via_tool_is_not_offered() {
+        // Workbridge without exec_command and no Coding Tools: no route.
+        let config = config(false);
+        let proxy = McpProxy::builder("lomway-test", "1.0.0")
+            .separator("_")
+            .backend(
+                "workbridge",
+                ChannelTransport::new(backend_router(
+                    "workbridge",
+                    &[("read", "Read a file in a workspace.")],
+                )),
+            )
+            .await
+            .backend(
+                "browser",
+                ChannelTransport::new(backend_router(
+                    "browser",
+                    &[("navigate", "Navigate a browser page")],
+                )),
+            )
+            .await
+            .build_strict()
+            .await
+            .expect("test proxy");
+        let monitor = MonitorHandle::snapshot_for_proxy(proxy.clone());
+        register(&proxy, DeferredCatalog::from_config(&config), monitor)
+            .await
+            .expect("register meta-tools");
+        let found = results(
+            &call(
+                &proxy,
+                "lomway_search_tools",
+                json!({"query": "BrowserSkill"}),
+            )
+            .await,
+        );
+        assert!(
+            found.iter().all(|result| result["name"] != "browserskill"),
+            "{found:?}"
+        );
+        let unknown = call(
+            &proxy,
+            "lomway_describe_tool",
+            json!({"name": "no_such_capability"}),
+        )
+        .await;
+        let unrouted = call(
+            &proxy,
+            "lomway_describe_tool",
+            json!({"name": "browserskill"}),
+        )
+        .await;
+        assert!(unknown.is_error && unrouted.is_error);
+        assert_eq!(
+            unknown.all_text().replace("no_such_capability", "<name>"),
+            unrouted.all_text().replace("browserskill", "<name>"),
+        );
     }
 
     #[tokio::test]
