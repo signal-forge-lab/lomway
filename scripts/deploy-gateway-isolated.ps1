@@ -131,6 +131,10 @@ try {
     if ((Get-FileHash -LiteralPath $versioned -Algorithm SHA256).Hash.ToLowerInvariant() -ne $digest) {
         throw 'Versioned executable digest mismatch'
     }
+    # Resolve backend tokens (bearer_token_env) once for this deployment so
+    # the preflight check and the gateway started below see the same values.
+    . (Join-Path $PSScriptRoot 'backend-tokens.ps1')
+    $importedTokens = Import-LomwayBackendTokens -ConfigPath $config
     & $versioned check --config $config | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Versioned gateway config check failed' }
 
