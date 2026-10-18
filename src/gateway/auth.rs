@@ -16,6 +16,13 @@ use sha2::{Digest, Sha256};
 use crate::config::model::NorthboundOAuthConfig;
 use crate::gateway::deferred::{ACCESS_SCOPED_META_TOOLS, CALLER_ALLOWLIST_ARGUMENT};
 
+/// MCP `initialize` instructions served to a restricted caller (a PAT or a
+/// limited OAuth client without the `*` grant). The deployment's own
+/// instructions name configured backends and their roles, which such a
+/// caller must not learn from `initialize` any more than from tools/list or
+/// search, so they are replaced by this generic text.
+pub(super) const RESTRICTED_INSTRUCTIONS: &str = "Lomway gateway. This client can use only the tools it was granted, and tools/list shows exactly those. When lomway_search_tools is available, search it before concluding that a capability is missing.";
+
 #[derive(Clone)]
 struct OAuthState {
     config: NorthboundOAuthConfig,
@@ -249,6 +256,8 @@ async fn restricted_pat_request(
         .await;
     let response = if should_filter {
         filter_pat_tools_list(response, allowed).await
+    } else if method == "initialize" && !allowed.iter().any(|tool| tool == "*") {
+        redact_initialize_instructions(response).await
     } else {
         response
     };
@@ -348,6 +357,81 @@ fn restrict_tool_catalog(message: &mut Value, allowed: &[String]) -> bool {
             .is_some_and(|name| pat_tool_allowed(allowed, name))
     });
     true
+}
+
+/// Replace `result.instructions` with [`RESTRICTED_INSTRUCTIONS`]. Returns
+/// whether the message changed; messages without instructions (errors,
+/// notifications) are left as they are.
+fn redact_instructions(message: &mut Value) -> bool {
+    match message.pointer_mut("/result/instructions") {
+        Some(instructions) if instructions != RESTRICTED_INSTRUCTIONS => {
+            *instructions = Value::String(RESTRICTED_INSTRUCTIONS.to_string());
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Redact deployment instructions from an `initialize` response, JSON or
+/// SSE. A body that cannot be parsed is refused rather than forwarded, so
+/// unredacted instructions never pass through on an unexpected encoding.
+async fn redact_initialize_instructions(response: Response) -> Response {
+    if !response.status().is_success() {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let content_type = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let bytes = match tokio::time::timeout(Duration::from_secs(10), to_bytes(body, 4_194_304)).await
+    {
+        Ok(Ok(bytes)) => bytes,
+        _ => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+    if bytes.is_empty() {
+        return Response::from_parts(parts, Body::empty());
+    }
+    let encoded = if content_type.starts_with("application/json") {
+        let Ok(mut json) = serde_json::from_slice::<Value>(&bytes) else {
+            return StatusCode::BAD_GATEWAY.into_response();
+        };
+        if !redact_instructions(&mut json) {
+            return Response::from_parts(parts, Body::from(bytes));
+        }
+        match serde_json::to_vec(&json) {
+            Ok(encoded) => encoded,
+            Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+        }
+    } else if content_type.starts_with("text/event-stream") {
+        let Ok(sse) = std::str::from_utf8(&bytes) else {
+            return StatusCode::BAD_GATEWAY.into_response();
+        };
+        let mut output = String::with_capacity(sse.len());
+        for line in sse.split_inclusive('\n') {
+            if let Some(data) = line.trim_end_matches(['\r', '\n']).strip_prefix("data:") {
+                let Ok(mut message) = serde_json::from_str::<Value>(data.trim_start()) else {
+                    return StatusCode::BAD_GATEWAY.into_response();
+                };
+                redact_instructions(&mut message);
+                output.push_str("data: ");
+                match serde_json::to_string(&message) {
+                    Ok(text) => output.push_str(&text),
+                    Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+                }
+                output.push('\n');
+            } else {
+                output.push_str(line);
+            }
+        }
+        output.into_bytes()
+    } else {
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(encoded))
 }
 
 async fn filter_pat_tools_list(response: Response, allowed: &[String]) -> Response {
@@ -965,6 +1049,112 @@ mod tests {
         assert_eq!(
             unrestricted.pointer("/params/arguments/query"),
             Some(&json!("Serena"))
+        );
+    }
+
+    #[tokio::test]
+    async fn restricted_initialize_hides_deployment_instructions() {
+        let resource = "https://lomway.example/mcp".to_string();
+        let introspection = spawn_introspection(resource.clone()).await;
+        let config = NorthboundOAuthConfig {
+            resource_url: resource,
+            introspection_url: format!("http://{introspection}/oauth/introspect"),
+            required_scope: "devspace".to_string(),
+        };
+        let deployment = "Deferred backends in this profile: cua-windows = desktop GUI; jev-ultrafast = Jev flows.";
+        let initialize = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "lomway", "version": "test"},
+                "instructions": deployment
+            }
+        });
+        let upstream = Router::new().fallback(move || {
+            let initialize = initialize.clone();
+            async move { Json(initialize) }
+        });
+        let (upstream, _) = protect_mcp_router(upstream, config);
+        let app = Router::new().nest("/mcp", upstream);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}/mcp");
+        let request = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2025-06-18","capabilities":{},
+            "clientInfo":{"name":"test","version":"0"}
+        }});
+        for (token, expected) in [
+            ("pat", RESTRICTED_INSTRUCTIONS),
+            ("pat-search", RESTRICTED_INSTRUCTIONS),
+            ("oauth-limited", RESTRICTED_INSTRUCTIONS),
+            ("pat-all", deployment),
+            ("valid", deployment),
+        ] {
+            let response = client
+                .post(&base)
+                .bearer_auth(token)
+                .json(&request)
+                .send()
+                .await
+                .expect("initialize");
+            assert_eq!(response.status(), reqwest::StatusCode::OK, "{token}");
+            let body: Value = response.json().await.expect("json");
+            assert_eq!(body["result"]["instructions"], expected, "{token}");
+            assert_eq!(body["result"]["serverInfo"]["name"], "lomway", "{token}");
+            if expected == RESTRICTED_INSTRUCTIONS {
+                let text = body.to_string();
+                assert!(!text.contains("cua-windows") && !text.contains("jev-ultrafast"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_redaction_handles_sse_and_refuses_unknown_bodies() {
+        let sse = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"instructions\":\"cua-windows = desktop\",\"serverInfo\":{\"name\":\"lomway\"}}}\n\n";
+        let response = Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(Body::from(sse))
+            .expect("response");
+        let redacted = redact_initialize_instructions(response).await;
+        assert_eq!(redacted.status(), StatusCode::OK);
+        let text = String::from_utf8(
+            to_bytes(redacted.into_body(), 4096)
+                .await
+                .expect("body")
+                .to_vec(),
+        )
+        .expect("UTF-8");
+        assert!(!text.contains("cua-windows"), "{text}");
+        assert!(text.contains(RESTRICTED_INSTRUCTIONS));
+        assert!(text.contains("event: message"));
+
+        let error = json!({"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"bad"}});
+        let response = Response::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(error.to_string()))
+            .expect("response");
+        let passed = redact_initialize_instructions(response).await;
+        assert_eq!(passed.status(), StatusCode::OK);
+        let passed: Value =
+            serde_json::from_slice(&to_bytes(passed.into_body(), 4096).await.expect("body"))
+                .expect("json");
+        assert_eq!(passed, error);
+
+        let unknown = Response::builder()
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(Body::from("instructions: cua-windows"))
+            .expect("response");
+        assert_eq!(
+            redact_initialize_instructions(unknown).await.status(),
+            StatusCode::BAD_GATEWAY
         );
     }
 
