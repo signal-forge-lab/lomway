@@ -30,16 +30,40 @@ function Get-GatewayPid {
     return [int]$raw
 }
 
+# Image path with PROCESS_QUERY_LIMITED_INFORMATION. Process.Path needs
+# PROCESS_QUERY_INFORMATION, which a non-elevated caller does not get for a
+# gateway that was started elevated; status/stop then reported "not running"
+# (Swibo DEGRADED) while the gateway was serving (2026-10-19).
+function Get-ProcessImagePath([int]$ProcessId) {
+    if (-not ('LomwayOps.ProcessImage' -as [type])) {
+        Add-Type -Namespace LomwayOps -Name ProcessImage -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+[DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern bool QueryFullProcessImageName(IntPtr h, int flags, System.Text.StringBuilder name, ref int size);
+[DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+'@
+    }
+    $handle = [LomwayOps.ProcessImage]::OpenProcess(0x1000, $false, $ProcessId)
+    if ($handle -eq [IntPtr]::Zero) { return $null }
+    try {
+        $buffer = New-Object System.Text.StringBuilder 1024
+        $size = 1024
+        if ([LomwayOps.ProcessImage]::QueryFullProcessImageName($handle, 0, $buffer, [ref]$size)) { return $buffer.ToString() }
+        return $null
+    } finally {
+        [void][LomwayOps.ProcessImage]::CloseHandle($handle)
+    }
+}
+
 function Get-GatewayProcess {
     $pidValue = Get-GatewayPid
     if (-not $pidValue) { return $null }
     $process = Get-Process -Id $pidValue -ErrorAction SilentlyContinue
     if (-not $process) { return $null }
+    $actualPath = $null
     try {
         $actualPath = $process.Path
-    } catch {
-        return $null
-    }
+    } catch {}
+    if (-not $actualPath) { $actualPath = Get-ProcessImagePath $process.Id }
     if (-not $actualPath) { return $null }
     if ([IO.Path]::GetFullPath($actualPath) -ne [IO.Path]::GetFullPath($Script:Exe)) { return $null }
     return $process
