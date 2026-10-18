@@ -21,6 +21,12 @@
 //! url = "http://127.0.0.1:8001/mcp"
 //! required = true
 //! ```
+//!
+//! A backend that requires a bearer token names the environment variable
+//! that holds it (`bearer_token_env = "LOMWAY_BACKEND_..."`). The token value
+//! itself is never part of the configuration file.
+
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -175,6 +181,58 @@ pub struct BackendEntry {
     /// Client exposure mode for this backend.
     #[serde(default)]
     pub exposure: BackendExposure,
+    /// Name of the environment variable that holds the bearer token sent to
+    /// this backend as `Authorization: Bearer <token>`. Only the variable
+    /// name is configured; the value is read when the configuration is
+    /// loaded and is never serialized, logged, or written back. The name
+    /// must start with `LOMWAY_BACKEND_`. An unset or malformed variable
+    /// fails the load instead of connecting without credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bearer_token_env: Option<String>,
+    /// The resolved credential. Filled only by the configuration loader from
+    /// `bearer_token_env`; it can never be set from a file.
+    #[serde(skip)]
+    pub bearer_token: Option<BackendToken>,
+}
+
+/// A backend bearer token resolved from the environment.
+///
+/// The value has no `Display`, no `Serialize`, and a redacting `Debug`, so it
+/// cannot reach logs, error messages, `check` output, or files by accident.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BackendToken(String);
+
+/// Shortest accepted backend token. Generated tokens are 32 random bytes
+/// (43 to 64 characters), so anything shorter is treated as a mistake.
+pub const MIN_BACKEND_TOKEN_LEN: usize = 32;
+/// Longest accepted backend token.
+pub const MAX_BACKEND_TOKEN_LEN: usize = 4096;
+
+impl BackendToken {
+    /// Validate a token value. Errors never include the value.
+    ///
+    /// Accepted tokens are 32 to 4096 visible ASCII characters (0x21-0x7E),
+    /// which also rules out whitespace and header injection.
+    pub fn new(value: impl Into<String>) -> anyhow::Result<Self> {
+        let value = value.into();
+        anyhow::ensure!(
+            (MIN_BACKEND_TOKEN_LEN..=MAX_BACKEND_TOKEN_LEN).contains(&value.len())
+                && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte)),
+            "a backend bearer token must be {MIN_BACKEND_TOKEN_LEN} to {MAX_BACKEND_TOKEN_LEN} visible ASCII characters without spaces (the value is not shown)"
+        );
+        Ok(Self(value))
+    }
+
+    /// The raw token, for building the outgoing `Authorization` header only.
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for BackendToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("BackendToken(<redacted>)")
+    }
 }
 
 fn default_host() -> String {
@@ -222,6 +280,8 @@ impl Default for BackendEntry {
             required: default_required(),
             timeout_seconds: default_timeout_seconds(),
             exposure: BackendExposure::Direct,
+            bearer_token_env: None,
+            bearer_token: None,
         }
     }
 }
@@ -380,6 +440,63 @@ exposure = "deferred"
         )
         .expect_err("unknown backend key");
         assert!(error.to_string().contains("unknown field `bearer_token`"));
+    }
+
+    #[test]
+    fn bearer_token_env_parses_but_the_token_itself_never_does() {
+        let config = parse(
+            "schema_version = 1\n[[backends]]\nid = \"a\"\nprefix = \"a_\"\nurl = \"http://127.0.0.1:1/mcp\"\nbearer_token_env = \"LOMWAY_BACKEND_A_TOKEN\"\n",
+        )
+        .expect("bearer_token_env is part of the public schema");
+        assert_eq!(
+            config.backends[0].bearer_token_env.as_deref(),
+            Some("LOMWAY_BACKEND_A_TOKEN")
+        );
+        assert!(
+            config.backends[0].bearer_token.is_none(),
+            "only the loader resolves the credential"
+        );
+    }
+
+    #[test]
+    fn backend_token_is_redacted_and_never_serialized() {
+        let secret = "s3cr3t-value-0123456789-abcdefghijklmnop";
+        let token = BackendToken::new(secret).expect("valid token");
+        assert_eq!(format!("{token:?}"), "BackendToken(<redacted>)");
+        let entry = BackendEntry {
+            id: "a".to_string(),
+            prefix: "a_".to_string(),
+            url: "http://127.0.0.1:1/mcp".to_string(),
+            bearer_token_env: Some("LOMWAY_BACKEND_A_TOKEN".to_string()),
+            bearer_token: Some(token),
+            ..Default::default()
+        };
+        let debug = format!("{entry:?}");
+        assert!(!debug.contains(secret), "{debug}");
+        let serialized = toml::to_string(&entry).expect("serialize entry");
+        assert!(!serialized.contains(secret), "{serialized}");
+        assert!(serialized.contains("bearer_token_env"));
+        assert!(!serialized.contains("bearer_token ="));
+    }
+
+    #[test]
+    fn backend_token_values_are_checked_without_echoing_them() {
+        for bad in [
+            String::new(),
+            "short".to_string(),
+            format!("{} with space", "x".repeat(40)),
+            format!("{}\r\nX-Injected: 1", "x".repeat(40)),
+            format!("{}\u{e9}", "x".repeat(40)),
+            "x".repeat(MAX_BACKEND_TOKEN_LEN + 1),
+        ] {
+            let error = BackendToken::new(bad.clone()).expect_err("malformed token");
+            let message = error.to_string();
+            assert!(message.contains("not shown"), "{message}");
+            if !bad.is_empty() {
+                assert!(!message.contains(&bad), "{message}");
+            }
+        }
+        BackendToken::new("A".repeat(MIN_BACKEND_TOKEN_LEN)).expect("minimum length");
     }
 
     #[test]

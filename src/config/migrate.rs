@@ -43,6 +43,11 @@ pub fn to_public(legacy: &ProxyConfig) -> Result<GatewayConfig> {
                 "backend '{}' must use HTTP to migrate to the public schema",
                 backend.name
             );
+            ensure!(
+                backend.bearer_token.is_none(),
+                "backend '{}' sets bearer_token in a legacy configuration; the public schema only accepts bearer_token_env (an environment variable name), so migrate the backend and reference its token by name (the value is not shown)",
+                backend.name
+            );
             let url = backend.url.clone().unwrap_or_default();
             validate::validate_backend_url(&url)
                 .with_context(|| format!("backend '{}' cannot migrate", backend.name))?;
@@ -63,6 +68,8 @@ pub fn to_public(legacy: &ProxyConfig) -> Result<GatewayConfig> {
                 } else {
                     BackendExposure::Direct
                 },
+                bearer_token_env: None,
+                bearer_token: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -134,7 +141,13 @@ pub fn to_legacy(public: &GatewayConfig) -> Result<ProxyConfig> {
                 mirror_of: None,
                 mirror_percent: 100,
                 cache: None,
-                bearer_token: None,
+                // The resolved credential, if any. `validate` above has
+                // already proven it came from a `bearer_token_env` reference.
+                // The upstream transport sends it as `Authorization: Bearer`.
+                bearer_token: entry
+                    .bearer_token
+                    .as_ref()
+                    .map(|token| token.expose().to_string()),
                 forward_auth: false,
                 aliases: Vec::new(),
                 default_args: serde_json::Map::new(),
@@ -320,6 +333,28 @@ url = "http://127.0.0.1:18702/mcp"
         let round_tripped = to_public(&legacy).expect("legacy maps back to public");
         assert!(round_tripped.backends.is_empty());
         assert_eq!(round_tripped.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn resolved_backend_token_reaches_the_upstream_transport_config_only() {
+        let mut public: GatewayConfig = toml::from_str(
+            "schema_version = 1\n[[backends]]\nid = \"ct\"\nprefix = \"ct_\"\nurl = \"http://127.0.0.1:18701/mcp\"\nbearer_token_env = \"LOMWAY_BACKEND_CT_TOKEN\"\n",
+        )
+        .expect("parse");
+        assert!(
+            to_legacy(&public).is_err(),
+            "an unresolved reference must never map to an unauthenticated backend"
+        );
+        let secret = "0123456789abcdef0123456789abcdef-ct";
+        public.backends[0].bearer_token =
+            Some(crate::config::model::BackendToken::new(secret).expect("token"));
+        let legacy = to_legacy(&public).expect("map resolved config");
+        assert_eq!(legacy.backends[0].bearer_token.as_deref(), Some(secret));
+        assert!(!legacy.backends[0].forward_auth);
+        validate_proxy_policy(&legacy).expect("bearer token is policy-safe");
+
+        let error = to_public(&legacy).expect_err("legacy bearer_token is not migrated silently");
+        assert!(!error.to_string().contains(secret), "{error:#}");
     }
 
     #[test]

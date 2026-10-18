@@ -13,7 +13,7 @@ use anyhow::{Context, Result, ensure};
 pub use crate::config::constants::{
     MAX_ARGUMENT_SIZE_BYTES, MAX_BACKEND_TIMEOUT_SECONDS, SCHEMA_VERSION,
 };
-use crate::config::model::{GatewayConfig, NorthboundOAuthConfig};
+use crate::config::model::{BackendEntry, GatewayConfig, NorthboundOAuthConfig};
 
 /// Namespace prefixes reserved for gateway control planes. Backends may
 /// never claim them.
@@ -22,6 +22,10 @@ pub const RESERVED_PREFIXES: [&str; 3] = ["proxy_", "lomway_", "lmg_"];
 pub const ALLOWED_PREFIX_CHARSET: &str = "a-z 0-9 '_' '-' (must end with '_')";
 /// Allowed backend id charset, documented as part of the namespace policy.
 pub const ALLOWED_ID_CHARSET: &str = "a-z 0-9 '_' '-' (must start with a letter or digit)";
+/// Every `bearer_token_env` name starts with this prefix, so a configuration
+/// can never point a backend at an unrelated secret already in the
+/// environment (for example a cloud API key).
+pub const BACKEND_TOKEN_ENV_PREFIX: &str = "LOMWAY_BACKEND_";
 
 /// Validate a public configuration end to end: schema version, listener,
 /// policy flags, and every backend entry (including id/prefix uniqueness).
@@ -56,7 +60,46 @@ pub fn validate(config: &GatewayConfig) -> Result<()> {
             "backend '{}' timeout_seconds must be between 1 and {MAX_BACKEND_TIMEOUT_SECONDS}",
             backend.id
         );
+        validate_backend_credentials(backend)?;
     }
+    Ok(())
+}
+
+/// A credential is either referenced and resolved, or absent. A reference
+/// that was never resolved fails closed instead of connecting without it,
+/// and a resolved credential without a reference cannot exist.
+fn validate_backend_credentials(backend: &BackendEntry) -> Result<()> {
+    match (&backend.bearer_token_env, &backend.bearer_token) {
+        (Some(name), Some(_)) => validate_bearer_token_env_name(&backend.id, name),
+        (Some(name), None) => {
+            validate_bearer_token_env_name(&backend.id, name)?;
+            anyhow::bail!(
+                "backend '{}' requires a bearer token from environment variable {name}, but none was resolved; the gateway fails closed instead of connecting without credentials",
+                backend.id
+            )
+        }
+        (None, Some(_)) => anyhow::bail!(
+            "backend '{}' carries a bearer token without bearer_token_env; credentials can only come from a named environment variable",
+            backend.id
+        ),
+        (None, None) => Ok(()),
+    }
+}
+
+/// `bearer_token_env` holds a variable *name*: `LOMWAY_BACKEND_` followed by
+/// uppercase letters, digits, and `_`, at most 128 characters. The rejected
+/// value is never echoed, because a mistaken configuration may hold the
+/// token itself.
+pub(crate) fn validate_bearer_token_env_name(id: &str, name: &str) -> Result<()> {
+    let suffix = name.strip_prefix(BACKEND_TOKEN_ENV_PREFIX).unwrap_or("");
+    ensure!(
+        name.len() <= 128
+            && !suffix.is_empty()
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'),
+        "backend '{id}' bearer_token_env must be the NAME of an environment variable matching {BACKEND_TOKEN_ENV_PREFIX}[A-Z0-9_]+ (at most 128 characters); the configured value is not shown. Never put the token itself in the configuration file"
+    );
     Ok(())
 }
 
@@ -273,6 +316,8 @@ mod tests {
             required: true,
             timeout_seconds: 30,
             exposure: Default::default(),
+            bearer_token_env: None,
+            bearer_token: None,
         }
     }
 
@@ -430,6 +475,52 @@ mod tests {
         ]))
         .expect_err("prefix-of-prefix namespaces must fail closed");
         assert!(error.to_string().contains("overlapping backend prefixes"));
+    }
+
+    #[test]
+    fn backend_credentials_must_be_referenced_and_resolved() {
+        let token =
+            || crate::config::model::BackendToken::new("t".repeat(40)).expect("valid token");
+        let mut referenced = entry("a", "a_", "http://127.0.0.1:18701/mcp");
+        referenced.bearer_token_env = Some("LOMWAY_BACKEND_A_TOKEN".to_string());
+
+        let error = validate(&config(vec![referenced.clone()])).expect_err("unresolved reference");
+        let message = error.to_string();
+        assert!(message.contains("LOMWAY_BACKEND_A_TOKEN"), "{message}");
+        assert!(message.contains("fails closed"), "{message}");
+
+        referenced.bearer_token = Some(token());
+        validate(&config(vec![referenced])).expect("resolved reference");
+
+        let mut orphan = entry("a", "a_", "http://127.0.0.1:18701/mcp");
+        orphan.bearer_token = Some(token());
+        assert!(validate(&config(vec![orphan])).is_err());
+    }
+
+    #[test]
+    fn bearer_token_env_accepts_only_prefixed_variable_names_and_never_echoes() {
+        for good in ["LOMWAY_BACKEND_CODING_TOOLS_TOKEN", "LOMWAY_BACKEND_X1"] {
+            validate_bearer_token_env_name("a", good).expect(good);
+        }
+        let pasted_token = "eyJhbGciOiJIUzI1NiJ9.c2VjcmV0LXRva2Vu.c2lnbmF0dXJl";
+        for bad in [
+            "",
+            "LOMWAY_BACKEND_",
+            "OPENAI_API_KEY",
+            "lomway_backend_lower",
+            "LOMWAY_BACKEND_${OTHER}",
+            "LOMWAY_BACKEND_A-B",
+            pasted_token,
+        ] {
+            let error = validate_bearer_token_env_name("a", bad).expect_err(bad);
+            let message = error.to_string();
+            assert!(message.contains("not shown"), "{message}");
+            if !bad.is_empty() && bad != "LOMWAY_BACKEND_" {
+                assert!(!message.contains(bad), "{message}");
+            }
+        }
+        let long = format!("LOMWAY_BACKEND_{}", "A".repeat(120));
+        assert!(validate_bearer_token_env_name("a", &long).is_err());
     }
 
     #[test]

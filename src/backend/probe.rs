@@ -124,7 +124,10 @@ pub async fn probe_registry(registry: &BackendRegistry) -> Result<ProbeReport> {
 /// backend's configured timeout. No retries are attempted.
 pub async fn probe_backend(descriptor: &BackendDescriptor) -> Result<Vec<UpstreamTool>> {
     let probe = async {
-        let transport = HttpClientTransport::new(descriptor.url().to_string());
+        let mut transport = HttpClientTransport::new(descriptor.url().to_string());
+        if let Some(token) = descriptor.bearer_token() {
+            transport = transport.bearer_token(token.expose());
+        }
         let client = McpClient::connect(transport)
             .await
             .context("connect failed")?;
@@ -169,6 +172,8 @@ mod tests {
             required,
             timeout_seconds: 2,
             exposure: Default::default(),
+            bearer_token_env: None,
+            bearer_token: None,
         })
         .expect("valid descriptor")
     }

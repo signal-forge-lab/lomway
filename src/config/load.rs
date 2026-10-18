@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail, ensure};
 use mcp_proxy::ProxyConfig;
 
 use crate::config::migrate;
-use crate::config::model::GatewayConfig;
+use crate::config::model::{BackendToken, GatewayConfig};
 use crate::config::validate;
 use crate::gateway::policy::validate_proxy_policy;
 
@@ -30,12 +30,88 @@ pub enum ConfigFormat {
 /// The legacy deployment schema is identified by its `[proxy]` table; every
 /// other document is parsed strictly as the public schema.
 pub fn detect_config_format(text: &str) -> Result<ConfigFormat> {
-    let value: toml::Value = toml::from_str(text).context("configuration is not valid TOML")?;
+    let value = parse_toml_value(text)?;
+    Ok(format_of(&value))
+}
+
+fn format_of(value: &toml::Value) -> ConfigFormat {
     if value.get("proxy").is_some() {
-        Ok(ConfigFormat::Legacy)
+        ConfigFormat::Legacy
     } else {
-        Ok(ConfigFormat::Public)
+        ConfigFormat::Public
     }
+}
+
+/// Parse TOML without echoing source text in the error. The upstream TOML
+/// error renders the offending line, and a mistaken configuration line may
+/// hold a credential, so only the line number and the parser's message are
+/// reported.
+fn parse_toml_value(text: &str) -> Result<toml::Value> {
+    toml::from_str(text)
+        .map_err(|error| redacted_toml_error("configuration is not valid TOML", text, &error))
+}
+
+fn redacted_toml_error(context: &str, text: &str, error: &toml::de::Error) -> anyhow::Error {
+    let location = error
+        .span()
+        .map(|span| {
+            let end = span.start.min(text.len());
+            let line = text.as_bytes()[..end]
+                .iter()
+                .filter(|&&byte| byte == b'\n')
+                .count()
+                + 1;
+            format!(" at line {line}")
+        })
+        .unwrap_or_default();
+    anyhow::anyhow!(
+        "{context}{location}: {} (source text is not echoed because it may contain a credential)",
+        error.message()
+    )
+}
+
+/// Keys that would carry a credential inside a backend entry. None of them
+/// is part of either schema; they are rejected up front with a message that
+/// never includes the value, instead of failing later in a parser that
+/// prints the offending line.
+pub const INLINE_CREDENTIAL_KEYS: [&str; 9] = [
+    "bearer_token",
+    "token",
+    "auth_token",
+    "access_token",
+    "authorization",
+    "api_key",
+    "password",
+    "secret",
+    "headers",
+];
+
+/// Reject credentials written directly into `[[backends]]` entries. Only a
+/// reference by environment variable name (`bearer_token_env`) is allowed.
+fn reject_inline_backend_credentials(value: &toml::Value) -> Result<()> {
+    let Some(backends) = value.get("backends").and_then(toml::Value::as_array) else {
+        return Ok(());
+    };
+    for (index, backend) in backends.iter().enumerate() {
+        let Some(table) = backend.as_table() else {
+            continue;
+        };
+        let label = table
+            .get("id")
+            .or_else(|| table.get("name"))
+            .and_then(toml::Value::as_str)
+            .filter(|label| validate::validate_backend_id(label).is_ok())
+            .map_or_else(|| format!("#{}", index + 1), |label| format!("'{label}'"));
+        for key in table.keys() {
+            if INLINE_CREDENTIAL_KEYS.contains(&key.to_ascii_lowercase().as_str()) {
+                bail!(
+                    "backend {label} sets `{key}` directly in the configuration file, which is refused (the value is not shown). Reference the credential by name instead: bearer_token_env = \"{}<NAME>\", and supply the value through the environment",
+                    validate::BACKEND_TOKEN_ENV_PREFIX
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Load and fully validate a gateway configuration from `path`.
@@ -54,9 +130,21 @@ pub fn load_gateway_config(path: &Path) -> Result<GatewayConfig> {
 /// `check` and `list-backends` surface this so a legacy file that was
 /// migrated in memory is never mistaken for a native public-schema file.
 pub fn load_gateway_config_with_format(path: &Path) -> Result<(ConfigFormat, GatewayConfig)> {
+    load_gateway_config_with_lookup(path, |name| std::env::var(name).ok())
+}
+
+/// Injectable core of [`load_gateway_config_with_format`]: `lookup` supplies
+/// environment values for backend credentials, so the whole load path is
+/// testable without touching the process environment.
+fn load_gateway_config_with_lookup(
+    path: &Path,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<(ConfigFormat, GatewayConfig)> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read configuration file {}", path.display()))?;
-    match detect_config_format(&text)? {
+    let value = parse_toml_value(&text)?;
+    reject_inline_backend_credentials(&value)?;
+    match format_of(&value) {
         ConfigFormat::Legacy => {
             let mut legacy = ProxyConfig::load(path).with_context(|| {
                 format!("failed to load legacy configuration {}", path.display())
@@ -75,13 +163,53 @@ pub fn load_gateway_config_with_format(path: &Path) -> Result<(ConfigFormat, Gat
             Ok((ConfigFormat::Legacy, public))
         }
         ConfigFormat::Public => {
-            let mut config: GatewayConfig = toml::from_str(&text)
-                .with_context(|| format!("invalid public configuration in {}", path.display()))?;
+            let mut config: GatewayConfig = toml::from_str(&text).map_err(|error| {
+                redacted_toml_error(
+                    &format!("invalid public configuration in {}", path.display()),
+                    &text,
+                    &error,
+                )
+            })?;
             resolve_env_refs(&mut config)?;
+            resolve_backend_tokens_with(&mut config, lookup)?;
             validate(&config)?;
             Ok((ConfigFormat::Public, config))
         }
     }
+}
+
+/// Resolve every `bearer_token_env` reference with `lookup`.
+///
+/// Fails closed: a reference whose variable is unset or holds a malformed
+/// token is a load error, so the gateway never starts a backend without the
+/// credential it was configured to use. Errors name the variable, never its
+/// value. Credentials that are already resolved are re-resolved, so the
+/// result always reflects `lookup`.
+pub fn resolve_backend_tokens_with(
+    config: &mut GatewayConfig,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<()> {
+    for backend in &mut config.backends {
+        backend.bearer_token = None;
+        let Some(name) = backend.bearer_token_env.as_deref() else {
+            continue;
+        };
+        validate::validate_bearer_token_env_name(&backend.id, name)?;
+        let Some(value) = lookup(name) else {
+            bail!(
+                "backend '{}' requires environment variable {name} (bearer_token_env), which is not set; the gateway fails closed instead of connecting without credentials",
+                backend.id
+            );
+        };
+        let token = BackendToken::new(value).with_context(|| {
+            format!(
+                "environment variable {name} for backend '{}' does not hold a usable bearer token",
+                backend.id
+            )
+        })?;
+        backend.bearer_token = Some(token);
+    }
+    Ok(())
 }
 
 /// Migrate a legacy deployment configuration file to the public schema.
@@ -116,6 +244,7 @@ fn migrate_legacy_to_public_file_with(
     );
     let text = std::fs::read_to_string(input)
         .with_context(|| format!("failed to read configuration file {}", input.display()))?;
+    reject_inline_backend_credentials(&parse_toml_value(&text)?)?;
     ensure!(
         detect_config_format(&text)? == ConfigFormat::Legacy,
         "{} is already in the public schema; migration converts a legacy [proxy] configuration",
@@ -164,6 +293,9 @@ fn migrate_legacy_to_public_file_with(
 /// legacy `mcp-proxy` configuration, resolves environment references, and
 /// enforces the gateway policy without migrating it.
 pub fn load_config(path: &Path) -> Result<ProxyConfig> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read configuration file {}", path.display()))?;
+    reject_inline_backend_credentials(&parse_toml_value(&text)?)?;
     let mut config = ProxyConfig::load(path)?;
     resolve_legacy_env(&mut config)?;
     validate_proxy_policy(&config)?;
@@ -562,6 +694,134 @@ json_logs = false
         );
 
         std::fs::remove_dir_all(&base).expect("cleanup base");
+    }
+
+    const TOKEN_VALUE: &str = "tok_9f2c1d7e4b8a6035_ZXhhbXBsZS1vbmx5LXZhbHVl";
+
+    fn token_config(extra: &str) -> String {
+        format!(
+            "schema_version = 1\n\n[[backends]]\nid = \"coding-tools\"\nprefix = \"coding_tools_\"\nurl = \"http://127.0.0.1:18701/mcp\"\nrequired = false\n{extra}\n"
+        )
+    }
+
+    fn write_temp(text: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let path = dir.path().join("gateway.toml");
+        std::fs::write(&path, text).expect("write test configuration");
+        (dir, path)
+    }
+
+    #[test]
+    fn bearer_token_env_resolves_from_the_environment_only() {
+        let (_dir, path) = write_temp(&token_config(
+            "bearer_token_env = \"LOMWAY_BACKEND_CODING_TOOLS_TOKEN\"",
+        ));
+        let lookup = |name: &str| {
+            (name == "LOMWAY_BACKEND_CODING_TOOLS_TOKEN").then(|| TOKEN_VALUE.to_string())
+        };
+        let (_, config) = load_gateway_config_with_lookup(&path, lookup).expect("resolved load");
+        let backend = &config.backends[0];
+        assert_eq!(
+            backend.bearer_token.as_ref().map(BackendToken::expose),
+            Some(TOKEN_VALUE)
+        );
+        assert!(!format!("{config:?}").contains(TOKEN_VALUE));
+        let written = toml::to_string_pretty(&config).expect("serialize loaded config");
+        assert!(!written.contains(TOKEN_VALUE), "{written}");
+        assert!(written.contains("LOMWAY_BACKEND_CODING_TOOLS_TOKEN"));
+    }
+
+    #[test]
+    fn unset_or_malformed_token_variable_fails_closed_without_echoing() {
+        let (_dir, path) = write_temp(&token_config(
+            "bearer_token_env = \"LOMWAY_BACKEND_CODING_TOOLS_TOKEN\"",
+        ));
+        let error = load_gateway_config_with_lookup(&path, |_| None).expect_err("unset variable");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("LOMWAY_BACKEND_CODING_TOOLS_TOKEN"),
+            "{message}"
+        );
+        assert!(message.contains("fails closed"), "{message}");
+
+        for bad in [
+            "",
+            "too-short",
+            "with space in the middle of a long token value",
+        ] {
+            let error = load_gateway_config_with_lookup(&path, |_| Some(bad.to_string()))
+                .expect_err("malformed token");
+            let message = format!("{error:#}");
+            assert!(message.contains("not shown"), "{message}");
+            if !bad.is_empty() {
+                assert!(!message.contains(bad), "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn credentials_written_into_the_file_are_refused_without_echoing() {
+        let lookup = |_: &str| Some(TOKEN_VALUE.to_string());
+        for key in [
+            "bearer_token",
+            "token",
+            "Authorization",
+            "api_key",
+            "headers",
+        ] {
+            let (_dir, path) = write_temp(&token_config(&format!("{key} = \"{TOKEN_VALUE}\"")));
+            let error = load_gateway_config_with_lookup(&path, lookup).expect_err(key);
+            let message = format!("{error:#}");
+            assert!(!message.contains(TOKEN_VALUE), "{message}");
+            assert!(message.contains("bearer_token_env"), "{message}");
+            assert!(message.contains("'coding-tools'"), "{message}");
+        }
+
+        // The token pasted where the variable name belongs is refused too.
+        let (_dir, path) = write_temp(&token_config(&format!(
+            "bearer_token_env = \"{TOKEN_VALUE}\""
+        )));
+        let message = format!(
+            "{:#}",
+            load_gateway_config_with_lookup(&path, lookup).expect_err("pasted token")
+        );
+        assert!(!message.contains(TOKEN_VALUE), "{message}");
+        assert!(message.contains("not shown"), "{message}");
+
+        // An unquoted token is a TOML syntax error; the line is not echoed.
+        let (_dir, path) = write_temp(&token_config(&format!("bearer_token_env = {TOKEN_VALUE}")));
+        let message = format!(
+            "{:#}",
+            load_gateway_config_with_lookup(&path, lookup).expect_err("syntax error")
+        );
+        assert!(!message.contains(TOKEN_VALUE), "{message}");
+        assert!(message.contains("line 8"), "{message}");
+
+        // Legacy files and the legacy compatibility loader refuse inline
+        // credentials as well (the migration used to drop them silently).
+        let legacy = LEGACY_MIGRATE_FIXTURE.replace(
+            "transport = \"http\"\n",
+            &format!("transport = \"http\"\nbearer_token = \"{TOKEN_VALUE}\"\n"),
+        );
+        let (dir, path) = write_temp(&legacy);
+        for message in [
+            format!(
+                "{:#}",
+                load_gateway_config_with_lookup(&path, lookup).expect_err("legacy load")
+            ),
+            format!(
+                "{:#}",
+                load_config(&path).expect_err("legacy compatibility loader")
+            ),
+            format!(
+                "{:#}",
+                migrate_legacy_to_public_file_with(&path, &dir.path().join("out.toml"), lookup)
+                    .expect_err("legacy migration")
+            ),
+        ] {
+            assert!(!message.contains(TOKEN_VALUE), "{message}");
+            assert!(message.contains("'alpha'"), "{message}");
+        }
     }
 
     #[test]
