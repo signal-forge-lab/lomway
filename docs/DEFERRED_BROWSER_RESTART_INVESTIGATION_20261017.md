@@ -2,7 +2,7 @@
 
 ## Incident
 
-On the Windows host the **stealth-browser-mcp** backend was restarted via
+On the Windows host the deferred browser MCP backend was restarted via
 Swibo at 2026-10-17 21:10 JST after verifying that it had no active
 browser instances. The replacement listened on 127.0.0.1:7691.
 Direct streamable-HTTP MCP initialize, tools/list (98 tools) and the
@@ -78,6 +78,6 @@ A separate previously advertised direct `workbridge_exec_command`
 capability now returned `Unknown tool: workbridge_exec_command` from
 the connected Lomway tool surface, while the browser deferred call
 succeeded. Device-level Windows inspection continued via the
-already-connected Desktop Commander on the Windows host. Distinguish this direct
+already-connected separate desktop session. Distinguish this direct
 tool registration mismatch from the earlier browser MCP timeout;
 there is not yet evidence of a common cause.
