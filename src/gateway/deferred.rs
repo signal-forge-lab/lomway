@@ -914,7 +914,14 @@ action = "git_version"
                 "{name} schema is not portable: {schema}"
             );
             let text = schema.to_string();
-            for needle in ["$schema", "$ref", "$defs", "\"uint", "\"null\""] {
+            for needle in [
+                "$schema",
+                "$ref",
+                "$defs",
+                "\"uint",
+                "\"null\"",
+                "\"default\":null",
+            ] {
                 assert!(!text.contains(needle), "{name} has {needle}: {text}");
             }
             assert_eq!(schema["type"], "object", "{name}");

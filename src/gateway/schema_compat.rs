@@ -172,6 +172,7 @@ fn sanitize(value: &mut Value) {
         collapse_nullable_union(object, "oneOf");
         normalize_type(object);
         drop_non_portable_format(object);
+        drop_null_default(object);
         for_each_subschema(object, sanitize);
     }
 }
@@ -226,6 +227,22 @@ fn normalize_type(object: &mut Map<String, Value>) {
                 .entry("anyOf".to_string())
                 .or_insert(Value::Array(variants));
         }
+    }
+}
+
+/// `#[serde(default)]` on an `Option` makes schemars emit `"default": null`,
+/// which no longer matches the (now single, non-null) `type`. Drop it unless
+/// `null` is an explicitly allowed `enum` value.
+fn drop_null_default(object: &mut Map<String, Value>) {
+    if !object.get("default").is_some_and(Value::is_null) {
+        return;
+    }
+    let null_allowed = object
+        .get("enum")
+        .and_then(Value::as_array)
+        .is_some_and(|values| values.iter().any(Value::is_null));
+    if !null_allowed {
+        object.remove("default");
     }
 }
 
@@ -364,6 +381,7 @@ mod tests {
                 "f": {"type": "string", "format": "date-time"},
                 "g": {"enum": [null, "x"], "default": null},
                 "h": {"type": ["null"]},
+                "i": {"type": ["string", "null"], "default": null},
                 "default": {"type": ["boolean", "null"]}
             },
             "$defs": {"X": {"type": ["object", "null"], "$schema": "nested"}}
@@ -381,6 +399,7 @@ mod tests {
         assert_eq!(p["f"]["format"], "date-time");
         assert_eq!(p["g"], json!({"enum": [null, "x"], "default": null}));
         assert_eq!(p["h"], json!({}));
+        assert_eq!(p["i"], json!({"type": "string"}));
         assert_eq!(p["default"], json!({"type": "boolean"}));
         assert_eq!(schema["$defs"]["X"], json!({"type": "object"}));
     }
