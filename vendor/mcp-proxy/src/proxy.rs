@@ -41,6 +41,7 @@ pub struct Proxy {
     inner: McpProxy,
     config: ProxyConfig,
     transport_failure_tx: broadcast::Sender<String>,
+    reconnect_tracker: ReconnectTracker,
     application_extension: Option<Arc<dyn Any + Send + Sync>>,
     #[cfg(feature = "discovery")]
     discovery_index: Option<crate::discovery::SharedDiscoveryIndex>,
@@ -77,14 +78,17 @@ impl Proxy {
 
         let (service, cache_handle) = build_middleware_stack(&config, mcp_proxy)?;
         let (transport_failure_tx, _) = broadcast::channel(64);
-        // Observe failed backend invocations without ever replaying a tool call.
-        let service = BoxCloneService::new(TransportErrorObserver {
+        let reconnect_tracker = ReconnectTracker::default();
+        // Observe failed backend invocations. A tool call that reached a
+        // backend is never replayed; see `TransportErrorObserver`.
+        let service = BoxCloneService::new(TransportErrorObserver::new(
             service,
-            tx: transport_failure_tx.clone(),
-            prefixes: config.backends.iter().map(|b| {
+            transport_failure_tx.clone(),
+            config.backends.iter().map(|b| {
                 (format!("{}{}", b.name, config.proxy.separator), b.name.clone())
             }).collect(),
-        });
+            reconnect_tracker.clone(),
+        ));
 
         let (router, session_handle) =
             tower_mcp::transport::http::HttpTransport::from_service(service)
@@ -167,6 +171,7 @@ impl Proxy {
             inner: proxy_for_caller,
             config,
             transport_failure_tx,
+            reconnect_tracker,
             application_extension: None,
             #[cfg(feature = "discovery")]
             discovery_index,
@@ -188,6 +193,14 @@ impl Proxy {
     /// Notification-only channel; a failed user request is NEVER retried.
     pub fn subscribe_transport_failures(&self) -> broadcast::Receiver<String> {
         self.transport_failure_tx.subscribe()
+    }
+
+    /// Shared record of backend transports being rebuilt. An embedding
+    /// gateway marks each rebuild with [`ReconnectTracker::begin`] so a tool
+    /// call that lands while the namespace is briefly absent waits for it
+    /// instead of failing with "Unknown tool".
+    pub fn reconnect_tracker(&self) -> ReconnectTracker {
+        self.reconnect_tracker.clone()
     }
 
     /// Optional typed state carried by an embedding gateway to its router.
@@ -257,11 +270,166 @@ impl Proxy {
     }
 }
 
+/// Message of tower's `Elapsed` error as surfaced by tower-mcp's
+/// `CatchError` when a per-backend `TimeoutLayer` fires.
+const TIMEOUT_LAYER_MESSAGE: &str = "request timed out";
+
+/// Whether a routed tool-call error means the backend *transport* failed
+/// (connection refused/closed, HTTP failure, timeout, session loss), as
+/// opposed to the backend answering with an application-level error.
+///
+/// tower-mcp's `BackendService` prefixes every client error with
+/// `"Backend error: "`. A JSON-RPC error response from the backend
+/// (`Error::JsonRpc`, e.g. -32602 invalid params, -32601 method not found,
+/// -32603 tool failure) proves the transport works and is NOT a transport
+/// failure. The implementation-defined server range -32099..=-32000 is still
+/// counted: tower-mcp's HTTP client reports failed background requests as a
+/// -32000 frame, and -32005 is session-not-found. A tool result with
+/// `isError: true` is a successful response and never reaches this check.
+pub fn is_backend_transport_failure(message: &str) -> bool {
+    if message == TIMEOUT_LAYER_MESSAGE {
+        return true;
+    }
+    let Some(rest) = message.strip_prefix("Backend error: ") else {
+        return false;
+    };
+    match rest.strip_prefix("JSON-RPC error: ") {
+        // Transport, SessionExpired, Serialization, SSE limit, Internal.
+        None => true,
+        Some(debug) => jsonrpc_debug_code(debug)
+            .is_none_or(|code| (-32099..=-32000).contains(&code)),
+    }
+}
+
+/// Code from `JsonRpcError`'s derived Debug output
+/// (`JsonRpcError { code: -32602, message: .. }`).
+fn jsonrpc_debug_code(debug: &str) -> Option<i32> {
+    debug
+        .strip_prefix("JsonRpcError { code: ")?
+        .split(|c: char| c == ',' || c == ' ')
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// How long a recently finished rebuild still explains an "Unknown tool".
+const RECENT_RECONNECT: Duration = Duration::from_secs(5);
+/// Default bound on waiting for a rebuild before giving a transient error.
+const DEFAULT_RECONNECT_WAIT: Duration = Duration::from_secs(15);
+
+#[derive(Default)]
+struct ReconnectEntry {
+    active: usize,
+    last_end: Option<std::time::Instant>,
+}
+
+/// Backends whose transport is being rebuilt (remove + re-add) right now.
+#[derive(Clone, Default)]
+pub struct ReconnectTracker {
+    inner: Arc<std::sync::Mutex<HashMap<String, ReconnectEntry>>>,
+}
+
+/// Marks a rebuild for as long as it is held.
+pub struct ReconnectGuard {
+    tracker: ReconnectTracker,
+    backend: String,
+}
+
+impl Drop for ReconnectGuard {
+    fn drop(&mut self) {
+        let mut inner = self.tracker.inner.lock().expect("reconnect tracker poisoned");
+        if let Some(entry) = inner.get_mut(&self.backend) {
+            entry.active = entry.active.saturating_sub(1);
+            entry.last_end = Some(std::time::Instant::now());
+        }
+    }
+}
+
+impl ReconnectTracker {
+    /// Mark `backend` as being rebuilt until the guard is dropped.
+    pub fn begin(&self, backend: &str) -> ReconnectGuard {
+        let mut inner = self.inner.lock().expect("reconnect tracker poisoned");
+        inner.entry(backend.to_string()).or_default().active += 1;
+        ReconnectGuard {
+            tracker: self.clone(),
+            backend: backend.to_string(),
+        }
+    }
+
+    /// Whether a rebuild of `backend` is in progress.
+    pub fn is_reconnecting(&self, backend: &str) -> bool {
+        let inner = self.inner.lock().expect("reconnect tracker poisoned");
+        inner.get(backend).is_some_and(|entry| entry.active > 0)
+    }
+
+    fn active_or_recent(&self, backend: &str) -> bool {
+        let inner = self.inner.lock().expect("reconnect tracker poisoned");
+        inner.get(backend).is_some_and(|entry| {
+            entry.active > 0
+                || entry
+                    .last_end
+                    .is_some_and(|end| end.elapsed() < RECENT_RECONNECT)
+        })
+    }
+
+    /// Wait until no rebuild of `backend` is in progress. False on timeout.
+    async fn settle(&self, backend: &str, max: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + max;
+        while self.is_reconnecting(backend) {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        true
+    }
+}
+
+fn is_unknown_tool(response: &RouterResponse) -> bool {
+    matches!(&response.inner, Err(error) if error.message.starts_with("Unknown tool:"))
+}
+
+/// Watches routed tool calls.
+///
+/// * A transport-level backend failure (see [`is_backend_transport_failure`])
+///   is broadcast so the embedding gateway can rebuild the transport.
+///   Application errors from a reachable backend are not.
+/// * An "Unknown tool" for a configured backend prefix while (or just after)
+///   that backend's transport is being rebuilt was never dispatched to the
+///   backend, so it is safe to send once more after the rebuild settles. If
+///   it does not settle, the caller gets a clear transient error instead.
+///   A call that reached a backend is never replayed.
 #[derive(Clone)]
-struct TransportErrorObserver {
+pub struct TransportErrorObserver {
     service: BoxCloneService<RouterRequest, RouterResponse, Infallible>,
     tx: broadcast::Sender<String>,
     prefixes: Vec<(String, String)>,
+    tracker: ReconnectTracker,
+    reconnect_wait: Duration,
+}
+
+impl TransportErrorObserver {
+    /// `prefixes` maps a public tool prefix to its backend namespace.
+    pub fn new(
+        service: BoxCloneService<RouterRequest, RouterResponse, Infallible>,
+        tx: broadcast::Sender<String>,
+        prefixes: Vec<(String, String)>,
+        tracker: ReconnectTracker,
+    ) -> Self {
+        Self {
+            service,
+            tx,
+            prefixes,
+            tracker,
+            reconnect_wait: DEFAULT_RECONNECT_WAIT,
+        }
+    }
+
+    /// Override how long a call waits for a rebuild (tests).
+    pub fn with_reconnect_wait(mut self, wait: Duration) -> Self {
+        self.reconnect_wait = wait;
+        self
+    }
 }
 
 impl Service<RouterRequest> for TransportErrorObserver {
@@ -274,25 +442,45 @@ impl Service<RouterRequest> for TransportErrorObserver {
     }
 
     fn call(&mut self, request: RouterRequest) -> Self::Future {
-        let tool_name = match &request.inner {
-            McpRequest::CallTool(params) => Some(params.name.clone()),
+        let backend = match &request.inner {
+            McpRequest::CallTool(params) => self
+                .prefixes
+                .iter()
+                .find(|(prefix, _)| params.name.starts_with(prefix))
+                .map(|(_, backend)| backend.clone()),
             _ => None,
         };
-        let prefixes = self.prefixes.clone();
         let tx = self.tx.clone();
+        let tracker = self.tracker.clone();
+        let wait = self.reconnect_wait;
         let service = self.service.clone();
         Box::pin(async move {
-            let response = service.oneshot(request).await;
-            if let (Some(name), Ok(result)) = (tool_name.as_deref(), &response) {
-                if let Err(error) = &result.inner {
-                    // tower-mcp's BackendService labels *client transport*
-                    // errors, not application-level tool failures, this way.
-                    if error.message.starts_with("Backend error:") {
-                        if let Some((_, backend)) = prefixes.iter().find(|(prefix, _)| name.starts_with(prefix)) {
-                            let _ = tx.send(backend.clone());
-                        }
-                    }
+            let Some(backend) = backend else {
+                return service.oneshot(request).await;
+            };
+            let resend = request.clone();
+            let mut response = service.clone().oneshot(request).await;
+            if matches!(&response, Ok(result) if is_unknown_tool(result))
+                && tracker.active_or_recent(&backend)
+            {
+                let settled = tracker.settle(&backend, wait).await;
+                if settled {
+                    tracing::info!(backend = %backend, "tool call arrived during a backend transport rebuild; sending it after the rebuild");
+                    response = service.oneshot(resend).await;
                 }
+                if let Ok(result) = &mut response
+                    && is_unknown_tool(result)
+                {
+                    result.inner = Err(tower_mcp::error::JsonRpcError::internal_error(format!(
+                        "Backend '{backend}' is reconnecting; the tool call was not sent to it. Retry shortly."
+                    )));
+                }
+            }
+            if let Ok(result) = &response
+                && let Err(error) = &result.inner
+                && is_backend_transport_failure(&error.message)
+            {
+                let _ = tx.send(backend);
             }
             response
         })

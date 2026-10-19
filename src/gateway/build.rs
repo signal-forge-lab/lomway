@@ -48,7 +48,12 @@ pub async fn build_proxy_with_monitor(
         proxy.mcp_proxy().remove_backend("proxy").await,
         "upstream control-plane MCP backend 'proxy' was not present; refusing to serve because admin-tool removal cannot be proven"
     );
-    let monitor = reconnect::spawn(proxy.mcp_proxy().clone(), reconnect_specs, settings);
+    let monitor = reconnect::spawn(
+        proxy.mcp_proxy().clone(),
+        reconnect_specs,
+        settings,
+        proxy.reconnect_tracker(),
+    );
     proxy.attach_application_extension(monitor.clone());
     let mut failures = proxy.subscribe_transport_failures();
     let recovery = monitor.clone();

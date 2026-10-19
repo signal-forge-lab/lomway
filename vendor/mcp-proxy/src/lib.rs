@@ -203,4 +203,6 @@ mod proxy;
 
 pub use builder::ProxyBuilder;
 pub use config::ProxyConfig;
-pub use proxy::Proxy;
+pub use proxy::{
+    Proxy, ReconnectGuard, ReconnectTracker, TransportErrorObserver, is_backend_transport_failure,
+};
