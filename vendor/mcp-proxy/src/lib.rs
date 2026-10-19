@@ -174,6 +174,7 @@ pub mod config;
 pub mod discovery;
 pub mod failover;
 pub mod filter;
+pub mod http_backend;
 pub mod inject;
 #[cfg(feature = "oauth")]
 pub mod introspection;

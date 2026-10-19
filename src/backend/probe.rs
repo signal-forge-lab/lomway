@@ -9,7 +9,8 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use tower_mcp::client::{HttpClientTransport, McpClient};
+use mcp_proxy::http_backend::http_backend_transport;
+use tower_mcp::client::McpClient;
 
 use crate::backend::descriptor::BackendDescriptor;
 use crate::backend::registry::BackendRegistry;
@@ -124,10 +125,11 @@ pub async fn probe_registry(registry: &BackendRegistry) -> Result<ProbeReport> {
 /// backend's configured timeout. No retries are attempted.
 pub async fn probe_backend(descriptor: &BackendDescriptor) -> Result<Vec<UpstreamTool>> {
     let probe = async {
-        let mut transport = HttpClientTransport::new(descriptor.url().to_string());
-        if let Some(token) = descriptor.bearer_token() {
-            transport = transport.bearer_token(token.expose());
-        }
+        let transport = http_backend_transport(
+            descriptor.url(),
+            descriptor.bearer_token().map(|token| token.expose()),
+            Some(descriptor.timeout().as_secs()),
+        );
         let client = McpClient::connect(transport)
             .await
             .context("connect failed")?;
