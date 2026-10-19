@@ -37,6 +37,7 @@ use crate::gateway::capability::{
 };
 use crate::gateway::manifest::{ManifestStore, endpoint_fingerprint, manifest_path};
 use crate::gateway::reconnect::MonitorHandle;
+use crate::gateway::workbench::Workbench;
 
 const DEFAULT_LIMIT: usize = 8;
 const MAX_LIMIT: usize = 20;
@@ -78,6 +79,8 @@ fn supervisor_name(id: &str, prefix: &str) -> String {
 pub(super) struct DeferredCatalog {
     backends: Arc<Vec<ConfiguredBackend>>,
     manifests: ManifestStore,
+    /// Gateway-owned skills, actions, pipelines, and file transfer.
+    workbench: Arc<Workbench>,
 }
 
 impl DeferredCatalog {
@@ -97,6 +100,7 @@ impl DeferredCatalog {
         let mut catalog = Self {
             backends: Arc::new(backends),
             manifests: ManifestStore::default(),
+            workbench: Arc::new(Workbench::default()),
         };
         catalog.manifests = ManifestStore::in_memory(catalog.endpoint_fingerprints());
         catalog
@@ -121,6 +125,12 @@ impl DeferredCatalog {
                 self.endpoint_fingerprints(),
             );
         }
+        self
+    }
+
+    /// Attach the gateway-owned features (skills, actions, file transfer).
+    pub(super) fn with_workbench(mut self, workbench: Arc<Workbench>) -> Self {
+        self.workbench = workbench;
         self
     }
 
@@ -149,7 +159,9 @@ impl DeferredCatalog {
     }
 
     fn backend_is_configured(&self, id: &str) -> bool {
-        id == "internal" || self.backends.iter().any(|backend| backend.id == id)
+        id == "internal"
+            || (matches!(id, "skills" | "actions" | "pipelines") && !self.workbench.is_empty())
+            || self.backends.iter().any(|backend| backend.id == id)
     }
 
     fn group_deferred(&self, tools: &[ToolDefinition]) -> BTreeMap<String, Vec<ToolDefinition>> {
@@ -204,6 +216,7 @@ impl DeferredCatalog {
                 description: tool.description.clone(),
                 placeholder_prefix: None,
                 via: None,
+                public: false,
             });
         }
         for backend in self.deferred_backends() {
@@ -219,6 +232,7 @@ impl DeferredCatalog {
                             description: tool.description,
                             placeholder_prefix: None,
                             via: None,
+                            public: false,
                         });
                     }
                 }
@@ -231,6 +245,7 @@ impl DeferredCatalog {
                     description: None,
                     placeholder_prefix: Some(backend.prefix.clone()),
                     via: None,
+                    public: false,
                 }),
             }
         }
@@ -238,7 +253,9 @@ impl DeferredCatalog {
     }
 
     fn index(&self, tools: &[ToolDefinition]) -> Vec<IndexEntry> {
-        build_index(CapabilityCatalog::builtin(), self.sources(tools))
+        let mut entries = build_index(CapabilityCatalog::builtin(), self.sources(tools));
+        entries.extend(self.workbench.index_entries());
+        entries
     }
 }
 
@@ -338,6 +355,10 @@ async fn describe(
 ) -> Result<CallToolResult, tower_mcp::Error> {
     let access = CallerAccess::new(input.caller_allowed_tools);
     let name = input.name;
+
+    if let Some(body) = catalog.workbench.describe(&name, |tool| access.tool(tool)) {
+        return Ok(CallToolResult::text(serde_json::to_string_pretty(&body)?));
+    }
 
     if let Some(internal) = CapabilityCatalog::builtin().internal_named(&name) {
         // Same rule as the search index: only a via tool listed directly in
@@ -556,6 +577,7 @@ pub(super) async fn register(
         })
         .build();
 
+    let workbench = catalog.workbench.clone();
     let call_catalog = catalog;
     let call_proxy = proxy.clone();
     let call_monitor = monitor;
@@ -629,11 +651,14 @@ pub(super) async fn register(
         })
         .build();
 
-    let router = McpRouter::new()
+    let mut router = McpRouter::new()
         .server_info("lomway-deferred-tools", env!("CARGO_PKG_VERSION"))
         .tool(search)
         .tool(describe_tool)
         .tool(call);
+    for tool in workbench.tools() {
+        router = router.tool(tool);
+    }
     proxy
         .add_backend("lomway", ChannelTransport::new(router))
         .await?;
@@ -732,6 +757,268 @@ exposure = "deferred"
             .await
             .expect("register meta-tools");
         (proxy, monitor)
+    }
+
+    struct WorkbenchFixture {
+        _dir: tempfile::TempDir,
+        proxy: McpProxy,
+    }
+
+    async fn workbench_gateway() -> WorkbenchFixture {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonical");
+        let slash = |path: &std::path::Path| path.to_string_lossy().replace('\\', "/");
+        let skills = root.join("skills");
+        std::fs::create_dir_all(skills.join("deploy-helper")).unwrap();
+        std::fs::write(
+            skills.join("deploy-helper/SKILL.md"),
+            "---\nname: deploy-helper\ndescription: Use when releasing the gateway to production.\n---\nSteps",
+        )
+        .unwrap();
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let definitions = root.join("actions.toml");
+        std::fs::write(
+            &definitions,
+            format!(
+                r#"schema_version = 1
+[[actions]]
+name = "git_version"
+description = "Print the git version (read only)."
+policy = ["read_only"]
+effects = ["process.execute"]
+program = "git"
+args = ["--version"]
+cwd = "{work}"
+[[actions]]
+name = "git_status"
+description = "Show git status for a repository directory."
+effects = ["process.execute", "git.read"]
+program = "git"
+args = ["-C", "{{repo}}", "status", "--short"]
+cwd = "{work}"
+[actions.parameters]
+required = ["repo"]
+[actions.parameters.properties.repo]
+type = "string"
+format = "relative-path"
+[[pipelines]]
+name = "versions"
+description = "Run the version action twice."
+effects = {{ allow = ["process.execute"], deny = ["git.push"] }}
+[[pipelines.steps]]
+action = "git_version"
+[[pipelines.steps]]
+action = "git_version"
+"#,
+                work = slash(&work)
+            ),
+        )
+        .unwrap();
+        let mut config = config(false);
+        config.skills.enabled = true;
+        config.skills.default_paths = false;
+        config.skills.paths = vec![slash(&skills)];
+        config.actions.enabled = true;
+        config.actions.definitions = Some(slash(&definitions));
+        config.actions.allowed_roots = vec![slash(&root)];
+        config.actions.audit_log = Some(slash(&root.join("audit.jsonl")));
+        config.file_transfer.enabled = true;
+        config.file_transfer.inbox_dir = Some(slash(&root.join("inbox")));
+        let workbench = std::sync::Arc::new(Workbench::from_config(&config));
+        assert!(
+            workbench
+                .instructions_suffix()
+                .unwrap()
+                .contains("deploy-helper")
+        );
+        let proxy = McpProxy::builder("lomway-test", "1.0.0")
+            .separator("_")
+            .backend(
+                "workbridge",
+                ChannelTransport::new(backend_router("workbridge", &[("read", "Read a file.")])),
+            )
+            .await
+            .build_strict()
+            .await
+            .expect("test proxy");
+        let monitor = MonitorHandle::snapshot_for_proxy(proxy.clone());
+        let catalog = DeferredCatalog::from_config(&config).with_workbench(workbench);
+        register(&proxy, catalog, monitor).await.expect("register");
+        WorkbenchFixture { _dir: dir, proxy }
+    }
+
+    #[tokio::test]
+    async fn workbench_tools_are_listed_with_file_param_metadata() {
+        let fixture = workbench_gateway().await;
+        let tools = current_tools(&fixture.proxy).await.unwrap();
+        for name in [
+            "lomway_list_actions",
+            "lomway_run_action",
+            "lomway_action_status",
+            "lomway_run_pipeline",
+            "lomway_receive_file",
+            "lomway_send_file",
+        ] {
+            assert!(tools.iter().any(|tool| tool.name == name), "{name} missing");
+        }
+        let receive = tools
+            .iter()
+            .find(|tool| tool.name == "lomway_receive_file")
+            .unwrap();
+        assert_eq!(
+            receive.meta.as_ref().unwrap()["openai/fileParams"],
+            json!(["file"])
+        );
+        // Default gateways publish none of them.
+        let (plain, _) = gateway(false).await;
+        let plain_tools = current_tools(&plain).await.unwrap();
+        assert!(
+            !plain_tools
+                .iter()
+                .any(|tool| tool.name == "lomway_run_action")
+        );
+    }
+
+    #[tokio::test]
+    async fn skills_and_actions_are_searchable_and_describable() {
+        let fixture = workbench_gateway().await;
+        let found = results(
+            &call(
+                &fixture.proxy,
+                "lomway_search_tools",
+                json!({"query": "deploy-helper skill"}),
+            )
+            .await,
+        );
+        assert_eq!(found[0]["name"], "skill:deploy-helper", "{found:?}");
+        assert_eq!(found[0]["backend"], "skills");
+        let action = results(
+            &call(
+                &fixture.proxy,
+                "lomway_search_tools",
+                json!({"query": "git_status"}),
+            )
+            .await,
+        );
+        assert_eq!(action[0]["name"], "action:git_status", "{action:?}");
+        assert!(
+            action[0]["how_to_invoke"]
+                .as_str()
+                .unwrap()
+                .contains("lomway_run_action")
+        );
+        // Restricted caller without run_action: skills stay visible (no
+        // allowlist filtering for instructions), actions do not.
+        let restricted = results(
+            &call(
+                &fixture.proxy,
+                "lomway_search_tools",
+                json!({"query": "git_status deploy-helper", "_lomway_allowed_tools": ["workbridge_read"]}),
+            )
+            .await,
+        );
+        assert!(
+            restricted
+                .iter()
+                .any(|r| r["name"] == "skill:deploy-helper")
+        );
+        assert!(!restricted.iter().any(|r| r["name"] == "action:git_status"));
+        let described = call(
+            &fixture.proxy,
+            "lomway_describe_tool",
+            json!({"name": "skill:deploy-helper"}),
+        )
+        .await;
+        let body: Value = serde_json::from_str(&described.all_text()).unwrap();
+        assert!(body["path"].as_str().unwrap().ends_with("SKILL.md"));
+        assert!(
+            body["how_to_invoke"]
+                .as_str()
+                .unwrap()
+                .contains("coding_tools_exec_command")
+        );
+        let hidden = call(
+            &fixture.proxy,
+            "lomway_describe_tool",
+            json!({"name": "action:git_status", "_lomway_allowed_tools": ["workbridge_read"]}),
+        )
+        .await;
+        assert!(hidden.is_error);
+    }
+
+    #[tokio::test]
+    async fn actions_run_validate_and_pipelines_freeze_their_plan() {
+        let fixture = workbench_gateway().await;
+        let listed = call(&fixture.proxy, "lomway_list_actions", json!({})).await;
+        assert!(
+            listed.all_text().contains("git_status"),
+            "{}",
+            listed.all_text()
+        );
+        let dry = call(
+            &fixture.proxy,
+            "lomway_run_action",
+            json!({"action": "git_status", "parameters": {"repo": "sub dir"}, "dry_run": true}),
+        )
+        .await;
+        let body: Value = serde_json::from_str(&dry.all_text()).unwrap();
+        assert_eq!(
+            body["resolved"]["args"],
+            json!(["-C", "sub dir", "status", "--short"])
+        );
+        let bad = call(
+            &fixture.proxy,
+            "lomway_run_action",
+            json!({"action": "git_status", "parameters": {"repo": "../.."}}),
+        )
+        .await;
+        assert!(bad.is_error);
+        let unknown = call(
+            &fixture.proxy,
+            "lomway_run_action",
+            json!({"action": "nope"}),
+        )
+        .await;
+        assert!(unknown.is_error && unknown.all_text().contains("git_version"));
+        let ran = call(
+            &fixture.proxy,
+            "lomway_run_action",
+            json!({"action": "git_version", "wait_ms": 20000}),
+        )
+        .await;
+        let body: Value = serde_json::from_str(&ran.all_text()).unwrap();
+        assert_eq!(body["state"], "succeeded", "{body}");
+        assert!(
+            body["steps"][0]["outcome"]["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("git version")
+        );
+        let plan = call(
+            &fixture.proxy,
+            "lomway_run_pipeline",
+            json!({"pipeline": "versions", "dry_run": true}),
+        )
+        .await;
+        let plan: Value = serde_json::from_str(&plan.all_text()).unwrap();
+        let digest = plan["plan"]["digest"].as_str().unwrap().to_string();
+        let stale = call(
+            &fixture.proxy,
+            "lomway_run_pipeline",
+            json!({"pipeline": "versions", "expected_digest": "sha256:0"}),
+        )
+        .await;
+        assert!(stale.is_error && stale.all_text().contains("PLAN_INVALIDATED"));
+        let run = call(
+            &fixture.proxy,
+            "lomway_run_pipeline",
+            json!({"pipeline": "versions", "expected_digest": digest, "wait_ms": 20000}),
+        )
+        .await;
+        let run: Value = serde_json::from_str(&run.all_text()).unwrap();
+        assert_eq!(run["state"], "succeeded", "{run}");
+        assert_eq!(run["steps"].as_array().unwrap().len(), 2);
     }
 
     async fn call(proxy: &McpProxy, tool: &str, arguments: Value) -> CallToolResult {

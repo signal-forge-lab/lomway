@@ -70,6 +70,137 @@ pub struct GatewayConfig {
     /// entries; every present entry is fully validated.
     #[serde(default)]
     pub backends: Vec<BackendEntry>,
+    /// Agent skill discovery (SKILL.md) advertised through `initialize`
+    /// instructions and capability search. Disabled by default.
+    #[serde(default, skip_serializing_if = "SkillsConfig::is_default")]
+    pub skills: SkillsConfig,
+    /// Operator-defined actions and pipelines run by the gateway itself.
+    /// Disabled by default.
+    #[serde(default, skip_serializing_if = "ActionsConfig::is_default")]
+    pub actions: ActionsConfig,
+    /// Receiving chat-host files into a confined inbox and returning small
+    /// files to the client. Disabled by default.
+    #[serde(default, skip_serializing_if = "FileTransferConfig::is_default")]
+    pub file_transfer: FileTransferConfig,
+}
+
+/// Skill discovery settings. Paths support `~` and `${ENV}` expansion.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SkillsConfig {
+    /// Scan skill directories at startup and on search.
+    pub enabled: bool,
+    /// Scan the user-level default directories (`~/.agents/skills`, the
+    /// devspace skills directory, and `<agent_dir>/skills`).
+    pub default_paths: bool,
+    /// Agent directory whose `skills` subdirectory is scanned.
+    pub agent_dir: String,
+    /// Extra skill directories or individual `.md` skill files.
+    pub paths: Vec<String>,
+    /// Project roots whose `.agents/skills` directory is scanned.
+    pub project_dirs: Vec<String>,
+    /// Workspace root of the file-reading backend (for example Coding Tools).
+    /// Skills inside it are advertised with a root-relative path.
+    pub read_root: Option<String>,
+    /// Maximum number of skills listed in the `initialize` instructions.
+    pub instructions_limit: usize,
+    /// Minimum seconds between re-scans triggered by capability search.
+    pub rescan_seconds: u64,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_paths: true,
+            agent_dir: "~/.codex".to_string(),
+            paths: Vec::new(),
+            project_dirs: Vec::new(),
+            read_root: None,
+            instructions_limit: 40,
+            rescan_seconds: 60,
+        }
+    }
+}
+
+impl SkillsConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// Gateway-owned action runner settings.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ActionsConfig {
+    /// Expose `lomway_list_actions`, `lomway_run_action`,
+    /// `lomway_action_status`, and `lomway_run_pipeline`.
+    pub enabled: bool,
+    /// Absolute path of the action definition file (kept outside the
+    /// repository). Re-read whenever it changes; no client reload needed.
+    pub definitions: Option<String>,
+    /// Every action working directory must resolve inside one of these.
+    pub allowed_roots: Vec<String>,
+    /// Optional JSON Lines audit file. Parameter values are never written.
+    pub audit_log: Option<String>,
+    /// Retained bytes per output stream (head and tail halves).
+    pub max_output_bytes: usize,
+    /// Maximum concurrently running actions and pipelines.
+    pub max_concurrent: usize,
+}
+
+impl Default for ActionsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            definitions: None,
+            allowed_roots: Vec::new(),
+            audit_log: None,
+            max_output_bytes: 256 * 1024,
+            max_concurrent: 4,
+        }
+    }
+}
+
+impl ActionsConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// File transfer settings.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FileTransferConfig {
+    /// Expose `lomway_receive_file` and `lomway_send_file`.
+    pub enabled: bool,
+    /// Received files are written only below this directory.
+    pub inbox_dir: Option<String>,
+    /// Extra directories `lomway_send_file` may read from (the inbox is
+    /// always allowed).
+    pub outbox_dirs: Vec<String>,
+    /// Per-file limit for received files.
+    pub max_receive_bytes: u64,
+    /// Per-file limit for files returned to the client.
+    pub max_send_bytes: u64,
+}
+
+impl Default for FileTransferConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            inbox_dir: None,
+            outbox_dirs: Vec::new(),
+            max_receive_bytes: 100 * 1024 * 1024,
+            max_send_bytes: 10 * 1024 * 1024,
+        }
+    }
+}
+
+impl FileTransferConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

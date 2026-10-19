@@ -1,0 +1,85 @@
+# Example Lomway action definitions (docs/WORKBENCH.md).
+# Copy to a per-user location outside the repository and point
+# `[actions] definitions` at it. `${VAR}` and `~` are expanded.
+schema_version = 1
+
+# Workbridge `workspace_review` / `summary`, as gateway actions.
+[[actions]]
+name = "workspace_review.status"
+description = "Show concise git working-tree status for a repository (read only)."
+policy = ["read_only"]
+effects = ["process.execute", "git.read"]
+program = "git"
+args = ["-C", "{repo}", "status", "--short"]
+cwd = "${USERPROFILE}/src"
+timeout_seconds = 60
+[actions.parameters]
+required = ["repo"]
+[actions.parameters.properties.repo]
+type = "string"
+format = "relative-path"
+description = "Repository directory relative to the action directory."
+
+[[actions]]
+name = "workspace_review.diffstat"
+description = "Show unstaged diff statistics for a repository (read only)."
+policy = ["read_only"]
+effects = ["process.execute", "git.read"]
+program = "git"
+args = ["-C", "{repo}", "diff", "--stat"]
+cwd = "${USERPROFILE}/src"
+timeout_seconds = 60
+[actions.parameters]
+required = ["repo"]
+[actions.parameters.properties.repo]
+type = "string"
+format = "relative-path"
+
+[[actions]]
+name = "cargo_test"
+description = "Run cargo test --locked in a Rust repository, optionally for one package."
+policy = ["workspace_modify", "long_running"]
+effects = ["process.execute", "workspace.read", "workspace.write"]
+program = "cargo"
+args = ["test", "--locked", "--manifest-path", "{repo}/Cargo.toml", "--package={package}"]
+cwd = "${USERPROFILE}/src"
+timeout_seconds = 1800
+[actions.parameters]
+required = ["repo"]
+[actions.parameters.properties.repo]
+type = "string"
+format = "relative-path"
+[actions.parameters.properties.package]
+type = "string"
+maxLength = 64
+
+[[actions]]
+name = "cargo_fmt_check"
+description = "Check Rust formatting without changing files."
+policy = ["read_only"]
+effects = ["process.execute", "workspace.read"]
+program = "cargo"
+args = ["fmt", "--all", "--manifest-path", "{repo}/Cargo.toml", "--", "--check"]
+cwd = "${USERPROFILE}/src"
+timeout_seconds = 300
+[actions.parameters]
+required = ["repo"]
+[actions.parameters.properties.repo]
+type = "string"
+format = "relative-path"
+
+[[pipelines]]
+name = "rust_verify"
+description = "Format check, then tests, for one Rust repository."
+effects = { allow = ["process.execute", "workspace.read", "workspace.write", "git.read"], deny = ["git.push", "network.write"] }
+[pipelines.parameters]
+required = ["repo"]
+[pipelines.parameters.properties.repo]
+type = "string"
+format = "relative-path"
+[[pipelines.steps]]
+action = "cargo_fmt_check"
+parameters = { repo = "{repo}" }
+[[pipelines.steps]]
+action = "cargo_test"
+parameters = { repo = "{repo}" }

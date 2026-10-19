@@ -62,6 +62,66 @@ pub fn validate(config: &GatewayConfig) -> Result<()> {
         );
         validate_backend_credentials(backend)?;
     }
+    validate_extensions(config)?;
+    Ok(())
+}
+
+/// Structural checks for the optional gateway extensions. Paths are
+/// resolved (and must exist) when the gateway is built, not here.
+fn validate_extensions(config: &GatewayConfig) -> Result<()> {
+    let skills = &config.skills;
+    ensure!(
+        skills.instructions_limit <= 200,
+        "skills.instructions_limit must be at most 200"
+    );
+    ensure!(
+        (1..=86_400).contains(&skills.rescan_seconds),
+        "skills.rescan_seconds must be between 1 and 86400"
+    );
+    let actions = &config.actions;
+    if actions.enabled {
+        ensure!(
+            actions
+                .definitions
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty()),
+            "actions.definitions is required when actions.enabled = true"
+        );
+        ensure!(
+            !actions.allowed_roots.is_empty()
+                && actions
+                    .allowed_roots
+                    .iter()
+                    .all(|root| !root.trim().is_empty()),
+            "actions.allowed_roots must list at least one directory when actions.enabled = true"
+        );
+    }
+    ensure!(
+        (1024..=16 * 1024 * 1024).contains(&actions.max_output_bytes),
+        "actions.max_output_bytes must be between 1024 and 16777216"
+    );
+    ensure!(
+        (1..=32).contains(&actions.max_concurrent),
+        "actions.max_concurrent must be between 1 and 32"
+    );
+    let transfer = &config.file_transfer;
+    if transfer.enabled {
+        ensure!(
+            transfer
+                .inbox_dir
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty()),
+            "file_transfer.inbox_dir is required when file_transfer.enabled = true"
+        );
+    }
+    ensure!(
+        (1..=4 * 1024 * 1024 * 1024).contains(&transfer.max_receive_bytes),
+        "file_transfer.max_receive_bytes must be between 1 and 4294967296"
+    );
+    ensure!(
+        (1..=20 * 1024 * 1024).contains(&transfer.max_send_bytes),
+        "file_transfer.max_send_bytes must be between 1 and 20971520"
+    );
     Ok(())
 }
 
@@ -328,6 +388,9 @@ mod tests {
             observability: Default::default(),
             policy: Default::default(),
             monitor: Default::default(),
+            skills: Default::default(),
+            actions: Default::default(),
+            file_transfer: Default::default(),
             backends,
         }
     }

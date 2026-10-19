@@ -106,8 +106,11 @@ impl Gateway {
         let registry = BackendRegistry::from_config(&public)?;
         let report = crate::backend::probe::probe_registry(&registry).await?;
         let plan = plan_tools(&report)?;
+        let workbench =
+            std::sync::Arc::new(crate::gateway::workbench::Workbench::from_config(&public));
         let deferred_catalog = crate::gateway::deferred::DeferredCatalog::from_config(&public)
-            .with_state_dir(state_dir, public.server.port);
+            .with_state_dir(state_dir, public.server.port)
+            .with_workbench(workbench.clone());
         tracing::info!(
             backends = report.healthy.len(),
             degraded = report.unavailable.len(),
@@ -122,7 +125,15 @@ impl Gateway {
         // legacy mapping runs after startup validation and re-validates the
         // public model.
         let oauth = public.server.oauth.clone();
-        let legacy = migrate::to_legacy(&public)?;
+        let mut legacy = migrate::to_legacy(&public)?;
+        // Skills, actions, and file transfer guidance reach clients through
+        // the same MCP `instructions` field as the deployment text.
+        if let Some(suffix) = workbench.instructions_suffix() {
+            legacy.proxy.instructions = Some(match legacy.proxy.instructions.take() {
+                Some(text) if !text.trim().is_empty() => format!("{text}\n\n{suffix}"),
+                _ => suffix,
+            });
+        }
         let (proxy, monitor) = build_proxy_with_monitor(legacy, public.monitor).await?;
         crate::gateway::deferred::register(proxy.mcp_proxy(), deferred_catalog, monitor.clone())
             .await?;

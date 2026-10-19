@@ -475,6 +475,9 @@ pub(super) struct ToolSource {
     pub(super) placeholder_prefix: Option<String>,
     /// Internal capability: the tool that actually reaches it.
     pub(super) via: Option<String>,
+    /// Visible to every caller regardless of its tool allowlist (agent
+    /// skills, which are instructions rather than callable tools).
+    pub(super) public: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -522,6 +525,7 @@ pub(super) fn build_index(
                 description: internal.summary.clone(),
                 placeholder_prefix: None,
                 via: Some(via.to_string()),
+                public: false,
             },
             metadata: Metadata {
                 provider_oss: internal.provider_oss.clone(),
@@ -537,6 +541,9 @@ pub(super) fn build_index(
 
 impl IndexEntry {
     pub(super) fn visible_to(&self, access: &CallerAccess) -> bool {
+        if self.source.public {
+            return true;
+        }
         if let Some(via) = &self.source.via {
             return access.tool(via);
         }
@@ -721,6 +728,18 @@ pub(super) fn invocation_guidance(entry: &IndexEntry, action: Option<&str>) -> S
         (Invocation::Deferred, _) => format!(
             "Deferred tool from the cached manifest (manifest_seen_at). Use lomway_describe_tool with name \"{}\" for the exact current schema, then lomway_call_tool.",
             source.name
+        ),
+        (Invocation::Internal, _) if source.backend == "skills" => format!(
+            "Agent skill (instructions, not a tool): call lomway_describe_tool with name \"{}\" for the SKILL.md path and how to read it, then follow it.",
+            source.name
+        ),
+        (Invocation::Internal, _) if source.backend == "actions" => format!(
+            "Gateway action: call lomway_run_action with action=\"{}\" (use dry_run=true first to see the resolved command; lomway_list_actions shows its parameters).",
+            source.name.trim_start_matches("action:")
+        ),
+        (Invocation::Internal, _) if source.backend == "pipelines" => format!(
+            "Gateway pipeline: call lomway_run_pipeline with pipeline=\"{}\" and dry_run=true to get the plan digest, then run it with expected_digest.",
+            source.name.trim_start_matches("pipeline:")
         ),
         (Invocation::Internal, _) => format!(
             "Internal capability without its own MCP tool: reach it through `{}`.",
@@ -921,6 +940,7 @@ mod tests {
                 description: tool.description,
                 placeholder_prefix: None,
                 via: None,
+                public: false,
             })
             .collect();
         for (backend, prefix) in [
@@ -938,6 +958,7 @@ mod tests {
                 description: None,
                 placeholder_prefix: Some(prefix.to_string()),
                 via: None,
+                public: false,
             });
         }
         build_index(CapabilityCatalog::builtin(), sources)
@@ -1327,6 +1348,7 @@ mod tests {
             description: None,
             placeholder_prefix: None,
             via: None,
+            public: false,
         };
         let via_of = |sources: Vec<ToolSource>| {
             build_index(&catalog, sources)
