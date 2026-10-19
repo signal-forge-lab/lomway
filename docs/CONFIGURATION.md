@@ -64,6 +64,28 @@ Defaults: `[server]` listens on `127.0.0.1:17777`; `[policy]`, `[observability]`
 
 Namespace prefix rules: non-empty lowercase stem + `_`, unique and non-overlapping across backends (one prefix may not contain another), never normalized; reserved prefixes (`proxy_`, `lomway_`, legacy `lmg_`) are rejected.
 
+### 3c. Gateway workbench (`[skills]`, `[actions]`, `[file_transfer]`)
+
+Optional, disabled by default. See [WORKBENCH.md](WORKBENCH.md) for the full reference.
+
+```toml
+[skills]
+enabled = true
+# default_paths = true, agent_dir = "~/.codex", paths = [], project_dirs = []
+# read_root = "...", instructions_limit = 40, rescan_seconds = 60
+
+[actions]
+enabled = true
+definitions = "${LOCALAPPDATA}/Lomway/actions.toml"   # outside the repository
+allowed_roots = ["${USERPROFILE}/src"]
+# audit_log = "...", max_output_bytes = 262144, max_concurrent = 4
+
+[file_transfer]
+enabled = true
+inbox_dir = "${LOCALAPPDATA}/Lomway/inbox"
+# outbox_dirs = [], max_receive_bytes = 104857600, max_send_bytes = 10485760
+```
+
 ### 3b. Backend bearer tokens (`bearer_token_env`)
 
 A backend that requires `Authorization: Bearer <token>` (for example Coding
