@@ -37,6 +37,7 @@ use crate::gateway::capability::{
 };
 use crate::gateway::manifest::{ManifestStore, endpoint_fingerprint, manifest_path};
 use crate::gateway::reconnect::MonitorHandle;
+use crate::gateway::schema_compat::portable_input_schema;
 
 const DEFAULT_LIMIT: usize = 8;
 const MAX_LIMIT: usize = 20;
@@ -496,9 +497,13 @@ pub(super) async fn register(
     // Tool descriptions are visible to every caller through tools/list,
     // including restricted PATs, so they stay generic: no configured backend
     // ids and no deployment instructions (those reach clients through the
-    // MCP `instructions` field instead).
+    // MCP `instructions` field instead). Input schemas are published in the
+    // portable subset (no type arrays, `uint` formats or `$schema`) so that
+    // strict function-calling clients such as Gemini accept them; handlers
+    // still accept `null` for optional fields.
     let search = ToolBuilder::new("search_tools")
         .description(SEARCH_TOOL_DESCRIPTION)
+        .input_schema(portable_input_schema::<SearchInput>())
         .handler(move |input: SearchInput| {
             let catalog = search_catalog.clone();
             let proxy = search_proxy.clone();
@@ -548,6 +553,7 @@ pub(super) async fn register(
     let describe_monitor = monitor.clone();
     let describe_tool = ToolBuilder::new("describe_tool")
         .description(DESCRIBE_TOOL_DESCRIPTION)
+        .input_schema(portable_input_schema::<DescribeInput>())
         .handler(move |input: DescribeInput| {
             let catalog = describe_catalog.clone();
             let proxy = describe_proxy.clone();
@@ -561,6 +567,7 @@ pub(super) async fn register(
     let call_monitor = monitor;
     let call = ToolBuilder::new("call_tool")
         .description(CALL_TOOL_DESCRIPTION)
+        .input_schema(portable_input_schema::<CallInput>())
         .handler(move |input: CallInput| {
             let catalog = call_catalog.clone();
             let mut proxy = call_proxy.clone();
@@ -1295,6 +1302,99 @@ exposure = "deferred"
                 "{name} schema leaks the hidden argument"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn meta_tool_schemas_are_portable_for_strict_clients() {
+        let (proxy, _) = gateway(false).await;
+        let tools = current_tools(&proxy).await.expect("tools");
+        for name in [
+            "lomway_search_tools",
+            "lomway_describe_tool",
+            "lomway_call_tool",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .expect("meta tool");
+            let schema = &tool.input_schema;
+            assert_eq!(
+                crate::gateway::schema_compat::non_portable_findings(schema),
+                Vec::<String>::new(),
+                "{name} schema is not portable: {schema}"
+            );
+            let text = schema.to_string();
+            assert!(!text.contains("$schema"), "{name}: {text}");
+            assert!(!text.contains("\"uint"), "{name}: {text}");
+            assert!(!text.contains("\"null\""), "{name}: {text}");
+            assert_eq!(schema["type"], "object", "{name}");
+        }
+        let search = tools
+            .iter()
+            .find(|tool| tool.name == "lomway_search_tools")
+            .unwrap();
+        assert_eq!(search.input_schema["required"], json!(["query"]));
+        assert_eq!(
+            search.input_schema["properties"]["backend"]["type"],
+            "string"
+        );
+        assert_eq!(
+            search.input_schema["properties"]["limit"]["type"],
+            "integer"
+        );
+        assert_eq!(search.input_schema["properties"]["limit"]["minimum"], 0);
+        let call_tool = tools
+            .iter()
+            .find(|tool| tool.name == "lomway_call_tool")
+            .unwrap();
+        assert_eq!(call_tool.input_schema["required"], json!(["name"]));
+        assert_eq!(
+            call_tool.input_schema["properties"]["arguments"]["type"],
+            "object"
+        );
+    }
+
+    #[tokio::test]
+    async fn optional_meta_tool_fields_still_accept_null() {
+        let (proxy, _) = gateway(false).await;
+        let with_null = results(
+            &call(
+                &proxy,
+                "lomway_search_tools",
+                json!({"query": "Serena", "backend": null, "limit": null}),
+            )
+            .await,
+        );
+        let omitted =
+            results(&call(&proxy, "lomway_search_tools", json!({"query": "Serena"})).await);
+        assert_eq!(with_null, omitted);
+        assert_eq!(with_null[0]["name"], "workbridge_run_semantic_action");
+        let limited = results(
+            &call(
+                &proxy,
+                "lomway_search_tools",
+                json!({"query": "Serena", "limit": 1}),
+            )
+            .await,
+        );
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0], with_null[0]);
+        // `arguments: null` reaches the same dispatch path as an omitted
+        // `arguments` (both fail the same way for a non-deferred name).
+        let null_args = call(
+            &proxy,
+            "lomway_call_tool",
+            json!({"name": "workbridge_read", "arguments": null}),
+        )
+        .await;
+        let no_args = call(
+            &proxy,
+            "lomway_call_tool",
+            json!({"name": "workbridge_read"}),
+        )
+        .await;
+        assert!(null_args.is_error && no_args.is_error);
+        assert_eq!(null_args.all_text(), no_args.all_text());
     }
 
     #[tokio::test]
