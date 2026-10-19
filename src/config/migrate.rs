@@ -98,6 +98,9 @@ pub fn to_public(legacy: &ProxyConfig) -> Result<GatewayConfig> {
             json_logs: legacy.observability.json_logs,
         },
         monitor: MonitorConfig::default(),
+        skills: Default::default(),
+        actions: Default::default(),
+        file_transfer: Default::default(),
         backends,
     })
 }

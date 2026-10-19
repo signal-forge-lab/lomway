@@ -78,6 +78,9 @@ mod tests {
             observability: Default::default(),
             policy: Default::default(),
             monitor: Default::default(),
+            skills: Default::default(),
+            actions: Default::default(),
+            file_transfer: Default::default(),
             backends,
         }
     }

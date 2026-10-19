@@ -10,6 +10,7 @@ pub mod policy;
 mod reconnect;
 pub mod router;
 mod schema_compat;
+mod workbench;
 
 pub use build::{Gateway, build_proxy, build_proxy_with_monitor};
 pub use manifest::{STATE_DIR_ENV_VAR, default_state_dir};
