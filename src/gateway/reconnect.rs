@@ -15,9 +15,10 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use mcp_proxy::ProxyConfig;
+use mcp_proxy::http_backend::http_backend_transport;
 use tokio::{sync::Mutex as AsyncMutex, time::Instant};
 use tower::timeout::TimeoutLayer;
-use tower_mcp::{client::HttpClientTransport, proxy::McpProxy};
+use tower_mcp::proxy::McpProxy;
 
 const RECONNECT_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 const RECONNECT_HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
@@ -428,10 +429,13 @@ async fn port_reachable(port: u16) -> bool {
 async fn replace_transport(proxy: &McpProxy, spec: &BackendReconnectSpec) -> Result<()> {
     proxy.remove_backend(&spec.name).await;
 
-    let mut transport = HttpClientTransport::new(&spec.url);
-    if let Some(token) = &spec.bearer_token {
-        transport = transport.bearer_token(token);
-    }
+    // Same construction as startup, so a rebuilt transport keeps the
+    // backend's configured request timeout instead of tower-mcp's 30 s.
+    let transport = http_backend_transport(
+        &spec.url,
+        spec.bearer_token.as_deref(),
+        spec.timeout_seconds,
+    );
 
     let result = if let Some(seconds) = spec.timeout_seconds {
         proxy

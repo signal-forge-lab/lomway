@@ -479,10 +479,11 @@ async fn build_mcp_proxy(config: &ProxyConfig) -> Result<(McpProxy, HashMap<Stri
             }
             TransportType::Http => {
                 let url = backend.url.as_deref().unwrap();
-                let mut transport = tower_mcp::client::HttpClientTransport::new(url);
-                if let Some(token) = &backend.bearer_token {
-                    transport = transport.bearer_token(token);
-                }
+                let transport = crate::http_backend::http_backend_transport(
+                    url,
+                    backend.bearer_token.as_deref(),
+                    backend.timeout.as_ref().map(|timeout| timeout.seconds),
+                );
 
                 builder = builder.backend(&backend.name, transport).await;
             }

@@ -245,10 +245,11 @@ async fn add_backend(proxy: &McpProxy, backend: &BackendConfig) -> anyhow::Resul
                 .url
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("http backend requires 'url'"))?;
-            let mut transport = tower_mcp::client::HttpClientTransport::new(url);
-            if let Some(token) = &backend.bearer_token {
-                transport = transport.bearer_token(token);
-            }
+            let transport = crate::http_backend::http_backend_transport(
+                url,
+                backend.bearer_token.as_deref(),
+                backend.timeout.as_ref().map(|timeout| timeout.seconds),
+            );
 
             if has_middleware {
                 let layer = build_backend_layer(backend);
