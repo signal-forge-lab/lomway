@@ -14,8 +14,8 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use mcp_proxy::ProxyConfig;
 use mcp_proxy::http_backend::http_backend_transport;
+use mcp_proxy::{ProxyConfig, ReconnectTracker};
 use tokio::{sync::Mutex as AsyncMutex, time::Instant};
 use tower::timeout::TimeoutLayer;
 use tower_mcp::proxy::McpProxy;
@@ -107,6 +107,11 @@ pub struct MonitorHandle {
     settings: MonitorConfig,
     proxy: McpProxy,
     reconnect_lock: Arc<AsyncMutex<()>>,
+    /// Marks transport rebuilds so a tool call that lands while the
+    /// namespace is briefly absent waits instead of seeing "Unknown tool".
+    tracker: ReconnectTracker,
+    /// Successful transport rebuilds since construction.
+    reconnects: Arc<AtomicU64>,
     /// Explicit deferred activations requested so far (tests assert that
     /// capability search never adds to this).
     activations: Arc<AtomicU64>,
@@ -117,6 +122,18 @@ impl MonitorHandle {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn activation_count(&self) -> u64 {
         self.activations.load(Ordering::SeqCst)
+    }
+
+    /// Number of successful backend transport rebuilds since construction.
+    pub fn reconnect_count(&self) -> u64 {
+        self.reconnects.load(Ordering::SeqCst)
+    }
+
+    async fn rebuild(&self, spec: &BackendReconnectSpec) -> Result<()> {
+        let _rebuilding = self.tracker.begin(&spec.name);
+        replace_transport(&self.proxy, spec).await?;
+        self.reconnects.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     fn commit_observation(&self, name: &str, state: BackendReconnectState) {
@@ -138,6 +155,8 @@ impl MonitorHandle {
             settings: MonitorConfig::default(),
             proxy,
             reconnect_lock: Arc::new(AsyncMutex::new(())),
+            tracker: ReconnectTracker::default(),
+            reconnects: Arc::new(AtomicU64::new(0)),
             activations: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -173,6 +192,8 @@ impl MonitorHandle {
             settings: MonitorConfig::default(),
             proxy,
             reconnect_lock: Arc::new(AsyncMutex::new(())),
+            tracker: ReconnectTracker::default(),
+            reconnects: Arc::new(AtomicU64::new(0)),
             activations: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -214,7 +235,7 @@ impl MonitorHandle {
             ));
         }
         if refresh {
-            if let Err(error) = replace_transport(&self.proxy, spec).await {
+            if let Err(error) = self.rebuild(spec).await {
                 let mut states = self.states.lock().expect("monitor lock poisoned");
                 states
                     .get_mut(name)
@@ -235,6 +256,9 @@ impl MonitorHandle {
         Ok(())
     }
 
+    /// Record a transport-level failure of a tool call to `name`. Callers
+    /// classify with `mcp_proxy::is_backend_transport_failure`; a backend's
+    /// own error replies (invalid params, tool errors) must not land here.
     pub fn transport_failure(&self, name: &str) {
         let mut states = self.states.lock().expect("monitor lock poisoned");
         if let Some(state) = states.get_mut(name) {
@@ -297,6 +321,7 @@ pub(super) fn spawn(
     proxy: McpProxy,
     specs: Vec<BackendReconnectSpec>,
     settings: MonitorConfig,
+    tracker: ReconnectTracker,
 ) -> MonitorHandle {
     let active = proxy.backend_namespaces();
     let states = specs
@@ -314,6 +339,8 @@ pub(super) fn spawn(
         settings,
         proxy,
         reconnect_lock: Arc::new(AsyncMutex::new(())),
+        tracker,
+        reconnects: Arc::new(AtomicU64::new(0)),
         activations: Arc::new(AtomicU64::new(0)),
     };
     if !handle.specs.is_empty() {
@@ -392,7 +419,7 @@ async fn monitor(handle: MonitorHandle) {
             }
 
             let _guard = handle.reconnect_lock.lock().await;
-            match replace_transport(&handle.proxy, spec).await {
+            match handle.rebuild(spec).await {
                 Ok(()) => {
                     let reason = if state.observed_down {
                         "backend transport reconnected after restart"

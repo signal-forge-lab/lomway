@@ -606,9 +606,9 @@ pub(super) async fn register(
                             "deferred tool returned an unexpected response type",
                         )),
                         Err(error) => {
-                            if (error.message.to_ascii_lowercase().contains("transport")
-                                || error.message.to_ascii_lowercase().contains("session")
-                                || error.message.to_ascii_lowercase().contains("connection"))
+                            // Only a transport failure, never the backend's own
+                            // error reply (invalid params, tool error).
+                            if mcp_proxy::is_backend_transport_failure(&error.message)
                                 && let Some(backend) = supervisor.as_deref()
                             {
                                 monitor.transport_failure(backend);
