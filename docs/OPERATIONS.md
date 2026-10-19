@@ -280,7 +280,7 @@ Security hardening:
 - Startup only verifies those ACLs. The one-time ACL provisioning script must
   be run separately under the Windows owner context; Swibo does not reapply
   ACLs because Set-Acl may require unavailable SeSecurityPrivilege.
-- Internal `/oauth/introspect` rejects Cloudflare-proxied public requests, while public provider introspection is disabled.
+- Internal `/oauth/introspect` answers only a direct loopback caller: the socket peer must be `127.0.0.1`/`::1`, the `Host` must be a loopback literal, and the request must carry no reverse-proxy marker (`cf-*`, `X-Forwarded-*`, `Forwarded`, `Via`, `Tailscale-*` and similar). Public tunnels such as Cloudflare Tunnel and Tailscale Funnel also connect from loopback, so they get `404`. Headers are only used to deny, never to allow. Public provider introspection is disabled.
 - Concurrent refresh-token consumption revokes the grant family on reuse and prevents reviving it through a later token save.
 
 Before cutover, validate the sidecar with synthetic state only, confirm the
@@ -298,6 +298,8 @@ During the later live cutover:
 3. Route the actual public `/auth`, `/token`, `/reg`, and
    `/token/revocation` paths to the sidecar without changing the public issuer.
    Block the internal `/oauth/introspect` at the public tunnel too.
+   Do not publish the sidecar root (`/`) through Tailscale Funnel or any
+   other tunnel; route only the public OAuth paths.
 4. Verify Lomway returns `401` with its protected-resource challenge for
    missing/invalid credentials and `403` with `insufficient_scope` for an
    otherwise valid token missing the required scope.
