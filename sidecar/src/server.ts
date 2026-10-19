@@ -1,5 +1,5 @@
 import { realpathSync } from "node:fs";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from "node:http";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type Provider from "oidc-provider";
@@ -15,6 +15,50 @@ const FAILURE_LIMIT = 5;
 const FAILURE_WINDOW_MS = 60_000;
 const REGISTRATION_LIMIT = 20;
 const REGISTRATION_WINDOW_MS = 60_000;
+
+// Only the Gateway's own loopback connection may use internal introspection.
+// Both public tunnels (Cloudflare and Tailscale Funnel) also connect from
+// loopback, so a loopback peer alone is not enough: any request that carries
+// a reverse-proxy marker or a non-loopback Host is treated as public. Headers
+// are only ever used to deny access, never to grant it.
+const LOOPBACK_PEER_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+const LOOPBACK_HOST = /^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?$/i;
+const PROXY_MARKER_HEADERS = [
+  "cf-connecting-ip",
+  "cf-connecting-ipv6",
+  "cf-ray",
+  "cf-visitor",
+  "cf-ipcountry",
+  "cdn-loop",
+  "true-client-ip",
+  "x-forwarded-for",
+  "x-forwarded-host",
+  "x-forwarded-proto",
+  "x-forwarded-port",
+  "x-real-ip",
+  "forwarded",
+  "via",
+  "tailscale-funnel-request",
+  "tailscale-user-login",
+  "tailscale-user-name",
+  "tailscale-user-profile-pic",
+  "tailscale-headers-info",
+  "tailscale-app-capabilities",
+  "tailscale-ingress-src",
+  "tailscale-ingress-target",
+] as const;
+
+export function isDirectLoopbackRequest(
+  remoteAddress: string | undefined,
+  headers: IncomingHttpHeaders,
+): boolean {
+  if (remoteAddress === undefined || !LOOPBACK_PEER_ADDRESSES.has(remoteAddress)) return false;
+  for (const name of PROXY_MARKER_HEADERS) {
+    if (headers[name] !== undefined) return false;
+  }
+  const host = headers.host;
+  return typeof host === "string" && LOOPBACK_HOST.test(host);
+}
 
 interface ConsentDetails {
   missingOIDCScope?: string[];
@@ -68,9 +112,9 @@ export function createLomwaySidecar(config: SidecarConfig): {
     }
 
     if (url.pathname === "/oauth/introspect") {
-      // The Gateway uses this endpoint directly over loopback. Cloudflare
-      // public requests must never be allowed to inspect bearer credentials.
-      if (request.headers["cf-connecting-ip"] !== undefined) {
+      // The Gateway uses this endpoint directly over loopback. Requests that
+      // arrive through any public tunnel must never inspect bearer credentials.
+      if (!isDirectLoopbackRequest(request.socket.remoteAddress, request.headers)) {
         response.statusCode = 404;
         response.end();
         return;

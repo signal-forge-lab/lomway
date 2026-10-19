@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest, type OutgoingHttpHeaders } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import type { SidecarConfig } from "../src/config.js";
 import { clientDigest } from "../src/client-tools.js";
 import { issuePat, patStorePath, revokePat } from "../src/pat.js";
-import { createLomwaySidecar, isMainEntrypoint } from "../src/server.js";
+import { createLomwaySidecar, isDirectLoopbackRequest, isMainEntrypoint } from "../src/server.js";
 
 const ISSUER = "https://issuer.example.test";
 const RESOURCE = "https://mcp.example.test/mcp";
@@ -200,6 +200,77 @@ test("public proxy requests cannot reach internal bearer introspection", async (
     const internal = await introspect(baseUrl, "synthetic-token");
     assert.deepEqual(await internal.json(), { active: false });
   });
+});
+
+test("Tailscale Funnel requests cannot reach internal bearer introspection", async () => {
+  await withSidecar(async (baseUrl) => {
+    // Shape of a request proxied by tailscaled for a Funnel peer: loopback
+    // socket, public Host, forwarding headers, and the Funnel marker.
+    const funnel = await rawIntrospect(baseUrl, {
+      host: "node.example-tailnet.ts.net",
+      "x-forwarded-for": "203.0.113.12",
+      "x-forwarded-host": "node.example-tailnet.ts.net",
+      "x-forwarded-proto": "https",
+      "tailscale-funnel-request": "?1",
+    });
+    assert.equal(funnel.status, 404);
+    assert.equal(funnel.body, "");
+
+    // Older tailscaled builds: public Host with no extra markers is still public.
+    const hostOnly = await rawIntrospect(baseUrl, { host: "node.example-tailnet.ts.net" });
+    assert.equal(hostOnly.status, 404);
+  });
+});
+
+test("Cloudflare tunnel requests cannot reach internal bearer introspection", async () => {
+  await withSidecar(async (baseUrl) => {
+    const cloudflare = await rawIntrospect(baseUrl, {
+      host: "mcp.example.test",
+      "cf-connecting-ip": "203.0.113.13",
+      "cf-ray": "0000000000000000-NRT",
+      "x-forwarded-for": "203.0.113.13",
+      "x-forwarded-proto": "https",
+      "cdn-loop": "cloudflare",
+    });
+    assert.equal(cloudflare.status, 404);
+    assert.equal(cloudflare.body, "");
+  });
+});
+
+test("any single reverse-proxy marker is enough to refuse introspection", async () => {
+  await withSidecar(async (baseUrl) => {
+    const markers: OutgoingHttpHeaders[] = [
+      { "x-forwarded-for": "127.0.0.1" },
+      { "x-forwarded-host": "127.0.0.1" },
+      { "x-real-ip": "127.0.0.1" },
+      { forwarded: "for=127.0.0.1" },
+      { via: "1.1 proxy" },
+      { "tailscale-user-login": "someone@example.test" },
+      { "cf-connecting-ip": "127.0.0.1" },
+    ];
+    for (const marker of markers) {
+      const response = await rawIntrospect(baseUrl, marker);
+      assert.equal(response.status, 404, JSON.stringify(marker));
+    }
+    const plain = await rawIntrospect(baseUrl, {});
+    assert.equal(plain.status, 200);
+    assert.deepEqual(JSON.parse(plain.body), { active: false });
+  });
+});
+
+test("loopback introspection trust is decided by the socket peer, not by headers", () => {
+  const local = { host: "127.0.0.1:7677" };
+  assert.equal(isDirectLoopbackRequest("127.0.0.1", local), true);
+  assert.equal(isDirectLoopbackRequest("::1", { host: "[::1]:7677" }), true);
+  assert.equal(isDirectLoopbackRequest("::ffff:127.0.0.1", { host: "localhost:7677" }), true);
+  for (const peer of ["203.0.113.5", "192.168.0.100", "100.64.0.7", "fd7a:115c:a1e0::1", "127.0.0.2", undefined]) {
+    assert.equal(isDirectLoopbackRequest(peer, local), false, String(peer));
+  }
+  // Claiming loopback in headers never helps a non-loopback peer.
+  assert.equal(isDirectLoopbackRequest("203.0.113.5", { host: "127.0.0.1:7677", "x-forwarded-for": "127.0.0.1" }), false);
+  assert.equal(isDirectLoopbackRequest("127.0.0.1", {}), false);
+  assert.equal(isDirectLoopbackRequest("127.0.0.1", { host: "mcp.example.test" }), false);
+  assert.equal(isDirectLoopbackRequest("127.0.0.1", { host: "127.0.0.1.example.test" }), false);
 });
 
 test("limits oversized and repeated failed owner-password submissions", async () => {
@@ -503,6 +574,38 @@ async function introspect(baseUrl: string, token: string): Promise<Response> {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ token }),
+  });
+}
+
+// node:http lets the test set Host and proxy headers exactly as a tunnel would.
+async function rawIntrospect(
+  baseUrl: string,
+  headers: OutgoingHttpHeaders,
+): Promise<{ status: number; body: string }> {
+  const url = new URL("/oauth/introspect", baseUrl);
+  const body = new URLSearchParams({ token: "synthetic-token" }).toString();
+  return new Promise((resolve, reject) => {
+    const outgoing = httpRequest(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          "content-length": Buffer.byteLength(body),
+          ...headers,
+        },
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () =>
+          resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }),
+        );
+        response.on("error", reject);
+      },
+    );
+    outgoing.on("error", reject);
+    outgoing.end(body);
   });
 }
 

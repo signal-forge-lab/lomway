@@ -270,7 +270,7 @@ OAuth lifetime policy:
 - 起動時に行うのは既存ACLの検査だけです。ACLの初期設定は
   `scripts/private-oauth-state-acl.ps1` をWindowsの所有者権限で別途実行します。
   Swiboの起動処理からSet-Aclを再実行しません。
-- 内部用 `/oauth/introspect` はCloudflare経由の公開リクエストを拒否し、公開版provider introspectionは無効化します。
+- 内部用 `/oauth/introspect` はloopbackから直接呼ばれた場合だけ応答します。ソケットの接続元が `127.0.0.1`/`::1`、`Host` がloopbackのリテラルで、reverse proxyの印（`cf-*`、`X-Forwarded-*`、`Forwarded`、`Via`、`Tailscale-*` など）がないことが条件です。Cloudflare TunnelやTailscale Funnelもloopbackから接続するため、これらの経由は `404` になります。ヘッダーは拒否にだけ使い、許可には使いません。公開版provider introspectionは無効化します。
 - 並行refreshの再利用を検知するとGrant系列を失効させ、その後の保存でも復活できないようにします。
 
 cutover前はsynthetic stateだけでsidecarを検証し、公開issuerとendpoint mappingが安定して
@@ -285,6 +285,7 @@ owner credential、token、state、SOPS materialはrepository外に置きます�
 3. 公開issuerを変更せず、実際の `/auth`、`/token`、`/reg`、
    `/token/revocation` をsidecarへrouteします。
    内部用 `/oauth/introspect` は公開トンネル側でも遮断します。
+   sidecarのルート（`/`）をTailscale Funnelなどのトンネルで丸ごと公開せず、公開するOAuthのパスだけをrouteします。
 4. Lomwayがmissing/invalid credentialにprotected-resource challenge付き`401`、required scope不足の
    有効tokenに`insufficient_scope`付き`403`を返すことを確認します。
 5. 非Workbridge backendへの認証済みcallを確認し、その後real clientのrefreshとTunnelをlive検証します。
