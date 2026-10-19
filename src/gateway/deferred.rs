@@ -888,6 +888,65 @@ action = "git_version"
     }
 
     #[tokio::test]
+    async fn workbench_tool_schemas_are_portable_for_strict_clients() {
+        let fixture = workbench_gateway().await;
+        let tools = current_tools(&fixture.proxy).await.unwrap();
+        let find = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} missing"))
+                .input_schema
+                .clone()
+        };
+        for name in [
+            "lomway_list_actions",
+            "lomway_run_action",
+            "lomway_action_status",
+            "lomway_run_pipeline",
+            "lomway_receive_file",
+            "lomway_send_file",
+        ] {
+            let schema = find(name);
+            assert_eq!(
+                crate::gateway::schema_compat::non_portable_findings(&schema),
+                Vec::<String>::new(),
+                "{name} schema is not portable: {schema}"
+            );
+            let text = schema.to_string();
+            for needle in ["$schema", "$ref", "$defs", "\"uint", "\"null\""] {
+                assert!(!text.contains(needle), "{name} has {needle}: {text}");
+            }
+            assert_eq!(schema["type"], "object", "{name}");
+        }
+        assert_eq!(find("lomway_run_action")["required"], json!(["action"]));
+        let receive = find("lomway_receive_file");
+        assert_eq!(receive["required"], json!(["file"]));
+        assert_eq!(receive["properties"]["file"]["type"], "object");
+        assert_eq!(
+            receive["properties"]["file"]["properties"]["download_url"]["type"],
+            "string"
+        );
+        let send = find("lomway_send_file");
+        assert_eq!(send["properties"]["outbox"]["type"], "integer");
+        assert_eq!(send["properties"]["outbox"]["minimum"], 0);
+        // Optional fields still accept null after the schema rewrite.
+        let result = call(
+            &fixture.proxy,
+            "lomway_run_action",
+            json!({
+                "action": "git_version",
+                "dry_run": true,
+                "parameters": null,
+                "working_directory": null,
+                "wait_ms": null
+            }),
+        )
+        .await;
+        assert!(!result.is_error, "{result:?}");
+    }
+
+    #[tokio::test]
     async fn skills_and_actions_are_searchable_and_describable() {
         let fixture = workbench_gateway().await;
         let found = results(

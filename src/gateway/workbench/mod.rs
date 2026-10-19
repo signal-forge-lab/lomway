@@ -33,6 +33,7 @@ use tower_mcp::{CallToolResult, Tool, ToolBuilder};
 
 use crate::config::model::GatewayConfig;
 use crate::gateway::capability::{IndexEntry, Invocation, Metadata, Status, ToolSource};
+use crate::gateway::schema_compat::portable_input_schema;
 
 use self::actions::DefinitionStore;
 use self::runner::{AuditLog, RunRegistry};
@@ -326,6 +327,7 @@ impl Workbench {
         let list_state = self.clone();
         let list = ToolBuilder::new("list_actions")
             .description("List the operator-registered gateway actions and pipelines with their parameter schemas, policy, and effects. New definitions appear here without reconnecting.")
+            .input_schema(portable_input_schema::<EmptyInput>())
             .read_only()
             .handler(move |_: EmptyInput| {
                 let state = list_state.clone();
@@ -344,6 +346,7 @@ impl Workbench {
         let run_state = self.clone();
         let run = ToolBuilder::new("run_action")
             .description("Resolve, validate, and run one registered gateway action. The gateway owns the concrete command (argv, no shell), working directory, timeout, and environment; parameters are validated against the action's schema. Use dry_run=true to see the resolved command without running it. Returns the result, or a run_id to poll with lomway_action_status when the action is still running. Unknown actions return the current catalog.")
+            .input_schema(portable_input_schema::<RunActionInput>())
             .handler(move |input: RunActionInput| {
                 let state = run_state.clone();
                 async move { state.run_action(input).await }
@@ -353,6 +356,7 @@ impl Workbench {
         let status_state = self.clone();
         let status = ToolBuilder::new("action_status")
             .description("Wait briefly for a gateway action or pipeline run and return its state, exit codes, and bounded stdout/stderr.")
+            .input_schema(portable_input_schema::<StatusInput>())
             .read_only()
             .handler(move |input: StatusInput| {
                 let state = status_state.clone();
@@ -373,6 +377,7 @@ impl Workbench {
         let pipeline_state = self.clone();
         let pipeline = ToolBuilder::new("run_pipeline")
             .description("Plan or run a registered multi-step gateway pipeline. Every step is a registered action; the pipeline's effect policy is enforced (EFFECT_DENIED). dry_run=true returns the resolved plan and its digest; pass that digest as expected_digest to run exactly that plan (a changed plan fails with PLAN_INVALIDATED). Steps run in order and stop at the first failure unless marked continue_on_error.")
+            .input_schema(portable_input_schema::<RunPipelineInput>())
             .handler(move |input: RunPipelineInput| {
                 let state = pipeline_state.clone();
                 async move { state.run_pipeline(input).await }
@@ -523,6 +528,7 @@ impl Workbench {
         let receive_state = self.clone();
         let receive = ToolBuilder::new("receive_file")
             .description("Save one file attached to or generated in the chat onto this machine. Pass the host-supplied native file value as `file` and optionally a relative destination `path`; the file is written below the gateway inbox only, never overwriting an existing file. Returns the inbox-relative path, the absolute path for use with other tools, the size, and SHA-256. Arbitrary URLs, absolute paths, traversal, and links are rejected.")
+            .input_schema(portable_input_schema::<ReceiveInput>())
             .handler(move |input: ReceiveInput| {
                 let state = receive_state.clone();
                 async move {
@@ -558,6 +564,7 @@ impl Workbench {
         let send_state = self.clone();
         let send = ToolBuilder::new("send_file")
             .description("Return one existing small file from the gateway inbox (or a configured outbox, by 1-based index) to the client as an embedded resource. Links, traversal, and files over the configured size limit are rejected.")
+            .input_schema(portable_input_schema::<SendInput>())
             .read_only()
             .handler(move |input: SendInput| {
                 let state = send_state.clone();

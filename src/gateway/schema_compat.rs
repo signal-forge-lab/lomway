@@ -21,9 +21,84 @@ const PORTABLE_NUMBER_FORMATS: [&str; 2] = ["float", "double"];
 
 /// Generate the published input schema for `T` in the portable subset.
 pub(super) fn portable_input_schema<T: JsonSchema>() -> Value {
-    let schema = serde_json::to_value(schema_for!(T))
+    let mut schema = serde_json::to_value(schema_for!(T))
         .unwrap_or_else(|_| serde_json::json!({ "type": "object" }));
+    inline_local_refs(&mut schema);
     portable_schema(schema)
+}
+
+/// Deepest chain of nested local references that is inlined. A deeper (or
+/// recursive) chain keeps its remaining `$ref`s and the definitions block.
+const MAX_REF_DEPTH: usize = 16;
+
+/// Replace `{"$ref": "#/$defs/X", ...}` with the definition of `X` (sibling
+/// keywords such as `description` win), so clients that do not resolve
+/// references (Gemini's OpenAPI subset) still see the nested fields. The
+/// `$defs`/`definitions` block is dropped once nothing refers to it.
+fn inline_local_refs(schema: &mut Value) {
+    let Value::Object(root) = schema else {
+        return;
+    };
+    let mut defs = Map::new();
+    for keyword in ["$defs", "definitions"] {
+        if let Some(Value::Object(map)) = root.get(keyword) {
+            for (name, def) in map {
+                defs.insert(format!("#/{keyword}/{name}"), def.clone());
+            }
+        }
+    }
+    if defs.is_empty() {
+        return;
+    }
+    let mut remaining = false;
+    for (key, child) in root.iter_mut() {
+        if key != "$defs" && key != "definitions" {
+            inline_value(child, &defs, 0, &mut remaining);
+        }
+    }
+    if !remaining {
+        root.remove("$defs");
+        root.remove("definitions");
+    }
+}
+
+fn inline_value(value: &mut Value, defs: &Map<String, Value>, depth: usize, remaining: &mut bool) {
+    match value {
+        Value::Object(object) => {
+            let target = object
+                .get("$ref")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if let Some(target) = target
+                && let Some(Value::Object(def)) = defs.get(&target)
+            {
+                if depth >= MAX_REF_DEPTH {
+                    *remaining = true;
+                    return;
+                }
+                object.remove("$ref");
+                for (key, child) in def {
+                    object.entry(key.clone()).or_insert_with(|| child.clone());
+                }
+                for child in object.values_mut() {
+                    inline_value(child, defs, depth + 1, remaining);
+                }
+                return;
+            }
+            if object.contains_key("$ref") {
+                *remaining = true;
+            }
+            for child in object.values_mut() {
+                inline_value(child, defs, depth, remaining);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                inline_value(child, defs, depth, remaining);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Rewrite one JSON schema into the portable subset.
@@ -308,6 +383,29 @@ mod tests {
         assert_eq!(p["h"], json!({}));
         assert_eq!(p["default"], json!({"type": "boolean"}));
         assert_eq!(schema["$defs"]["X"], json!({"type": "object"}));
+    }
+
+    #[test]
+    fn local_references_are_inlined_for_generated_schemas() {
+        #[derive(Debug, serde::Deserialize, JsonSchema)]
+        #[allow(dead_code)]
+        struct Outer {
+            /// The nested value.
+            inner: Nested,
+            /// Optional nested value.
+            maybe: Option<Nested>,
+        }
+        let schema = portable_input_schema::<Outer>();
+        let text = schema.to_string();
+        assert!(!text.contains("$ref"), "{text}");
+        assert!(!text.contains("$defs"), "{text}");
+        assert_eq!(non_portable_findings(&schema), Vec::<String>::new());
+        let inner = &schema["properties"]["inner"];
+        assert_eq!(inner["type"], "object");
+        assert_eq!(inner["description"], "The nested value.");
+        assert_eq!(inner["properties"]["flag"]["type"], "boolean");
+        assert_eq!(schema["properties"]["maybe"]["type"], "object");
+        assert_eq!(schema["required"], json!(["inner"]));
     }
 
     #[test]
