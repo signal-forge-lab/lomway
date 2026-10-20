@@ -322,12 +322,13 @@ export function createLomwaySidecar(config: SidecarConfig): {
         return;
       }
       loginFailures = [];
-      await provider.interactionFinished(
+      const resumeTo = await provider.interactionResult(
         request,
         response,
         { login: { accountId: "owner" } },
         { mergeWithLastSubmission: false },
       );
+      sendContinuePage(response, resumeTo);
       return;
     }
     if (interaction.prompt.name !== "consent") {
@@ -368,12 +369,13 @@ export function createLomwaySidecar(config: SidecarConfig): {
       }
     }
     const grantId = await grant.save();
-    await provider.interactionFinished(
+    const resumeTo = await provider.interactionResult(
       request,
       response,
       { consent: { grantId } },
       { mergeWithLastSubmission: true },
     );
+    sendContinuePage(response, resumeTo);
   }
 
   return {
@@ -417,6 +419,29 @@ export function createLomwaySidecar(config: SidecarConfig): {
       }
     },
   };
+}
+
+
+/**
+ * Finish an interaction POST with a 200 page that navigates on by itself
+ * instead of a 30x. Chromium checks CSP form-action against EVERY hop of a
+ * form submission's redirect chain. Gemini's redirect_uri is Google's relay
+ * (oauth-redirect.googleusercontent.com), which redirects again to another
+ * Google origin, so a 303 chain started by the Approve POST was cancelled by
+ * the browser after the code had been issued and Gemini never redeemed it.
+ * A meta refresh is a fresh navigation, not a form submission, so form-action
+ * no longer applies to the provider resume -> client redirect chain.
+ */
+export function sendContinuePage(response: ServerResponse, resumeTo: string): void {
+  const target = escapeHtml(resumeTo);
+  response.statusCode = 200;
+  response.setHeader("cache-control", "no-store");
+  response.setHeader("x-frame-options", "DENY");
+  response.setHeader("referrer-policy", "no-referrer");
+  response.setHeader("content-security-policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+  response.setHeader("content-type", "text/html; charset=utf-8");
+  response.end('<!doctype html><html><head><meta http-equiv="refresh" content="0;url=' + target + '"></head>' +
+    '<body><p>Continuing&hellip; <a id="continue" href="' + target + '">Continue</a></p></body></html>');
 }
 
 function escapeHtml(value: string): string {
