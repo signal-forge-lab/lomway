@@ -286,6 +286,17 @@ const TIMEOUT_LAYER_MESSAGE: &str = "request timed out";
 /// counted: tower-mcp's HTTP client reports failed background requests as a
 /// -32000 frame, and -32005 is session-not-found. A tool result with
 /// `isError: true` is a successful response and never reaches this check.
+///
+/// A JSON-RPC error whose message is exactly "Session not found" (any case)
+/// is also a transport failure whatever its code: the Python MCP SDK's
+/// streamable HTTP server answers a request for a session it no longer knows
+/// (e.g. after a restart) with HTTP 404 and `-32600 "Session not found"`.
+/// tower-mcp forwards that JSON-RPC body and drops the 404 status, so the
+/// message is the only signal left here. Without this the backend keeps its
+/// stale session id forever. (A 404 without a JSON-RPC body already arrives
+/// as a -32000 frame or `Session expired` and is counted above.) Tool
+/// failures that merely mention a session (e.g. -32603 "tool failed: unknown
+/// session") stay application errors.
 pub fn is_backend_transport_failure(message: &str) -> bool {
     if message == TIMEOUT_LAYER_MESSAGE {
         return true;
@@ -296,9 +307,24 @@ pub fn is_backend_transport_failure(message: &str) -> bool {
     match rest.strip_prefix("JSON-RPC error: ") {
         // Transport, SessionExpired, Serialization, SSE limit, Internal.
         None => true,
-        Some(debug) => jsonrpc_debug_code(debug)
-            .is_none_or(|code| (-32099..=-32000).contains(&code)),
+        Some(debug) => {
+            jsonrpc_debug_code(debug).is_none_or(|code| (-32099..=-32000).contains(&code))
+                || jsonrpc_debug_message(debug)
+                    .is_some_and(|text| text.trim().eq_ignore_ascii_case(SESSION_NOT_FOUND))
+        }
     }
+}
+
+/// Message a backend uses when it no longer knows the request's session id.
+const SESSION_NOT_FOUND: &str = "session not found";
+
+/// Message from `JsonRpcError`'s derived Debug output
+/// (`JsonRpcError { code: -32600, message: "Session not found", data: None }`).
+fn jsonrpc_debug_message(debug: &str) -> Option<&str> {
+    let start = debug.find(", message: \"")? + ", message: \"".len();
+    let tail = &debug[start..];
+    let end = tail.rfind("\", data: ")?;
+    Some(&tail[..end])
 }
 
 /// Code from `JsonRpcError`'s derived Debug output

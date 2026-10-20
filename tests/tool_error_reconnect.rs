@@ -259,6 +259,10 @@ fn only_transport_errors_are_classified_as_transport_failures() {
         "Backend error: Session expired",
         "Backend error: JSON-RPC error: JsonRpcError { code: -32000, message: \"server returned HTTP 500\", data: None }",
         "Backend error: JSON-RPC error: JsonRpcError { code: -32005, message: \"session not found\", data: None }",
+        // Python MCP SDK after a restart: HTTP 404 + -32600 "Session not found".
+        "Backend error: JSON-RPC error: JsonRpcError { code: -32600, message: \"Session not found\", data: None }",
+        "Backend error: JSON-RPC error: JsonRpcError { code: -32600, message: \"SESSION NOT FOUND\", data: None }",
+        "Backend error: JSON-RPC error: JsonRpcError { code: -32603, message: \"session not found\", data: Some(Object {}) }",
         "request timed out",
     ] {
         assert!(is_backend_transport_failure(message), "{message}");
@@ -267,11 +271,100 @@ fn only_transport_errors_are_classified_as_transport_failures() {
         "Backend error: JSON-RPC error: JsonRpcError { code: -32602, message: \"invalid params\", data: None }",
         "Backend error: JSON-RPC error: JsonRpcError { code: -32601, message: \"no such method\", data: None }",
         "Backend error: JSON-RPC error: JsonRpcError { code: -32603, message: \"tool failed: unknown session\", data: None }",
+        "Backend error: JSON-RPC error: JsonRpcError { code: -32603, message: \"tool failed: session not found\", data: None }",
+        "Backend error: JSON-RPC error: JsonRpcError { code: -32600, message: \"Invalid request\", data: None }",
+        "Backend error: JSON-RPC error: JsonRpcError { code: -32602, message: \"Session not found in workspace\", data: None }",
+        "Session not found",
         "Unknown tool: alpha_echo",
         "Backend 'alpha' is reconnecting; the tool call was not sent to it. Retry shortly.",
     ] {
         assert!(!is_backend_transport_failure(message), "{message}");
     }
+}
+
+/// A Python MCP SDK streamable HTTP server (e.g. Praxiom) that restarted:
+/// while `lost` is set, every request that carries a session id gets HTTP 404
+/// with `-32600 "Session not found"` (the SDK's exact reply). The first
+/// request without a session id (a fresh `initialize`) clears it.
+async fn spawn_restarting_backend(
+    lost: Arc<AtomicBool>,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let echo = ToolBuilder::new("echo")
+        .description("Echo the text")
+        .handler(|input: EchoInput| async move { Ok(CallToolResult::text(input.text)) })
+        .build();
+    let router = McpRouter::new()
+        .server_info("fixture-restart", "1.0.0")
+        .tool(echo);
+    let app = HttpTransport::new(router)
+        .into_router_at("/mcp")
+        .layer(middleware::from_fn(move |request: Request, next: Next| {
+            let lost = lost.clone();
+            async move {
+                if lost.load(Ordering::SeqCst) {
+                    if request.headers().contains_key("mcp-session-id") {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            [(header::CONTENT_TYPE, "application/json")],
+                            r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Session not found"}}"#,
+                        )
+                            .into_response();
+                    }
+                    lost.store(false, Ordering::SeqCst);
+                }
+                next.run(request).await
+            }
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind backend");
+    let addr = listener.local_addr().expect("backend address");
+    let task = tokio::spawn(async move {
+        serve(listener, app).await.expect("serve backend");
+    });
+    (addr, task)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_not_found_after_backend_restart_rebuilds_the_transport() {
+    let lost = Arc::new(AtomicBool::new(false));
+    let (backend, backend_task) = spawn_restarting_backend(lost.clone()).await;
+    let (gateway, monitor, gateway_task) = serve_gateway(backend).await;
+    let client = connect_client(gateway).await;
+
+    let ok = client
+        .call_tool("alpha_echo", serde_json::json!({ "text": "before" }))
+        .await
+        .expect("call before the restart");
+    assert_eq!(ok.all_text(), "before");
+
+    // The backend restarts and forgets the gateway's session.
+    lost.store(true, Ordering::SeqCst);
+    let error = call_fails(&client, "alpha_echo", serde_json::json!({ "text": "x" })).await;
+    assert!(error.contains("Session not found"), "{error}");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Ok(result) = client
+            .call_tool("alpha_echo", serde_json::json!({ "text": "back" }))
+            .await
+            && !result.is_error
+        {
+            assert_eq!(result.all_text(), "back");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "-32600 Session not found must rebuild the transport (reconnects = {})",
+            monitor.reconnect_count()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(monitor.reconnect_count() >= 1);
+    assert!(!lost.load(Ordering::SeqCst), "the gateway re-initialized");
+
+    gateway_task.abort();
+    backend_task.abort();
 }
 
 // --- "Unknown tool" while a transport is being rebuilt ---------------------
