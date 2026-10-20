@@ -389,8 +389,7 @@ test("authenticates the owner and resumes the provider-managed interaction", asy
       body: new URLSearchParams({ password: OWNER_PASSWORD }),
       redirect: "manual",
     });
-    assert.equal(accepted.status, 303);
-    assert.match(requiredLocation(accepted), /^https:\/\/issuer\.example\.test\/auth\//);
+    assert.match((await continueLocation(accepted)), /^https:\/\/issuer\.example\.test\/auth\//);
   });
 });
 
@@ -406,7 +405,7 @@ test("requires explicit informed consent after owner login", async () => {
       body: new URLSearchParams({ password: OWNER_PASSWORD }),
       redirect: "manual",
     });
-    assert.equal(signedIn.status, 303);
+    const signedInNext = await continueLocation(signedIn);
     const jar = new Map<string, string>();
     function mergeCookies(header: string): void {
       for (const part of header.split("; ").filter(Boolean)) {
@@ -417,7 +416,7 @@ test("requires explicit informed consent after owner login", async () => {
     mergeCookies(first.cookies);
     mergeCookies(responseCookies(signedIn));
     const currentCookie = (): string => [...jar.values()].join("; ");
-    let next = localUrl(baseUrl, requiredLocation(signedIn));
+    let next = localUrl(baseUrl, signedInNext);
     let consentUrl: string | undefined;
     let consentBody = "";
     let consentCsp = "";
@@ -456,7 +455,7 @@ test("requires explicit informed consent after owner login", async () => {
       body: new URLSearchParams({ decision: "approve" }),
       redirect: "manual",
     });
-    assert.equal(approved.status, 303);
+    assert.match((await continueLocation(approved)), /^https:\/\/issuer\.example\.test\/auth\//);
   });
 });
 
@@ -480,9 +479,9 @@ test("authorization code exchange, refresh rotation and replay revocation work e
       body: new URLSearchParams({ password: OWNER_PASSWORD }),
       redirect: "manual",
     });
-    assert.equal(signedIn.status, 303);
+    const signedInNext = await continueLocation(signedIn);
     merge(responseCookies(signedIn));
-    let next = localUrl(baseUrl, requiredLocation(signedIn));
+    let next = localUrl(baseUrl, signedInNext);
     let consentUrl: string | undefined;
     for (let hop = 0; hop < 8; hop++) {
       const response = await fetch(next, { headers: { cookie: cookie() }, redirect: "manual" });
@@ -501,9 +500,9 @@ test("authorization code exchange, refresh rotation and replay revocation work e
       body: new URLSearchParams({ decision: "approve" }),
       redirect: "manual",
     });
-    assert.equal(approved.status, 303);
+    const approvedNext = await continueLocation(approved);
     merge(responseCookies(approved));
-    next = localUrl(baseUrl, requiredLocation(approved));
+    next = localUrl(baseUrl, approvedNext);
     let finalRedirect: URL | undefined;
     for (let hop = 0; hop < 8; hop++) {
       const response = await fetch(next, { headers: { cookie: cookie() }, redirect: "manual" });
@@ -607,6 +606,21 @@ async function rawIntrospect(
     outgoing.on("error", reject);
     outgoing.end(body);
   });
+}
+
+// Interaction POSTs answer 200 with a meta refresh (no 30x), so a
+// cross-origin redirect chain is never attributed to the form submission.
+async function continueLocation(response: Response): Promise<string> {
+  assert.equal(response.status, 200, "interaction POST must not redirect");
+  assert.equal(response.headers.get("location"), null);
+  assert.match(response.headers.get("cache-control") ?? "", /no-store/);
+  assert.match(response.headers.get("content-security-policy") ?? "", /default-src 'none'/);
+  const html = await response.text();
+  const meta = /<meta http-equiv="refresh" content="0;url=([^"]+)">/.exec(html);
+  assert.ok(meta && meta[1], "continue page must carry a meta refresh");
+  const link = /<a id="continue" href="([^"]+)">/.exec(html);
+  assert.equal(link?.[1], meta[1]);
+  return meta[1].replaceAll("&amp;", "&");
 }
 
 function requiredLocation(response: Response): string {
