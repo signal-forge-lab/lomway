@@ -22,6 +22,16 @@
 
 schema_version = 1
 
+# Optional aliases for dynamically discovered skills. A declaration is only
+# used when that skill exists; it does not expose or install a missing skill.
+[[capability]]
+tool = "skill:codebase-design"
+domain = "skills"
+aliases = [
+  "既存コードの設計", "モジュール設計", "コード設計", "保守性改善",
+  "インターフェース設計", "設計の見直し",
+]
+
 # ---------------------------------------------------------------------------
 # Coding tools (workspace files, text search, shell, git)
 # ---------------------------------------------------------------------------

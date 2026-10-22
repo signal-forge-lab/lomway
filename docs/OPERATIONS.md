@@ -15,6 +15,21 @@ stop:  Secure MCP Tunnel -> gateway -> OAuth sidecar
 ```
 
 The gateway never starts/stops backend MCP processes.
+
+### Token-cutover script provenance (2026-10-22 snapshot)
+
+The reviewed backend-token cutover scripts are present in the operator-owned
+deployment area, but are absent from the current public `main` tree. They
+are operational artifacts, not proof of a synchronized version-controlled
+source. In particular, a previously reviewed commit in another lineage must
+not be restored to `main` or redeployed by hash alone. Verify the actual
+deployed script, invocation parameters, authentication policy, rollback
+expectations, and ownership before changing it.
+
+Keep workstation-specific instance definitions, backups, logs, and resolved
+credentials outside the public repository; use the external SOPS source for
+secrets. A portable public implementation and its regression tests must be
+reviewed separately before making it part of the repository.
 The OAuth sidecar binds directly to `127.0.0.1:7677`; no forwarding process is
 part of the steady-state topology.
 

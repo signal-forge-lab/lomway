@@ -32,7 +32,7 @@ use tower_mcp::schemars::JsonSchema;
 use tower_mcp::{CallToolResult, Tool, ToolBuilder};
 
 use crate::config::model::GatewayConfig;
-use crate::gateway::capability::{IndexEntry, Invocation, Metadata, Status, ToolSource};
+use crate::gateway::capability::{CapabilityCatalog, IndexEntry, Invocation, Status, ToolSource};
 use crate::gateway::schema_compat::portable_input_schema;
 
 use self::actions::DefinitionStore;
@@ -615,6 +615,18 @@ fn entry(
     public: bool,
     aliases: Vec<String>,
 ) -> IndexEntry {
+    // Dynamic skills/actions/pipelines use the same curated metadata as
+    // direct and deferred tools, without special-case query rewrites.
+    let mut metadata = CapabilityCatalog::builtin().metadata_for(Some(&name), backend);
+    if metadata.domain.is_none() {
+        metadata.domain = Some(backend.to_string());
+    }
+    for alias in aliases {
+        if !metadata.aliases.contains(&alias) {
+            metadata.aliases.push(alias);
+        }
+    }
+    metadata.tool_declared = true;
     IndexEntry {
         source: ToolSource {
             name,
@@ -627,13 +639,7 @@ fn entry(
             via: via.map(str::to_string),
             public,
         },
-        metadata: Metadata {
-            provider_oss: None,
-            domain: Some(backend.to_string()),
-            aliases,
-            actions: Vec::new(),
-            tool_declared: true,
-        },
+        metadata,
     }
 }
 
@@ -716,4 +722,30 @@ struct SendInput {
     /// 1-based index of a configured outbox directory; omit for the inbox.
     #[serde(default)]
     outbox: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gateway::capability::{CallerAccess, search};
+
+    #[test]
+    fn dynamic_skill_supports_curated_japanese_intent_aliases() {
+        let entry = entry(
+            "skill:codebase-design".to_string(),
+            "skills",
+            "Design deep modules with small interfaces".to_string(),
+            None,
+            true,
+            vec!["codebase-design".to_string(), "スキル".to_string()],
+        );
+        for query in ["既存コードの設計", "モジュール設計", "codebase design"] {
+            let found = search(&[entry.clone()], query, None, &CallerAccess::default(), 5);
+            assert_eq!(
+                found.first().map(|item| item.name.as_str()),
+                Some("skill:codebase-design"),
+                "{query}"
+            );
+        }
+    }
 }

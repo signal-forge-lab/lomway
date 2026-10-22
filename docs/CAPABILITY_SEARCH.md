@@ -62,6 +62,12 @@ listed candidate is reported. A profile that exposes none of them never
 offers the capability, so search cannot route a caller to a tool that does
 not exist. Tool-keyed declarations likewise only annotate tools that are
 listed. The file is public: names, aliases, and summaries only.
+Dynamic entries such as discovered `skill:<name>` also merge these
+declarations into their search metadata. For example, add a `[[capability]]`
+with `tool = "skill:codebase-design"` and localized `aliases` to make an
+installed skill discoverable by Japanese intent. This annotates only the
+installed skill; it does not install a missing skill or change its invocation
+permissions. Matching is lexical, not machine translation or semantic search.
 Validation covers every field (including `[[internal]]` `domain`) and
 rejects URLs, loopback/private/link-local/CGNAT IPv4 and IPv6 addresses,
 `host:port` bindings, absolute POSIX paths, `~/` paths, Windows and UNC

@@ -10,8 +10,8 @@ secrets/
 
 # Machine-local configuration
 config/proxy.local.toml
-config/*.local.toml
-config/*.local.json
+config/*.local.toml*
+config/*.local.json*
 local-config.json
 
 # Runtime state / generated data
