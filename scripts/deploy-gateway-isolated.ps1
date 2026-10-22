@@ -5,8 +5,8 @@ param(
 )
 
 # Gateway-only cutover. No attempt is made to replace the running binary used
-# by lomway-desktop-local (:17778). The management plane (:7680/:7681) and
-# Swibo/OAuth/tunnel processes are not stopped.
+# by lomway-desktop-local (:17778). The independent Swibo management plane
+# (:17991) and OAuth/tunnel processes are not stopped.
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $runtime = Join-Path $repo 'runtime'
@@ -99,16 +99,21 @@ try {
     if (!(Test-Path -LiteralPath $sourcePath -PathType Leaf)) { throw 'Staged release binary missing' }
     if (!(Test-Path -LiteralPath $config -PathType Leaf)) { throw 'Gateway config missing' }
 
-    # Check that the management plane is independent, not a second Lomway
-    # process that would disappear during a Gateway-only switch.
-    $wb = Get-NetTCPConnection -LocalPort 7680 -State Listen -ErrorAction Stop |
+    # Swibo, not the retired Workbridge management port, now owns lifecycle.
+    # Verify its HTTP identity and independent PID before any gateway stop.
+    $supervisor = Get-NetTCPConnection -LocalPort 17991 -State Listen -ErrorAction Stop |
         Select-Object -First 1
+    $supervisorHealth = Invoke-RestMethod -Uri 'http://127.0.0.1:17991/api/health' -TimeoutSec 4
+    if ($supervisorHealth.ok -ne $true -or
+        $supervisorHealth.pid -ne $supervisor.OwningProcess) {
+        throw 'Swibo management identity does not match the listening process'
+    }
     $gatewayPort = Get-NetTCPConnection -LocalPort 17777 -State Listen -ErrorAction Stop |
         Select-Object -First 1
     $desktopPort = Get-NetTCPConnection -LocalPort 17778 -State Listen -ErrorAction Stop |
         Select-Object -First 1
-    if ($wb.OwningProcess -in @($gatewayPort.OwningProcess,$desktopPort.OwningProcess)) {
-        throw 'Workbridge is not independent of the Lomway processes'
+    if ($supervisor.OwningProcess -in @($gatewayPort.OwningProcess,$desktopPort.OwningProcess)) {
+        throw 'Swibo management plane is not independent of the Lomway processes'
     }
     if ((Get-HttpStatus 'http://127.0.0.1:7677/healthz') -ne 200) {
         throw 'OAuth must be healthy before cutover'
@@ -144,7 +149,7 @@ try {
         . (Join-Path $PSScriptRoot 'common.ps1')
         $expectedOldExe = $Script:Exe
     }
-    Record 'preflight_ok' ('stage_sha256=' + $digest.Substring(0,16) + '; management_independent=true')
+    Record 'preflight_ok' ('stage_sha256=' + $digest.Substring(0,16) + '; management_independent=swibo')
     if ($PreflightOnly) {
         Write-Output 'PREFLIGHT_OK'
         exit 0

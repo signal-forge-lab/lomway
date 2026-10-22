@@ -215,6 +215,10 @@ To deploy the PAT-aware Gateway, first run
 then run `pwsh -NoProfile -File scripts/deploy-gateway-isolated.ps1`
 on Windows via an independent management plane. The legacy
 `deploy-pat-gateway.ps1` entrypoint delegates to the new implementation.
+The current management plane is Swibo at `127.0.0.1:17991`;
+preflight verifies its `/api/health` PID matches the listener and is
+independent of Gateway and Desktop Local. The retired Workbridge
+management port `7680` is no longer required.
 Only the Gateway process is stopped: desktop-local (port 17778), OAuth,
 Swibo, and Tunnel stay running. The new Gateway executable is immutable and
 versioned under `runtime/bin`; the shared `target/release/lomway.exe` is
