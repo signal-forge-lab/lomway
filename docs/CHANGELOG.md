@@ -14,6 +14,7 @@ All notable changes to Lomway are documented here. The format is based on [Keep 
 
 ### Security
 
+- 2026-10-23: Update `rustls-webpki` to 0.103.16 and `webpki-root-certs` to 1.0.10 to reject distrusted emSign intermediates and remove the affected trust anchor (RUSTSEC-2026-0382/0383).
 - Deferred direct calls are denied by the existing capability-filter layer, and generic invocation accepts only exact currently listed tool names under configured deferred prefixes.
 - Configured optional backends skipped at startup remain reconnect candidates, so a later supervisor start can be adopted without restarting Lomway.
 - Backend namespace prefixes must now be non-overlapping as well as unique, preventing prefix-based ownership ambiguity in direct and deferred routing.
