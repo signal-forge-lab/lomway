@@ -219,6 +219,10 @@ The current management plane is Swibo at `127.0.0.1:17991`;
 preflight verifies its `/api/health` PID matches the listener and is
 independent of Gateway and Desktop Local. The retired Workbridge
 management port `7680` is no longer required.
+The older OAuth-only maintenance entrypoint `deploy-oauth-csp.ps1` also
+checks this same independent Swibo management identity before restarting
+the OAuth component. Do not run this legacy rollout script merely to test
+the management guard; it performs a real sidecar cutover.
 Only the Gateway process is stopped: desktop-local (port 17778), OAuth,
 Swibo, and Tunnel stay running. The new Gateway executable is immutable and
 versioned under `runtime/bin`; the shared `target/release/lomway.exe` is

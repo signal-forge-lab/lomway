@@ -210,6 +210,9 @@ PAT対応Gatewayの本番反映は、Windows端末でリポジトリから
 事前に独立したSwibo管理経路（17991）とGateway/OAuth/公開Issuerの健全性を検証します。
 Swiboの `/api/health` のPIDと待受PIDが一致し、Gateway・Desktop Localと別プロセスで
 あることを確認します。旧Workbridge管理ポート7680は現在の必須条件ではありません。
+旧OAuth単独更新用の `deploy-oauth-csp.ps1` も同じSwibo管理PIDを確認します。
+このスクリプトの実行は実際のsidecar切替を伴うため、管理経路のテスト目的だけで
+実行しないでください。
 Gatewayだけを短時間停止して、`runtime/bin/lomway-gateway-<sha256>.exe` という
 独立した不変のバイナリへ切り替えます。デスクトップ用17778と共有している
 `target/release/lomway.exe` は上書きせず、デスクトップ用プロセスも停止しません。

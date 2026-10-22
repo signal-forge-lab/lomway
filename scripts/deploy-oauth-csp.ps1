@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param([switch]$Hardening)
 
-# Controlled, OAuth-only cutover. Workbridge management must not share this
+# Controlled, OAuth-only cutover. Swibo management must not share this
 # process, and the old build must be staged before any restart is attempted.
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -89,11 +89,16 @@ if ($Hardening) {
 if (-not ((Get-Content -LiteralPath $activeJs -Raw).Contains('approvedRedirectOrigin'))) {
     throw 'Current Sidecar JS lacks the verified redirect-CSP fix.'
 }
-$workbridge = Get-NetTCPConnection -LocalPort 7680 -State Listen -ErrorAction Stop |
+$supervisor = Get-NetTCPConnection -LocalPort 17991 -State Listen -ErrorAction Stop |
     Select-Object -First 1
+$supervisorHealth = Invoke-RestMethod 'http://127.0.0.1:17991/api/health' -TimeoutSec 4
+if ($supervisorHealth.ok -ne $true -or
+    $supervisorHealth.pid -ne $supervisor.OwningProcess) {
+    throw 'Swibo management identity does not match the listening process'
+}
 $sidecarPort = Get-NetTCPConnection -LocalPort 7677 -State Listen -ErrorAction Stop |
     Select-Object -First 1
-if ($workbridge.OwningProcess -eq $sidecarPort.OwningProcess) {
+if ($supervisor.OwningProcess -eq $sidecarPort.OwningProcess) {
     throw 'Management process is not independent of OAuth. Refusing cutover.'
 }
 $old = & (Join-Path $PSScriptRoot 'oauth-sidecar.ps1') -Action status -Json | ConvertFrom-Json
