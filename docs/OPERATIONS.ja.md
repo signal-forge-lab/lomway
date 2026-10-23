@@ -267,6 +267,14 @@ OAuth lifetime policy:
   `-VerifyOnly`、次に通常モードで一度だけ実行します。
   `client-tool-policy.json` はGit外の所有者専用ランタイムにSHA-256の
   Client IDだけを保存します。新規Clientを自動的に旧Client扱いにはしません。
+- 明示的に承認済みの新規OAuthクライアントを既存の無制限Clientと同等に信頼する場合は、
+  所有者専用のSidecar状態で実際の `client_id`、有効な承認Grant、登録メタデータを
+  照合します。表示名だけでは判定せず、そのClient IDのSHA-256ダイジェストだけを
+  非公開ポリシーの `unrestrictedLegacyClientHashes` に追加します。
+  新規Clientの既定権限は変更しません。既存エントリとACLを維持し、非公開バックアップ
+  を保存して `loadClientToolPolicy` で実効権限を検証します。Sidecarはintrospection時に
+  ポリシーを再読込するため再起動不要ですが、接続元のMCPツール一覧の再取得が必要な
+  場合があります。ブラウザープロファイルの同意など別の権限は引き続き有効です。
 - 旧Sidecar実装を `runtime/oauth-rollback/server.pre-004.js` に保存してから
   `scripts/deploy-oauth-csp.ps1 -Hardening` でOAuthのみ再起動します。
   その後、独立したWorkbridge経路を保持したまま

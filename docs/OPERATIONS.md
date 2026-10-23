@@ -278,6 +278,17 @@ Security hardening:
   preserved; new clients are never auto-exempted. Operators can replace the
   legacy exemption for a specific hashed client ID with an exact
   `clientToolAllowlists` entry.
+- To explicitly trust a newly authorized OAuth client with the same effective
+  tool access as an existing unrestricted client, first verify its actual
+  `client_id`, owner-approved live grant, and registered metadata in the
+  owner-only Sidecar state. Add only the SHA-256 digest of that exact ID to
+  `unrestrictedLegacyClientHashes` in the private runtime policy; do not trust
+  clients based on a display name alone or change the default for new clients.
+  Preserve existing entries and filesystem ACLs, keep a private backup, and
+  verify the effective result with `loadClientToolPolicy`. The Sidecar reads
+  this policy on introspection, so a service restart is not required. The
+  client may still need to refresh its MCP tool catalog. Separate backend
+  permissions, including browser profile consent, remain in force.
 - Roll out the updated Sidecar first using
   `scripts/deploy-oauth-csp.ps1 -Hardening` only after staging the prior
   `server.js` as `runtime/oauth-rollback/server.pre-004.js`, then deploy
