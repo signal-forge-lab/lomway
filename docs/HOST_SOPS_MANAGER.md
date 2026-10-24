@@ -27,3 +27,18 @@ decrypt SOPS. Strong isolation requires a separate OS identity plus a restricted
 IPC/MCP interface. Plaintext exists transiently in process memory.
 
 The script does not bypass platform-level operation restrictions.
+
+## Validation (2026-10-25)
+
+Six end-to-end tests PASS with real SOPS 3.13.3, disposable age keys and
+isolated USERPROFILE/LOCALAPPDATA. Tests cover encrypted key presence, random
+generation/rotation, PAT issue/rotation and revocation, invalid key names,
+forbidden tool lists without mutation, and key presence without decryption.
+No production credential was changed.
+
+The tests exposed an ACL difference on the second update. The manager now
+copies the canonical ACL onto staging and checks permission equivalence,
+normalizing only Windows' auto-inherited DACL metadata marker. It never
+relaxes access rules to make the update succeed.
+
+Test command: py -3.14 -m pytest -q tests/test_host_sops_manager.py

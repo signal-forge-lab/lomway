@@ -48,7 +48,7 @@ try {
     $encryptedDoc = Get-Content -LiteralPath $sopsFile -Raw | ConvertFrom-Json
     $exists = ($null -ne $encryptedDoc.PSObject.Properties[$Key])
     $encryptedDoc = $null
-    if ($exists) {
+    if ($exists -and ($Action -ne 'Status' -or $Provider -eq 'LomwayPAT')) {
         $valueText = (& $sopsExe --decrypt --extract $selector $sopsFile 2>$null) -join ''
         if ($LASTEXITCODE -ne 0) { throw 'SOPS key decryption failed' }
         try { $oldToken = [string]($valueText | ConvertFrom-Json -ErrorAction Stop) }
@@ -135,8 +135,18 @@ try {
     $backup = $stage + '.bak'
     $originalHash = (Get-FileHash -LiteralPath $sopsFile -Algorithm SHA256).Hash
     Copy-Item -LiteralPath $sopsFile -Destination $stage -ErrorAction Stop
-    $originalAcl = (Get-Acl -LiteralPath $sopsFile).Sddl
-    if ((Get-Acl -LiteralPath $stage).Sddl -ne $originalAcl) {
+    # A previous File.Replace may have preserved explicit owner-only ACLs
+    # that differ from the directory defaults of a new temporary file.
+    # Clone the canonical ACL rather than weakening it or relying on
+    # Copy-Item inheritance. Fail closed when ACL replication is denied.
+    $canonicalAcl = Get-Acl -LiteralPath $sopsFile
+    Set-Acl -LiteralPath $stage -AclObject $canonicalAcl -ErrorAction Stop
+    # Set-Acl may add the SDDL DACL auto-inherited control flag (AI).
+    # That flag doesn't grant permissions; keep every ACE, owner/group and
+    # DACL-protection flag identical, ignoring only this metadata bit.
+    $originalAcl = $canonicalAcl.Sddl -replace 'D:(P?)AI(?=\()', 'D:$1'
+    $stageAcl = (Get-Acl -LiteralPath $stage).Sddl -replace 'D:(P?)AI(?=\()', 'D:$1'
+    if ($stageAcl -cne $originalAcl) {
         throw 'Staging ACL differs from the canonical SOPS file'
     }
     $encoded = ConvertTo-Json -InputObject ([string]$token) -Compress
