@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 
 import pytest
@@ -56,7 +57,11 @@ def isolated_sops(tmp_path):
         LOCALAPPDATA=str(local),
         SOPS_AGE_KEY_FILE=str(keyfile),
     )
-    return env, canonical, local
+    try:
+        yield env, canonical, local
+    finally:
+        # Synthetic age private keys must not survive the test run, either.
+        shutil.rmtree(tmp_path)
 
 
 def host(env, *params):
