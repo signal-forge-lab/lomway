@@ -20,6 +20,13 @@ ACLだけではサービスアカウントへの安全な分離を証明でき�
 
 ## 移行の承認ゲート
 
+状態照会のみを扱うWindows名前付きパイプの**合成PoC**として
+`scripts/Test-HostSopsPipeBroker.ps1` と
+`scripts/Test-HostSopsPipeClient.ps1` を実装しました。明示的なテストモードと
+隔離SOPS/age環境を要求し、本番Windowsプロファイルでの実行を拒否します。
+このPoCには発行・ローテーション機能がなく、別Windowsユーザーとの通信・
+拒否検証も未実施です。**本番用の権限分離は未完成**であり、デプロイ対象外です。
+
 1. 正本SOPS、age秘密鍵、既存Lomway PATと稼働クライアントの
    *秘密値を表示せず*、所有プロセス・OSユーザー・ACL・依存関係を調査する。
 2. 専用の非管理者Windowsサービスアカウントを準備し、age秘密鍵とSOPS正本を

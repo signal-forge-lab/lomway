@@ -19,6 +19,14 @@ inspection cannot prove a dedicated-identity broker is enforced.
 
 ## Rollout gates
 
+A **synthetic-only** Windows named-pipe proof of concept now lives in
+`scripts/Test-HostSopsPipeBroker.ps1` and
+`scripts/Test-HostSopsPipeClient.ps1`. It accepts only metadata-only
+Status, rejects mutations, requires synthetic SOPS/age and refuses the
+real Windows profile. Its ACL is explicitly SID-scoped, but it has **not**
+been tested across two Windows identities and cannot claim OS isolation.
+It must not be deployed against real secrets or as a production service.
+
 1. Inventory OS ownership and ACLs of the encrypted SOPS store, age identity,
    PAT store and active consumers without displaying secrets.
 2. After operator authorization and encrypted backup/rollback preparation,
