@@ -47,6 +47,26 @@ if ($present -and -not $Rotate) {
     return
 }
 
+# The shared writer lock prevents conflicting updates; the per-key policy
+# independently prevents unapproved issuance or rotation through this entry.
+$policyPath = Join-Path $env:USERPROFILE '.config\sops\host-sops-policy.json'
+if (-not (Test-Path -LiteralPath $policyPath -PathType Leaf)) {
+    throw 'Missing host SOPS mutation policy'
+}
+$policy = Get-Content -LiteralPath $policyPath -Raw | ConvertFrom-Json -ErrorAction Stop
+if ($policy.version -ne 1 -or $null -eq $policy.keys -or
+    $null -eq $policy.keys.PSObject.Properties[$Name]) {
+    throw 'SOPS key not approved for mutation'
+}
+$rule = $policy.keys.PSObject.Properties[$Name].Value
+if ($rule.provider -cne 'RandomHex' -or
+    $rule.allowRotate -isnot [bool] -or
+    ($Rotate -and -not $rule.allowRotate)) {
+    throw 'SOPS mutation policy denies operation'
+}
+$rule = $null
+$policy = $null
+
 $originalHash = (Get-FileHash -LiteralPath $store -Algorithm SHA256).Hash
 $staging = Join-Path ([IO.Path]::GetDirectoryName($store)) ('.lomway-token-' + [guid]::NewGuid().ToString('N') + '.json')
 $backup = $staging + '.backup'

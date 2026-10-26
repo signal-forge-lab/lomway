@@ -50,7 +50,10 @@ inspection cannot prove a dedicated-identity broker is enforced.
 
 These cooperating **writer** paths use the same `.sops-write.lock`. An
 unrelated direct SOPS CLI or newly added mutation path is not automatically
-covered. Praxiom's standalone preview-token issuer does **not** enforce
-HostSops's per-key **authorization** policy; locking is not authorization.
+covered. New issuance/mutation through Praxiom's preview-token issuer and
+Lomway's backend-token issuer additionally checks the same per-key
+authorization policy; an existing-token no-change check remains available.
+This does not isolate the policy from an AI that can modify it as the same
+Windows user.
 No service identity, MCP exposure or active production credentials have
 been changed.

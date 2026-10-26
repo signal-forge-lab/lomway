@@ -65,6 +65,9 @@ def isolated_sops(tmp_path):
             "GENERATED_TEST_SECRET": {
                 "provider": "RandomHex", "allowRotate": True
             },
+            "LOMWAY_BACKEND_TEST_ONLY": {
+                "provider": "RandomHex", "allowRotate": True
+            },
             "SYNTHETIC_PAT": {
                 "provider": "LomwayPAT", "allowRotate": True,
                 "label": "sops-test", "maxDays": 1,
@@ -286,4 +289,18 @@ def test_backend_provision_uses_shared_lock_and_preserves_encrypted_store(isolat
     assert rotated.returncode == 0, rotated.stderr
     new_token = extract(env, canonical, "LOMWAY_BACKEND_TEST_ONLY")
     assert new_token != token
+    assert not (canonical.parent / ".sops-write.lock").exists()
+
+
+def test_backend_provision_requires_specific_host_policy(isolated_sops):
+    env, canonical, _ = isolated_sops
+    env = dict(env, LOCAL_MCP_SOPS_STORE=str(canonical))
+    policy = Path(env["USERPROFILE"]) / ".config" / "sops" / "host-sops-policy.json"
+    before = canonical.read_bytes()
+    args = ["pwsh", "-NoProfile", "-NonInteractive", "-File",
+            str(BACKEND_TOKEN_SCRIPT), "-Name", "LOMWAY_BACKEND_TEST_ONLY"]
+    policy.unlink()
+    denied = run(args, env=env)
+    assert denied.returncode != 0
+    assert canonical.read_bytes() == before
     assert not (canonical.parent / ".sops-write.lock").exists()

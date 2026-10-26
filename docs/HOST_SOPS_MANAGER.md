@@ -97,5 +97,6 @@ A **non-active draft** corresponding to the current 16-tool DSH scope is at
 `praxiom_praxiom_execute` permission, so `allowRotate=false`. The draft
 is never copied to the production policy location automatically. Review and
 approve the intended scope before enabling mutation or rotating a live PAT.
-The independent Praxiom preview-token issuer shares the file lock but does
-not consume HostSops's per-key policy, so it is not included in this draft.
+The independent Praxiom preview-token issuer uses the shared file lock and
+checks the same per-key policy before creating a missing token. Its permission
+is not included in this DSH-only draft; add it only after operator approval.
