@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "keys": {
+    "DSH_LOMWAY_PAT": {
+      "provider": "LomwayPAT",
+      "allowRotate": false,
+      "label": "dsh-coding",
+      "maxDays": 60,
+      "allowedTools": [
+        "lomway_search_tools",
+        "lomway_describe_tool",
+        "lomway_call_tool",
+        "hindsight_retain",
+        "hindsight_recall",
+        "hindsight_reflect",
+        "praxiom_praxiom_status",
+        "praxiom_praxiom_observe",
+        "praxiom_praxiom_primer",
+        "praxiom_praxiom_state",
+        "praxiom_praxiom_options",
+        "praxiom_praxiom_evaluate",
+        "praxiom_praxiom_tactical_options",
+        "praxiom_praxiom_execute",
+        "praxiom_praxiom_teach",
+        "praxiom_praxiom_playbook"
+      ]
+    }
+  }
+}

@@ -91,3 +91,11 @@ explicit reconciliation; there is no false atomicity claim across PAT and SOPS.
 not isolation from arbitrary code executing as the same Windows user. A truly
 restricted AI interface needs a separate OS identity, restrictive ACLs, and
 an approved narrowly scoped IPC broker.
+
+A **non-active draft** corresponding to the current 16-tool DSH scope is at
+`docs/HOST_SOPS_POLICY_DRAFT_DSH.json`. It includes the powerful
+`praxiom_praxiom_execute` permission, so `allowRotate=false`. The draft
+is never copied to the production policy location automatically. Review and
+approve the intended scope before enabling mutation or rotating a live PAT.
+The independent Praxiom preview-token issuer shares the file lock but does
+not consume HostSops's per-key policy, so it is not included in this draft.
