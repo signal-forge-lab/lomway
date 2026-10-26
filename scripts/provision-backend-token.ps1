@@ -22,6 +22,22 @@ if ([string]::IsNullOrWhiteSpace($store)) {
 if (-not (Test-Path -LiteralPath $store -PathType Leaf)) { throw 'Canonical SOPS secrets file is unavailable.' }
 $sops = (Get-Command sops -ErrorAction Stop).Source
 $key = '["' + $Name + '"]'
+$lockPath = Join-Path (Split-Path -Parent $store) '.sops-write.lock'
+$lockHandle = $null
+try {
+    for ($attempt = 0; $attempt -lt 50; $attempt++) {
+        try {
+            $lockHandle = [IO.FileStream]::new(
+                $lockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write,
+                [IO.FileShare]::None
+            )
+            break
+        } catch [IO.IOException] {
+            if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) { throw }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    if (-not $lockHandle) { throw 'SOPS write lock unavailable' }
 
 $existing = (& $sops --decrypt --extract $key $store 2>$null) -join ''
 $present = ($LASTEXITCODE -eq 0 -and $existing.Trim('"').Length -ge 32)
@@ -56,4 +72,10 @@ try {
     $jsonValue = $null
     Remove-Item -LiteralPath $staging -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+}
+} finally {
+    if ($lockHandle) {
+        $lockHandle.Dispose()
+        Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+    }
 }

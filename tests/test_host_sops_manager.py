@@ -11,6 +11,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "Invoke-HostSops.ps1"
+BACKEND_TOKEN_SCRIPT = ROOT / "scripts" / "provision-backend-token.ps1"
 
 
 def run(args, *, env=None, cwd=None):
@@ -259,3 +260,30 @@ def test_host_writer_respects_sopshelf_write_lock(isolated_sops):
     assert denied.returncode != 0
     assert canonical.read_bytes() == before
     assert lock.read_text(encoding="utf-8") == "held-by-other-writer"
+
+
+def test_backend_provision_uses_shared_lock_and_preserves_encrypted_store(isolated_sops):
+    env, canonical, _ = isolated_sops
+    env = dict(env, LOCAL_MCP_SOPS_STORE=str(canonical))
+    args = ["pwsh", "-NoProfile", "-NonInteractive", "-File",
+            str(BACKEND_TOKEN_SCRIPT), "-Name", "LOMWAY_BACKEND_TEST_ONLY"]
+    first = run(args, env=env)
+    assert first.returncode == 0, first.stderr
+    token = extract(env, canonical, "LOMWAY_BACKEND_TEST_ONLY")
+    assert re.fullmatch("[a-f0-9]{64}", token)
+    assert token not in first.stdout + first.stderr
+    assert extract(env, canonical, "KNOWN_TEST_SECRET") == "synthetic-before"
+    assert not (canonical.parent / ".sops-write.lock").exists()
+    lock = canonical.parent / ".sops-write.lock"
+    lock.write_text("occupied", encoding="utf-8")
+    before = canonical.read_bytes()
+    denied = run(args + ["-Rotate"], env=env)
+    assert denied.returncode != 0
+    assert canonical.read_bytes() == before
+    assert lock.read_text(encoding="utf-8") == "occupied"
+    lock.unlink()
+    rotated = run(args + ["-Rotate"], env=env)
+    assert rotated.returncode == 0, rotated.stderr
+    new_token = extract(env, canonical, "LOMWAY_BACKEND_TEST_ONLY")
+    assert new_token != token
+    assert not (canonical.parent / ".sops-write.lock").exists()
