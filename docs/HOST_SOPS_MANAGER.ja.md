@@ -53,3 +53,48 @@ LOCALAPPDATAを使ったEnd-to-Endテスト：
 WindowsのSDDLに追加されるDACL自動継承の制御フラグだけを比較時に正規化します。
 
 検証コマンド: py -3.14 -m pytest -q tests/test_host_sops_manager.py
+
+## 2026-10-26 更新：書き込みポリシーと競合防止
+
+- `Status` はこれまでどおり、指定キーの存在を秘密値なしで返します。
+- `Generate` はホスト固定の `%USERPROFILE%\.config\sops\host-sops-policy.json`
+  が必須です。未作成・不明キー・不一致の発行条件では拒否します。
+- `keys` オブジェクトではキー名ごとに `provider` と `allowRotate` を指定します。
+  LomwayPATではさらに `label`、`maxDays`、順不同で完全一致の
+  `allowedTools` を指定してください。
+- 同じ暗号化ストアを扱うSopshelfと共有する
+  `%USERPROFILE%\.config\sops\secrets\.sops-write.lock` を排他的に確保し、
+  更新を直列化します。異常終了で残ったロックは自動削除しません。
+  他プロセスが操作していないことを確認してから管理者が復旧します。
+- 成功した更新ごとに元の**暗号化済み**ファイルを
+  `global.sops.json.backup-<UTC>-<id>.sops.json` に保存します。
+  復元時はACLと暗号化データの確認を必須とし、平文へ展開しません。
+- PAT交換ではSOPS保存後に旧PATの失効を最大3回試行します。
+  失効できなければ `HOST_SOPS_PAT_REVOCATION_PENDING` を出し、
+  新旧PATが同時に有効となり得ることを運用者へ通知します。
+
+設定例（**実在する権限やキーではありません**）：
+
+```json
+{
+  "version": 1,
+  "keys": {
+    "EXAMPLE_HOST_TOKEN": {
+      "provider": "RandomHex",
+      "allowRotate": false
+    },
+    "EXAMPLE_SCOPED_PAT": {
+      "provider": "LomwayPAT",
+      "allowRotate": false,
+      "label": "example-agent",
+      "maxDays": 7,
+      "allowedTools": ["lomway_search_tools", "lomway_describe_tool"]
+    }
+  }
+}
+```
+
+**重要な制約**：ポリシーは操作ミスを防ぐための制限であり、同じWindowsユーザーで
+任意コードを実行できるAIを隔離するOS権限境界ではありません。真の隔離には
+専用WindowsユーザーとACL保護されたSOPS/age鍵、承認付きの限定IPCが必要です。
+この構成は本ツールの導入だけで自動的に実現するものではありません。

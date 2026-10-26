@@ -29,6 +29,9 @@ $sopsExe = (Get-Command sops -ErrorAction Stop).Source
 $selector = '["' + $Key + '"]'
 $patCli = Join-Path $PSScriptRoot '..\sidecar\dist\src\pat-cli.js'
 $patStoreFile = Join-Path $env:LOCALAPPDATA 'Lomway\oauth-sidecar\runtime\pat-tokens.json'
+$policyFile = Join-Path $env:USERPROFILE '.config\sops\host-sops-policy.json'
+$lockPath = Join-Path (Split-Path -Parent $sopsFile) '.sops-write.lock'
+$lockHandle = $null
 $stage = $null
 $backup = $null
 $token = $null
@@ -37,10 +40,60 @@ $raw = $null
 $newPatId = $null
 $oldPatId = $null
 $committed = $false
+$revocationPending = $false
 
 try {
     if (-not (Test-Path -LiteralPath $sopsFile -PathType Leaf)) {
         throw 'Missing canonical SOPS file'
+    }
+
+    if ($Action -eq 'Generate') {
+        # Shared fail-closed lock with the Sopshelf GUI. CreateNew is an
+        # atomic filesystem operation, not a check-then-create race.
+        for ($attempt = 0; $attempt -lt 50; $attempt++) {
+            try {
+                $lockHandle = [IO.FileStream]::new(
+                    $lockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write,
+                    [IO.FileShare]::None
+                )
+                break
+            } catch [IO.IOException] {
+                if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) { throw }
+                Start-Sleep -Milliseconds 100
+            }
+        }
+        if (-not $lockHandle) { throw 'SOPS write lock unavailable' }
+
+        # This policy is an operational allowlist, not an OS authorization
+        # boundary against untrusted code executing as the same user.
+        if (-not (Test-Path -LiteralPath $policyFile -PathType Leaf)) {
+            throw 'Missing host SOPS mutation policy'
+        }
+        $policy = Get-Content -LiteralPath $policyFile -Raw | ConvertFrom-Json -ErrorAction Stop
+        if ($policy.version -ne 1 -or $null -eq $policy.keys -or
+            $null -eq $policy.keys.PSObject.Properties[$Key]) {
+            throw 'SOPS key not approved for mutation'
+        }
+        $rule = $policy.keys.PSObject.Properties[$Key].Value
+        if ($rule.provider -cne $Provider -or
+            $rule.allowRotate -isnot [bool] -or
+            ($Rotate -and -not $rule.allowRotate)) {
+            throw 'SOPS mutation policy denies operation'
+        }
+        if ($Provider -eq 'LomwayPAT') {
+            $approved = @($rule.allowedTools)
+            $requested = @($AllowedTools -split ',' | Where-Object { $_ })
+            if ($rule.label -cne $Label -or
+                $rule.maxDays -isnot [long] -or $rule.maxDays -lt 1 -or
+                $rule.maxDays -gt 90 -or $Days -gt $rule.maxDays -or
+                $approved.Count -eq 0 -or
+                $approved.Count -ne $requested.Count -or
+                @($requested | Where-Object { $approved -cnotcontains $_ }).Count -ne 0) {
+                throw 'PAT issuance denied by key policy'
+            }
+        }
+        $rule = $null
+        $policy = $null
     }
 
     # Key names in SOPS JSON are not encrypted. Distinguish an absent key from
@@ -69,9 +122,19 @@ try {
                 $_.expiresAt -gt [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
             })
             $allowed = if ($matches.Count -eq 1) { @($matches[0].allowedTools) } else { @() }
+            $sameLabelActiveCount = 0
+            if ($matches.Count -eq 1) {
+                $matchedLabel = $matches[0].label
+                $sameLabelActiveCount = @($records | Where-Object {
+                    $_.label -ceq $matchedLabel -and $null -eq $_.revokedAt -and
+                    $_.expiresAt -gt [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                }).Count
+            }
             [pscustomobject]@{
                 key = $Key; provider = $Provider; present = $exists
                 active_pat_matches = $matches.Count
+                same_label_active_count = $sameLabelActiveCount
+                rotation_overlap_warning = $sameLabelActiveCount -gt 1
                 allowed_count = $allowed.Count
                 praxiom_count = @($allowed | Where-Object { $_ -like 'praxiom_praxiom_*' }).Count
                 coding_tools_count = @($allowed | Where-Object { $_ -like 'coding_tools_*' }).Count
@@ -132,7 +195,12 @@ try {
     # temporary file, CLI argument, clipboard write or stdout of secrets.
     $parent = Split-Path -Parent $sopsFile
     $stage = Join-Path $parent ('.host-sops-' + [guid]::NewGuid().ToString('N') + '.json')
-    $backup = $stage + '.bak'
+    # File.Replace creates an encrypted, ACL-preserving backup beside the
+    # canonical store. Unlike the transient stage it survives successful
+    # mutations for recovery from accidental rotation or partial PAT failure.
+    $backup = $sopsFile + '.backup-' +
+        [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' +
+        [guid]::NewGuid().ToString('N') + '.sops.json'
     $originalHash = (Get-FileHash -LiteralPath $sopsFile -Algorithm SHA256).Hash
     Copy-Item -LiteralPath $sopsFile -Destination $stage -ErrorAction Stop
     # A previous File.Replace may have preserved explicit owner-only ACLs
@@ -168,8 +236,19 @@ try {
     $committed = $true
 
     if ($oldPatId) {
-        & node.exe $patCli revoke --id $oldPatId *> $null
-        if ($LASTEXITCODE -ne 0) { throw 'Old PAT revocation failed; replacement remains active' }
+        $revoked = $false
+        for ($attempt = 0; $attempt -lt 3; $attempt++) {
+            & node.exe $patCli revoke --id $oldPatId *> $null
+            if ($LASTEXITCODE -eq 0) {
+                $revoked = $true
+                break
+            }
+            Start-Sleep -Milliseconds 150
+        }
+        if (-not $revoked) {
+            $revocationPending = $true
+            throw 'Old PAT revocation failed; manual reconciliation required'
+        }
     }
     [pscustomobject]@{
         key=$Key; provider=$Provider; updated=$true
@@ -182,10 +261,17 @@ try {
         & node.exe $patCli revoke --id $newPatId *> $null
     }
     # Do not expose exception/CLI contents to external tools.
-    [Console]::Error.WriteLine("HOST_SOPS_FAILED type=$failureType line=$failureLine; no secret data returned")
+    $failureCode = if ($revocationPending) { 'PAT_REVOCATION_PENDING' } else { 'FAILED' }
+    [Console]::Error.WriteLine("HOST_SOPS_$failureCode type=$failureType line=$failureLine; no secret data returned")
     exit 1
 } finally {
     $token = $null; $oldToken = $null; $raw = $null
     if ($stage) { Remove-Item -LiteralPath $stage -Force -ErrorAction SilentlyContinue }
-    if ($backup) { Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue }
+    if (-not $committed -and $backup) {
+        Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+    }
+    if ($lockHandle) {
+        $lockHandle.Dispose()
+        Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+    }
 }

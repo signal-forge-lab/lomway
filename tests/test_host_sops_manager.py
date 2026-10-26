@@ -57,6 +57,22 @@ def isolated_sops(tmp_path):
         LOCALAPPDATA=str(local),
         SOPS_AGE_KEY_FILE=str(keyfile),
     )
+    policy = home / ".config" / "sops" / "host-sops-policy.json"
+    policy.write_text(json.dumps({
+        "version": 1,
+        "keys": {
+            "GENERATED_TEST_SECRET": {
+                "provider": "RandomHex", "allowRotate": True
+            },
+            "SYNTHETIC_PAT": {
+                "provider": "LomwayPAT", "allowRotate": True,
+                "label": "sops-test", "maxDays": 1,
+                "allowedTools": [
+                    "praxiom_praxiom_status", "praxiom_praxiom_execute"
+                ]
+            },
+        },
+    }), encoding="utf-8")
     try:
         yield env, canonical, local
     finally:
@@ -127,6 +143,10 @@ def test_random_hex_generation_and_rotation_no_plaintext(isolated_sops):
     assert extract(env, canonical, "KNOWN_TEST_SECRET") == "synthetic-before"
     assert canonical.read_bytes() != before
     assert not list(canonical.parent.glob(".host-sops-*"))
+    backups = sorted(canonical.parent.glob("global.sops.json.backup-*.sops.json"))
+    assert len(backups) == 2
+    assert all(b"synthetic-before" not in p.read_bytes() for p in backups)
+    assert extract(env, backups[0], "KNOWN_TEST_SECRET") == "synthetic-before"
 
 
 def test_scoped_pat_issue_status_and_rotation(isolated_sops):
@@ -148,6 +168,8 @@ def test_scoped_pat_issue_status_and_rotation(isolated_sops):
     assert status.returncode == 0, status.stderr
     payload = json.loads(status.stdout)
     assert payload["active_pat_matches"] == 1
+    assert payload["same_label_active_count"] == 1
+    assert payload["rotation_overlap_warning"] is False
     assert payload["allowed_count"] == 2
     assert payload["praxiom_count"] == 2
     assert payload["execute_allowed"] is True
@@ -197,3 +219,43 @@ def test_random_hex_status_does_not_require_decryption(isolated_sops):
     assert status.returncode == 0, status.stderr
     assert json.loads(status.stdout)["present"] is True
     assert "synthetic-before" not in status.stdout + status.stderr
+
+
+def test_policy_denies_unlisted_secret_and_changed_pat_rights(isolated_sops):
+    env, canonical, local = isolated_sops
+    before = canonical.read_bytes()
+    denied = host(env, "-Action", "Generate", "-Key", "UNAPPROVED_TOKEN")
+    assert denied.returncode != 0
+    assert "secret" not in denied.stdout.lower()
+    assert canonical.read_bytes() == before
+    denied_pat = host(
+        env, "-Action", "Generate", "-Key", "SYNTHETIC_PAT",
+        "-Provider", "LomwayPAT", "-Label", "sops-test",
+        "-AllowedTools", "coding_tools_exec_command", "-Days", "1",
+    )
+    assert denied_pat.returncode != 0
+    assert canonical.read_bytes() == before
+    assert not (local / "Lomway" / "oauth-sidecar" / "runtime" / "pat-tokens.json").exists()
+
+
+def test_policy_missing_fails_closed_without_mutation(isolated_sops):
+    env, canonical, _ = isolated_sops
+    before = canonical.read_bytes()
+    (Path(env["USERPROFILE"]) / ".config" / "sops" / "host-sops-policy.json").unlink()
+    denied = host(env, "-Action", "Generate", "-Key", "GENERATED_TEST_SECRET")
+    assert denied.returncode != 0
+    assert canonical.read_bytes() == before
+    assert not (canonical.parent / ".sops-write.lock").exists()
+    check = host(env, "-Action", "Status", "-Key", "KNOWN_TEST_SECRET")
+    assert check.returncode == 0
+
+
+def test_host_writer_respects_sopshelf_write_lock(isolated_sops):
+    env, canonical, _ = isolated_sops
+    lock = canonical.parent / ".sops-write.lock"
+    before = canonical.read_bytes()
+    lock.write_text("held-by-other-writer", encoding="utf-8")
+    denied = host(env, "-Action", "Generate", "-Key", "GENERATED_TEST_SECRET")
+    assert denied.returncode != 0
+    assert canonical.read_bytes() == before
+    assert lock.read_text(encoding="utf-8") == "held-by-other-writer"

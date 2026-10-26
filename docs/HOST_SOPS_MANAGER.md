@@ -42,3 +42,52 @@ normalizing only Windows' auto-inherited DACL metadata marker. It never
 relaxes access rules to make the update succeed.
 
 Test command: py -3.14 -m pytest -q tests/test_host_sops_manager.py
+
+## 2026-10-26: Mutation allowlist and cooperative locking
+
+The read-only `Status` action remains available. `Generate` now requires
+`%USERPROFILE%\.config\sops\host-sops-policy.json`. A missing policy,
+unknown key, provider mismatch, unapproved rotation or PAT configuration fails
+closed. Set `version: 1` and key-specific entries under `keys`; each entry
+has `provider` and `allowRotate`. A `LomwayPAT` entry also requires
+`label`, `maxDays`, and the exact `allowedTools` set.
+
+Example with **synthetic names only**:
+
+```json
+{
+  "version": 1,
+  "keys": {
+    "EXAMPLE_HOST_TOKEN": {
+      "provider": "RandomHex",
+      "allowRotate": false
+    },
+    "EXAMPLE_SCOPED_PAT": {
+      "provider": "LomwayPAT",
+      "allowRotate": false,
+      "label": "example-agent",
+      "maxDays": 7,
+      "allowedTools": ["lomway_search_tools", "lomway_describe_tool"]
+    }
+  }
+}
+```
+
+HostSops and Sopshelf share the exclusive create-only
+`.config\sops\secrets\.sops-write.lock`. No automatic removal of abandoned
+locks is attempted; investigate whether a writer is active before manually
+clearing one. Other SOPS writers are not automatically covered.
+
+Each successful mutation preserves the previous **encrypted** document as
+`global.sops.json.backup-<UTC>-<id>.sops.json`, with ACL-preserving
+`File.Replace`. This history is deliberately retained for operator recovery.
+
+PAT rotation attempts old-token revocation up to three times after the new
+encrypted value commits. If revocation fails, the command returns
+`HOST_SOPS_PAT_REVOCATION_PENDING`. Both PATs may remain valid and require
+explicit reconciliation; there is no false atomicity claim across PAT and SOPS.
+
+**Security boundary:** this per-user allowlist is operational protection,
+not isolation from arbitrary code executing as the same Windows user. A truly
+restricted AI interface needs a separate OS identity, restrictive ACLs, and
+an approved narrowly scoped IPC broker.
