@@ -287,8 +287,8 @@ struct SearchInput {
     /// Natural-language description of the capability or action needed, in
     /// English or Japanese. Upstream OSS names (for example Serena) work.
     query: String,
-    /// Optional exact backend id (direct or deferred) or `internal`. Omit
-    /// when unsure to search everything.
+    /// Optional exact backend id (direct or deferred), `internal`, or
+    /// `skills` for installed agent skills. Omit when unsure.
     backend: Option<String>,
     /// Maximum results, capped at 20.
     limit: Option<usize>,
@@ -494,7 +494,7 @@ async fn describe(
     Ok(CallToolResult::text(serde_json::to_string_pretty(&body)?))
 }
 
-const SEARCH_TOOL_DESCRIPTION: &str = "Use this first whenever you are unsure whether a capability exists, before concluding it is missing or proposing to install anything. Searches across every capability this caller may use: direct tools already in tools/list, deferred tools behind Lomway deferred exposure, and internal capabilities reached through another tool, matching upstream OSS names, English and Japanese aliases, action names, and descriptions. Searching never starts a backend; deferred results come from the last cached manifest. Each result gives invocation (direct|deferred|internal), action, provider_oss, status (listed = in tools/list now, not a health check; cached; unverified; declared), manifest_seen_at, and how_to_invoke. Call direct results directly by name (passing action when one is given), never through lomway_call_tool. Use internal results through the tool named in via. Only deferred results use lomway_describe_tool for the exact schema and then lomway_call_tool. Omit backend unless a previous result gave you its id.";
+const SEARCH_TOOL_DESCRIPTION: &str = "Use this first whenever you are unsure whether a capability exists, before concluding it is missing or proposing to install anything. Searches across every capability this caller may use: direct tools already in tools/list, deferred tools behind Lomway deferred exposure, and internal capabilities reached through another tool, matching upstream OSS names, English and Japanese aliases, action names, and descriptions. For agent skills, use backend=\"skills\" and concrete task keywords instead of the generic word \"skill\"; describe the selected skill and read its SKILL.md before use. Searching never starts a backend; deferred results come from the last cached manifest. Each result gives invocation (direct|deferred|internal), action, provider_oss, status (listed = in tools/list now, not a health check; cached; unverified; declared), manifest_seen_at, and how_to_invoke. Call direct results directly by name (passing action when one is given), never through lomway_call_tool. Use internal results through the tool named in via. Only deferred results use lomway_describe_tool for the exact schema and then lomway_call_tool. Omit backend unless a previous result gave you its id.";
 
 const DESCRIBE_TOOL_DESCRIPTION: &str = "Use after lomway_search_tools, or whenever arguments are uncertain. Return the exact current MCP description and input/output schema for one name from a search result: a direct tool, a deferred tool, an internal capability, or a deferred `<prefix>*` placeholder. Describing a deferred tool may start its backend. Call direct tools directly by name and internal capabilities through their via tool; only deferred tools go through lomway_call_tool.";
 
