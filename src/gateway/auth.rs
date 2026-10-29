@@ -56,9 +56,12 @@ pub(super) fn protect_mcp_router(
 ) -> (Router, Router) {
     let resource =
         reqwest::Url::parse(&config.resource_url).expect("validated OAuth resource URL must parse");
-    let authorization_server = format!("{}/", resource.origin().ascii_serialization());
+    // RFC 9728 authorization_servers values are authorization-server issuer
+    // identifiers, not URL prefixes. Keep this identical to the Sidecar's
+    // issuer (which has no trailing slash) for strict OAuth clients.
+    let authorization_server = resource.origin().ascii_serialization();
     let metadata_url = format!(
-        "{authorization_server}.well-known/oauth-protected-resource{}",
+        "{authorization_server}/.well-known/oauth-protected-resource{}",
         resource.path()
     );
     let metadata_path = format!("/.well-known/oauth-protected-resource{}", resource.path());
@@ -697,7 +700,7 @@ mod tests {
         assert_eq!(metadata["resource"], resource);
         assert_eq!(
             metadata["authorization_servers"][0],
-            "https://lomway.example/"
+            "https://lomway.example"
         );
         assert_eq!(metadata["scopes_supported"][0], "devspace");
 
