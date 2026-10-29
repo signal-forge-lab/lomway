@@ -748,4 +748,56 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn japanese_task_intents_route_to_selected_skills() {
+        let names = [
+            "debugging-and-error-recovery",
+            "ui-ux-pro-max",
+            "web-design-guidelines",
+            "security-and-hardening",
+            "browser-skill",
+            "test-reliability",
+        ];
+        let entries: Vec<_> = names
+            .iter()
+            .map(|name| {
+                entry(
+                    format!("skill:{name}"),
+                    "skills",
+                    "Agent procedure".to_string(),
+                    None,
+                    true,
+                    vec![(*name).to_string()],
+                )
+            })
+            .collect();
+        for (query, expected) in [
+            (
+                "原因不明の不具合を再現して根本原因を調査する",
+                "debugging-and-error-recovery",
+            ),
+            ("管理画面のUI UXデザインを改善する", "ui-ux-pro-max"),
+            (
+                "Webページのアクセシビリティ準拠を監査する",
+                "web-design-guidelines",
+            ),
+            (
+                "ログイン認証と信頼境界の安全性を監査する",
+                "security-and-hardening",
+            ),
+            ("ブラウザでログイン済みタブを操作する", "browser-skill"),
+            (
+                "テストが不安定で flaky な原因を調査する",
+                "test-reliability",
+            ),
+        ] {
+            let found = search(&entries, query, Some("skills"), &CallerAccess::default(), 5);
+            assert_eq!(
+                found.first().map(|item| item.name.as_str()),
+                Some(format!("skill:{expected}").as_str()),
+                "{query}: {found:?}"
+            );
+        }
+    }
 }

@@ -45,6 +45,12 @@ parent directory name) and `description` (required) are read;
 * Every skill is indexed as `skill:<name>` for `lomway_search_tools`. Skills
   are instructions, not tools, so they are shown to every caller regardless of
   the caller's tool allowlist.
+* For task-based selection, search with `backend="skills"` and a short,
+  specific intent, such as `根本原因`, `管理画面`, or `アクセシビリティ`.
+  Curated English/Japanese aliases live in `capabilities/catalog.toml` and
+  apply only when the named skill is installed. Avoid generic queries such
+  as `skill` which match many entries. Use one primary procedure plus only
+  necessary specialists; skills never override user or repository policy.
 * `lomway_describe_tool name="skill:<name>"` returns the path and how to read
   it: with `coding_tools_read_file` and a workspace-relative path when the
   canonical file lies inside `read_root`, otherwise with
@@ -52,7 +58,9 @@ parent directory name) and `description` (required) are read;
 * The scan is repeated at most every `rescan_seconds` when the index is read,
   so added or removed skills appear in search without a restart. The
   instructions list is a startup snapshot (MCP delivers instructions only at
-  `initialize`).
+  `initialize`). Unlike skill-file changes, alias-catalog or instruction-code
+  changes require building and restarting the gateway, then reconnecting the
+  client to receive updated `initialize` instructions.
 
 ## Actions
 

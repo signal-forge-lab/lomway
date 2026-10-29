@@ -450,7 +450,7 @@ pub(crate) fn instructions_block(result: &ScanResult, limit: usize) -> Option<St
         return None;
     }
     let mut text = String::from(
-        "Agent skills are available on this machine. When a task matches a skill, read its SKILL.md before acting (lomway_describe_tool name=\"skill:<name>\" returns the path and how to read it). Skills:",
+        "Agent skills are available on this machine. For a relevant task, search with lomway_search_tools backend=\"skills\" and a concise task-specific query (English or Japanese, not just \"skill\"); select only applicable, non-overlapping skills. Call lomway_describe_tool name=\"skill:<name>\" and read its SKILL.md using the returned instructions before applying it. User and repository rules take precedence. Skills:",
     );
     for skill in visible.iter().take(limit) {
         let short: String = skill.description.chars().take(110).collect();
@@ -619,6 +619,8 @@ mod tests {
         };
         let text = instructions_block(&result, 2).unwrap();
         assert!(text.contains("- a:") && text.contains("- c:"));
+        assert!(text.contains("backend=\"skills\""));
+        assert!(text.contains("non-overlapping skills"));
         assert!(!text.contains("- b:") && !text.contains("- d:"));
         assert!(text.contains("+1 more"));
         assert!(instructions_block(&ScanResult::default(), 5).is_none());

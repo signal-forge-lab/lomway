@@ -13,6 +13,7 @@ Lomway 自身が Workbridge 相当の 4 機能を提供します。すべて**�
 | ファイル返却 | `publish_artifact` | `lomway_send_file` |
 
 - **Skills**: Workbridge と同じ走査順・発見規則（SKILL.md で再帰停止、ルート直下の `*.md`、`.` 始まりと node_modules を除外、リンクを辿る、同一ファイルは 1 回、同名は先勝ち）。instructions に短い一覧を載せ、検索索引に `skill:<name>` を登録（ツール許可リストによる絞り込みなし）。`rescan_seconds` ごとに再走査するので、追加・削除は再起動なしで検索に反映。instructions は起動時点の一覧。
+- **タスクからの選択**: `lomway_search_tools` に `backend="skills"` と短い具体的な作業目的（例: `根本原因`、`管理画面`、`アクセシビリティ`）を渡す。`skill` だけのような汎用クエリは候補が増えるため避ける。日本語と英語の検索別名は `capabilities/catalog.toml` に置き、該当スキルが実際に存在するときだけ適用する。必要なスキルだけ `lomway_describe_tool name="skill:<name>"` で読込手順を調べ、SKILL.md 本文を取得する。ユーザーおよび対象リポジトリのルールを優先する。検索別名と案内用コードの変更はゲートウェイの再ビルド・再起動を要し、接続時案内の更新はクライアント再接続後に反映される。
 - **Actions**: リポジトリ外の TOML 定義ファイルを変更時に再読込（クライアントのツール再読込不要）。シェルを使わず argv で実行し、`{name}` は 1 引数、`{name...}` は配列展開。シェル・バッチへのパラメータ受け渡しは定義ロード時に拒否。パラメータは JSON Schema サブセットで検証（`-` 始まりは既定で拒否）。cwd は `allowed_roots` 内、環境変数は許可リスト方式で `LOMWAY_*` は渡さない。タイムアウトでプロセスツリーごと終了。dry_run、run_id による非同期実行、監査ログ（引数は SHA-256 のみ）。
 - **Pipelines**: 各 step は登録済み action。effect の allow/deny を検査（`EFFECT_DENIED`）。dry_run で計画と digest を返し、`expected_digest` 付きで実行すると計画が変わっていれば `PLAN_INVALIDATED`。LLM worker/reviewer 等の Workbridge orchestration 機能は未実装。
 - **File transfer**: OpenAI のファイルホストからの HTTPS のみ（redirect ごとに再検査、最大 3 回、30 秒）。サイズ上限、inbox 配下の相対パスのみ、親ディレクトリのリンク・reparse point を拒否、partial ファイルに書いてハードリンクで公開（上書きしない）。Workbridge のようなディレクトリハンドル固定は未実装（公開前後の再検証で検出のみ）。

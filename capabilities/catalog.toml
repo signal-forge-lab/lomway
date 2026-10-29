@@ -32,6 +32,69 @@ aliases = [
   "インターフェース設計", "設計の見直し",
 ]
 
+# Skill routing: task-specific Japanese aliases; use only when the named
+# skill is installed. Keep generic words such as "skill" out of these aliases.
+# Prefer distinct tasks over synonyms shared by every reviewer or browser.
+[[capability]]
+tool = "skill:ponytail"
+domain = "skills"
+aliases = ["コード実装", "過剰設計", "最小限の修正"]
+
+[[capability]]
+tool = "skill:debugging-and-error-recovery"
+domain = "skills"
+aliases = ["根本原因", "原因不明", "不具合調査", "障害原因"]
+
+[[capability]]
+tool = "skill:ponytail-review"
+domain = "skills"
+aliases = ["コードレビュー", "変更レビュー", "修正内容のレビュー"]
+
+[[capability]]
+tool = "skill:test-driven-development"
+domain = "skills"
+aliases = ["テスト駆動", "回帰テスト作成", "TDD"]
+
+[[capability]]
+tool = "skill:test-reliability"
+domain = "skills"
+aliases = ["テストが不安定", "不安定テスト", "フレークテスト"]
+
+[[capability]]
+tool = "skill:security-and-hardening"
+domain = "skills"
+aliases = ["信頼境界", "セキュリティ監査", "認証の安全性", "権限の安全性"]
+
+[[capability]]
+tool = "skill:ui-ux-pro-max"
+domain = "skills"
+aliases = ["管理画面", "製品UI", "アプリUI", "ダッシュボード設計"]
+
+[[capability]]
+tool = "skill:design-taste-frontend"
+domain = "skills"
+aliases = ["ランディングページ", "ブランドサイト", "ビジュアルデザイン"]
+
+[[capability]]
+tool = "skill:web-design-guidelines"
+domain = "skills"
+aliases = ["アクセシビリティ", "Web標準", "UI準拠監査", "Webガイドライン"]
+
+[[capability]]
+tool = "skill:browser-skill"
+domain = "skills"
+aliases = ["ログイン済みタブ", "既存ブラウザ", "Webページ操作"]
+
+[[capability]]
+tool = "skill:cua-driver"
+domain = "skills"
+aliases = ["Windowsアプリ操作", "ネイティブGUI", "デスクトップ操作"]
+
+[[capability]]
+tool = "skill:handoff"
+domain = "skills"
+aliases = ["引き継ぎ文書", "会話の引継ぎ", "引継ぎ資料"]
+
 # ---------------------------------------------------------------------------
 # Coding tools (workspace files, text search, shell, git)
 # ---------------------------------------------------------------------------
