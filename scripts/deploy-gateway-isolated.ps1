@@ -36,6 +36,21 @@ function Get-HttpStatus([string]$url) {
     }
 }
 
+# Some Windows TCP providers report listener State as null rather than Listen.
+# Limit fallback to one IPv4 loopback socket with no remote peer and a real PID.
+function Get-LoopbackListener([int]$port) {
+    $matches = @(Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.LocalAddress -eq '127.0.0.1' -and
+            $_.RemotePort -eq 0 -and
+            $_.OwningProcess -gt 0 -and
+            ($null -eq $_.State -or $_.State.ToString() -eq 'Listen')
+        })
+    if ($matches.Count -gt 1) { throw "Ambiguous loopback listener on port $port" }
+    if ($matches.Count -eq 0) { return $null }
+    return $matches[0]
+}
+
 function Wait-Gateway([string]$expectedExe) {
     for ($i=0; $i -lt 45; $i++) {
         $pidPath = Join-Path $runtime 'gateway.pid'
@@ -74,8 +89,7 @@ function Stop-ActiveGateway([string[]]$approvedExecutables) {
     & (Join-Path $PSScriptRoot 'stop.ps1') | Out-Null
     # If startup failed between spawning a process and writing its PID file,
     # a listener may still exist. Never touch the distinct desktop-local port.
-    $listener = Get-NetTCPConnection -LocalPort 17777 -State Listen -ErrorAction SilentlyContinue |
-        Select-Object -First 1
+    $listener = Get-LoopbackListener 17777
     if (-not $listener) { return }
     $candidate = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
     if (-not $candidate) { return }
@@ -101,17 +115,18 @@ try {
 
     # Swibo, not the retired Workbridge management port, now owns lifecycle.
     # Verify its HTTP identity and independent PID before any gateway stop.
-    $supervisor = Get-NetTCPConnection -LocalPort 17991 -State Listen -ErrorAction Stop |
-        Select-Object -First 1
+    $supervisor = Get-LoopbackListener 17991
+    if (-not $supervisor) { throw 'Swibo management loopback listener missing' }
     $supervisorHealth = Invoke-RestMethod -Uri 'http://127.0.0.1:17991/api/health' -TimeoutSec 4
     if ($supervisorHealth.ok -ne $true -or
         $supervisorHealth.pid -ne $supervisor.OwningProcess) {
         throw 'Swibo management identity does not match the listening process'
     }
-    $gatewayPort = Get-NetTCPConnection -LocalPort 17777 -State Listen -ErrorAction Stop |
-        Select-Object -First 1
-    $desktopPort = Get-NetTCPConnection -LocalPort 17778 -State Listen -ErrorAction Stop |
-        Select-Object -First 1
+    $gatewayPort = Get-LoopbackListener 17777
+    $desktopPort = Get-LoopbackListener 17778
+    if (-not $gatewayPort -or -not $desktopPort) {
+        throw 'Gateway or desktop local loopback listener missing'
+    }
     if ($supervisor.OwningProcess -in @($gatewayPort.OwningProcess,$desktopPort.OwningProcess)) {
         throw 'Swibo management plane is not independent of the Lomway processes'
     }
