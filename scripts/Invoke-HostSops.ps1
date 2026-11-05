@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Status', 'Generate')]
+    [ValidateSet('Status', 'Generate', 'VerifyOpenBao', 'AuditOpenBao', 'CleanupOpenBao')]
     [string]$Action,
 
     [Parameter(Mandatory)]
@@ -45,6 +45,32 @@ $revocationPending = $false
 try {
     if (-not (Test-Path -LiteralPath $sopsFile -PathType Leaf)) {
         throw 'Missing canonical SOPS file'
+    }
+
+    if ($Action -eq 'VerifyOpenBao') {
+        # Fixed host-side consumer: no arbitrary command, destination or key.
+        # The child performs SOPS extraction and OpenBao requests locally and
+        # reports verdicts only. Keep the original Status/Generate paths intact.
+        if ($Key -cne 'OPENBAO_WINDOWS_AI_RUNTIME_ROLE_ID' -or
+            $Provider -cne 'RandomHex' -or $Rotate.IsPresent -or
+            $Label -or $AllowedTools) {
+            throw 'Invalid OpenBao verification parameters'
+        }
+        & (Join-Path $PSScriptRoot 'Test-HostOpenBaoAppRole.ps1')
+        if ($LASTEXITCODE -ne 0) { throw 'OpenBao AppRole verification failed' }
+        return
+    }
+
+    if ($Action -in @('AuditOpenBao', 'CleanupOpenBao')) {
+        if ($Key -cne 'OPENBAO_WINDOWS_AI_RUNTIME_ROLE_ID' -or
+            $Provider -cne 'RandomHex' -or $Rotate.IsPresent -or
+            $Label -or $AllowedTools) {
+            throw 'Invalid OpenBao audit parameters'
+        }
+        & (Join-Path $PSScriptRoot 'Test-HostOpenBaoSecretIdInventory.ps1') `
+            -CleanupUnused:($Action -eq 'CleanupOpenBao')
+        if ($LASTEXITCODE -ne 0) { throw 'OpenBao SecretID audit failed' }
+        return
     }
 
     if ($Action -eq 'Generate') {
