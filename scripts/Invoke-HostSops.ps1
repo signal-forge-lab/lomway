@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Status', 'Generate', 'VerifyOpenBao', 'AuditOpenBao', 'CleanupOpenBao', 'ProvisionMuse')]
+    [ValidateSet('Status', 'Generate', 'VerifyOpenBao', 'AuditOpenBao', 'CleanupOpenBao', 'ProvisionMuse', 'CheckMusePeriodicToken', 'TestMusePeriodicToken', 'IssueMusePeriodicToken')]
     [string]$Action,
 
     [Parameter(Mandatory)]
@@ -45,6 +45,24 @@ $revocationPending = $false
 try {
     if (-not (Test-Path -LiteralPath $sopsFile -PathType Leaf)) {
         throw 'Missing canonical SOPS file'
+    }
+
+    if ($Action -in @('CheckMusePeriodicToken', 'TestMusePeriodicToken', 'IssueMusePeriodicToken')) {
+        # A fixed host-side issuer: never accept a caller-controlled policy,
+        # secret key, token, endpoint, or command.
+        if ($Key -cne 'OPENBAO_MUSE_PERIODIC_TOKEN' -or
+            $Provider -cne 'RandomHex' -or $Rotate.IsPresent -or
+            $Label -or $AllowedTools -or $Days -ne 60) {
+            throw 'Invalid Muse token parameters'
+        }
+        $mode = switch ($Action) {
+            'CheckMusePeriodicToken' { 'Check' }
+            'TestMusePeriodicToken' { 'Test' }
+            'IssueMusePeriodicToken' { 'Issue' }
+        }
+        & (Join-Path $PSScriptRoot 'Manage-HostOpenBaoMusePeriodicToken.ps1') -Mode $mode
+        if ($LASTEXITCODE -ne 0) { throw 'Muse periodic token operation failed' }
+        return
     }
 
     if ($Action -eq 'ProvisionMuse') {
