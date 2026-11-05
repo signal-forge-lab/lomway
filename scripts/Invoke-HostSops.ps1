@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Status', 'Generate', 'VerifyOpenBao', 'AuditOpenBao', 'CleanupOpenBao')]
+    [ValidateSet('Status', 'Generate', 'VerifyOpenBao', 'AuditOpenBao', 'CleanupOpenBao', 'ProvisionMuse')]
     [string]$Action,
 
     [Parameter(Mandatory)]
@@ -45,6 +45,18 @@ $revocationPending = $false
 try {
     if (-not (Test-Path -LiteralPath $sopsFile -PathType Leaf)) {
         throw 'Missing canonical SOPS file'
+    }
+
+    if ($Action -eq 'ProvisionMuse') {
+        # Fixed host-local OpenBao provisioner; no client-supplied path or command.
+        if ($Key -cne 'OPENBAO_MUSE' -or
+            $Provider -cne 'RandomHex' -or $Rotate.IsPresent -or
+            $Label -or $AllowedTools) {
+            throw 'Invalid Muse provisioning parameters'
+        }
+        & (Join-Path $PSScriptRoot 'Provision-HostOpenBaoMuse.ps1')
+        if ($LASTEXITCODE -ne 0) { throw 'Muse provisioning failed' }
+        return
     }
 
     if ($Action -eq 'VerifyOpenBao') {
