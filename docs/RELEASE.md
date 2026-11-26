@@ -36,7 +36,7 @@ Get-FileHash -Algorithm SHA256 (Join-Path $releaseTarget 'release/lomway.exe')
 ## 4. License
 
 - `license = "MIT"` in `Cargo.toml`; the full license text is [`LICENSE`](../LICENSE).
-- Dependency license review is a release gate: `python scripts/dependency_gate.py` verifies the exact committed lockfile against `cargo metadata --locked`, requires license metadata for every package, and queries OSV. The gate conservatively blocks any unresolved OSV record, therefore high/critical findings necessarily block release.
+- Dependency license review is a release gate: `python scripts/dependency_gate.py` verifies the exact committed lockfile against `cargo metadata --locked`, requires license metadata for every package, and queries OSV. The gate conservatively blocks any unresolved OSV record, therefore high/critical findings necessarily block release. The only way to accept a record is a reviewed entry in `scripts/dependency_gate_exceptions.toml`, which names the exact package, version, and advisory and records a `reason` and `reviewed` date. A version bump or a new advisory blocks again.
 
 ## 5. Source
 
@@ -60,7 +60,7 @@ All of the following must pass on the intended release tree before tagging:
 4. Locked release build → success. On an idle/clean machine `cargo build --locked --release` is sufficient; on a live Windows workstation use a fresh staging `CARGO_TARGET_DIR` so the running executable is never overwritten.
 5. Docs match the actual CLI and configuration schema (commands in [QUICKSTART.md](QUICKSTART.md) and [CONFIGURATION.md](CONFIGURATION.md) run as written).
 6. Privacy/hygiene scan: `python scripts/release_privacy_scan.py` must pass with no credentials, private identifiers, machine-specific paths, secret values, or forbidden generated/private paths in the current candidate **or any blob reachable from `HEAD`**.
-7. Dependency/license/vulnerability gate: `python scripts/dependency_gate.py` must match the exact lockfile package set, find license metadata for every package, and return no unresolved OSV records.
+7. Dependency/license/vulnerability gate: `python scripts/dependency_gate.py` must match the exact lockfile package set, find license metadata for every package, and return no unresolved OSV records (records listed in `scripts/dependency_gate_exceptions.toml` are reported as accepted).
 8. Clean-machine artifact smoke: `pwsh -NoProfile -File scripts/clean-machine-smoke.ps1` copies the release binary and public one-backend fixture into a fresh temp directory, starts only the redistributable public mock backend, and proves `check`, `/healthz`, and `/readyz` without any private deployment backend.
 9. Public-push shape: `main` must contain only intended public history; `git status --short --branch` must be clean; the intended push is `git push -u origin main`, never `git push --all` or `git push --mirror`. Local review/backup refs are not publication inputs.
 
