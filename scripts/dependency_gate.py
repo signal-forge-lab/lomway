@@ -13,6 +13,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OSV_URL = "https://api.osv.dev/v1/querybatch"
+EXCEPTIONS_PATH = ROOT / "scripts" / "dependency_gate_exceptions.toml"
+EXCEPTION_FIELDS = ("package", "version", "advisory", "reason", "reviewed")
 
 
 def cargo_metadata() -> dict:
@@ -26,6 +28,23 @@ def cargo_metadata() -> dict:
 def lock_packages() -> list[dict]:
     with (ROOT / "Cargo.lock").open("rb") as handle:
         return tomllib.load(handle)["package"]
+
+
+def load_exceptions() -> dict[tuple[str, str, str], dict]:
+    if not EXCEPTIONS_PATH.exists():
+        return {}
+    with EXCEPTIONS_PATH.open("rb") as handle:
+        entries = tomllib.load(handle).get("exception", [])
+    exceptions: dict[tuple[str, str, str], dict] = {}
+    for entry in entries:
+        missing = [f for f in EXCEPTION_FIELDS if not str(entry.get(f, "")).strip()]
+        key = (entry.get("package", "?"), entry.get("version", "?"), entry.get("advisory", "?"))
+        if missing:
+            raise ValueError(f"exception {' '.join(key)} is missing {', '.join(missing)}")
+        if key in exceptions:
+            raise ValueError(f"duplicate exception for {' '.join(key)}")
+        exceptions[key] = entry
+    return exceptions
 
 
 def osv_query(packages: list[dict]) -> list[tuple[str, str, list[str]]]:
@@ -74,8 +93,22 @@ def main() -> int:
             print(f"- {name} {version}")
         return 1
 
+    try:
+        exceptions = load_exceptions()
+    except (ValueError, tomllib.TOMLDecodeError) as error:
+        print(f"dependency gate: FAIL (invalid {EXCEPTIONS_PATH.name}: {error})")
+        return 1
+
     license_expressions = sorted({p["license"] for p in metadata})
-    findings = osv_query(locked)
+    findings = []
+    accepted = []
+    for name, version, ids in osv_query(locked):
+        unresolved = [i for i in ids if (name, version, i) not in exceptions]
+        accepted.extend((name, version, i) for i in ids if i not in unresolved)
+        if unresolved:
+            findings.append((name, version, unresolved))
+    for key in sorted(set(exceptions) - set(accepted)):
+        print(f"dependency gate: note: stale exception no longer matches: {' '.join(key)}")
     if findings:
         print("dependency gate: FAIL (unresolved OSV records; release blocks conservatively)")
         for name, version, ids in findings:
@@ -85,6 +118,9 @@ def main() -> int:
     print(f"dependency gate: PASS ({len(locked)} exact locked packages)")
     print(f"license expressions reviewed: {len(license_expressions)}; missing: 0")
     print("OSV unresolved vulnerability records: 0")
+    print(f"OSV records accepted by reviewed exception: {len(accepted)}")
+    for name, version, advisory in sorted(accepted):
+        print(f"- {name} {version}: {advisory} ({exceptions[(name, version, advisory)]['reviewed']})")
     return 0
 
 

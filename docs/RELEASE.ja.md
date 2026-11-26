@@ -36,7 +36,7 @@ Get-FileHash -Algorithm SHA256 (Join-Path $releaseTarget 'release/lomway.exe')
 ## 4. ライセンス
 
 - `Cargo.toml` は `license = "MIT"`。ライセンス全文は [`LICENSE`](../LICENSE) です。
-- 依存のライセンスレビューはリリースゲートです。`python scripts/dependency_gate.py` がcommit済みlockfileと `cargo metadata --locked` のpackage set一致、全packageのlicense metadata、OSVを検査します。未解決OSVを保守的にすべてblockするため、high/criticalは必ずリリースをblockします。
+- 依存のライセンスレビューはリリースゲートです。`python scripts/dependency_gate.py` がcommit済みlockfileと `cargo metadata --locked` のpackage set一致、全packageのlicense metadata、OSVを検査します。未解決OSVを保守的にすべてblockするため、high/criticalは必ずリリースをblockします。recordを許容できるのは `scripts/dependency_gate_exceptions.toml` のレビュー済みエントリだけです。エントリはpackage・version・advisoryを厳密に指定し、`reason` と `reviewed` 日付を記録します。versionが上がるか新しいadvisoryが出ると再びblockされます。
 
 ## 5. ソース
 
@@ -60,7 +60,7 @@ repositoryに同梱され、ドキュメントから参照されます:
 4. locked release build → 成功。idle/clean machineでは `cargo build --locked --release` でよく、live Windows workstationではfresh staging `CARGO_TARGET_DIR` を使い、実行中exeを上書きしないこと。
 5. ドキュメントが実際のCLIと構成schemaと一致していること（[QUICKSTART.ja.md](QUICKSTART.ja.md) と [CONFIGURATION.ja.md](CONFIGURATION.ja.md) のコマンドが記載どおり動くこと）。
 6. プライバシー/衛生スキャン: `python scripts/release_privacy_scan.py` が、現在の候補treeだけでなく **`HEAD` から到達可能な全履歴blob** についてもcredential・非公開識別子・マシン固有パス・secret値・禁止されたgenerated/private path 0でPASSすること。
-7. 依存/license/vulnerability gate: `python scripts/dependency_gate.py` がexact lockfile package setと一致し、全packageにlicense metadataがあり、未解決OSV recordが0であること。
+7. 依存/license/vulnerability gate: `python scripts/dependency_gate.py` がexact lockfile package setと一致し、全packageにlicense metadataがあり、未解決OSV recordが0であること（`scripts/dependency_gate_exceptions.toml` に記載されたrecordは許容済みとして表示）。
 8. クリーンマシン成果物スモーク: `pwsh -NoProfile -File scripts/clean-machine-smoke.ps1` がfresh temp directoryへrelease binaryとpublic fixtureをcopyし、再配布可能public mock backendだけで `check` / `serve` / `/healthz` / `/readyz` をPASSすること。
 9. 公開push形状: `main` は公開対象履歴だけを含み、`git status --short --branch` がcleanであること。pushは `git push -u origin main` を使用し、`git push --all` / `git push --mirror` は使用しない。local review/backup refは公開対象ではありません。
 

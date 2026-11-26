@@ -1,0 +1,18 @@
+# Reviewed OSV exceptions for scripts/dependency_gate.py.
+#
+# Each entry accepts exactly one advisory for one exact locked package
+# version. A version bump or a new advisory id is not covered and blocks
+# again until it is reviewed. Remove an entry once it no longer matches.
+
+[[exception]]
+package = "chrono"
+version = "0.4.45"
+advisory = "RUSTSEC-2026-0543"
+kind = "unmaintained"
+reviewed = "2026-11-26"
+reason = """\
+Only the vendored mcp-proxy uses chrono, for timestamp display in \
+vendor/mcp-proxy/src/admin.rs (DateTime<Utc>). No fixed release exists, so \
+the advisory is accepted for now. Revisit when mcp-proxy drops chrono or a \
+maintained replacement is adopted.\
+"""
