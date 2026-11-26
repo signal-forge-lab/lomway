@@ -18,6 +18,7 @@ export interface PatRecord {
   scope: "devspace";
   audience: string;
   allowedTools: string[];
+  deniedTools?: string[];
 }
 
 interface PatStore {
@@ -31,6 +32,17 @@ export function patStorePath(runtimeDir: string): string {
 
 function hashToken(token: string): Buffer {
   return createHash("sha256").update(token, "utf8").digest();
+}
+
+const DENY_ENTRY = /^[A-Za-z0-9_.:-]{1,127}_$/;
+
+function validDeniedTools(denied: unknown): denied is string[] {
+  return Array.isArray(denied) &&
+    denied.length >= 1 && denied.length <= 100 &&
+    new Set(denied).size === denied.length &&
+    denied.every((name) => typeof name === "string" &&
+      (NAME_PATTERN.test(name) || DENY_ENTRY.test(name)) &&
+      !FORBIDDEN_TOOLS.has(name));
 }
 
 function validateStore(value: unknown): PatStore {
@@ -57,7 +69,11 @@ function validateStore(value: unknown): PatStore {
       !Array.isArray(record.allowedTools) ||
       record.allowedTools.some((name) => typeof name !== "string" ||
         (name !== "*" && !NAME_PATTERN.test(name))) ||
-      (record.allowedTools.includes("*") && record.allowedTools.length !== 1)
+      (record.allowedTools.includes("*") && record.allowedTools.length !== 1) ||
+      // Deny-mode records carry deniedTools instead of an allowlist; the
+      // two modes never combine.
+      (record.deniedTools !== undefined &&
+        (!validDeniedTools(record.deniedTools) || record.allowedTools.length !== 0))
     ) {
       throw new Error("invalid PAT record");
     }
@@ -117,15 +133,19 @@ async function lockedUpdate<T>(path: string, update: (store: PatStore) => Promis
 
 export async function issuePat(
   path: string,
-  options: { label: string; days: number; audience: string; allowedTools: string[] },
+  options: { label: string; days: number; audience: string; allowedTools: string[]; deniedTools?: string[] },
 ): Promise<{ token: string; record: Omit<PatRecord, "digest"> }> {
-  const { label, days, audience, allowedTools } = options;
+  const { label, days, audience, allowedTools, deniedTools } = options;
   if (label.trim().length < 1 || label.length > 80) throw new Error("label must be 1..80 characters");
   if (!Number.isInteger(days) || days < 1 || days > MAX_DAYS) throw new Error("days must be 1..90");
   if (audience.length < 1 || !audience.startsWith("https://") || !audience.endsWith("/mcp")) {
     throw new Error("audience must be an HTTPS MCP URL");
   }
-  if (
+  if (deniedTools !== undefined) {
+    if (!validDeniedTools(deniedTools) || allowedTools.length !== 0) {
+      throw new Error("deny-mode PATs require unique denied tool names or prefixes and no allowlist");
+    }
+  } else if (
     allowedTools.length < 1 ||
     allowedTools.length > 100 ||
     new Set(allowedTools).size !== allowedTools.length ||
@@ -154,6 +174,7 @@ export async function issuePat(
       scope: "devspace",
       audience,
       allowedTools: [...allowedTools],
+      ...(deniedTools !== undefined ? { deniedTools: [...deniedTools] } : {}),
     };
     store.tokens.push(record);
     await writeStore(path, store);

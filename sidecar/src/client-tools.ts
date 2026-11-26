@@ -10,6 +10,7 @@ const FORBIDDEN_TOOLS = new Set(["proxy/config", "proxy/add_backend"]);
 export interface ClientToolPolicy {
   readonly unrestrictedLegacy: boolean;
   readonly allowedTools: string[];
+  readonly exposeSkills: boolean;
 }
 
 export function clientDigest(clientId: string): string {
@@ -25,7 +26,7 @@ export async function loadClientToolPolicy(runtimeDir: string, clientId: string)
     raw = await readFile(join(runtimeDir, "client-tool-policy.json"), "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { unrestrictedLegacy: false, allowedTools: [...DEFAULT_DISCOVERY_TOOLS] };
+      return { unrestrictedLegacy: false, allowedTools: [...DEFAULT_DISCOVERY_TOOLS], exposeSkills: false };
     }
     throw error;
   }
@@ -37,6 +38,9 @@ export async function loadClientToolPolicy(runtimeDir: string, clientId: string)
   if (policy.version !== 1 ||
       !Array.isArray(policy.unrestrictedLegacyClientHashes) ||
       !policy.unrestrictedLegacyClientHashes.every((entry) => typeof entry === "string" && CLIENT_DIGEST.test(entry)) ||
+      (policy.skillsExposedClientHashes !== undefined &&
+        (!Array.isArray(policy.skillsExposedClientHashes) ||
+          !policy.skillsExposedClientHashes.every((entry) => typeof entry === "string" && CLIENT_DIGEST.test(entry)))) ||
       typeof policy.clientToolAllowlists !== "object" ||
       policy.clientToolAllowlists === null || Array.isArray(policy.clientToolAllowlists)) {
     throw new Error("Invalid OAuth client tool policy schema");
@@ -52,13 +56,17 @@ export async function loadClientToolPolicy(runtimeDir: string, clientId: string)
   }
   const digest = clientDigest(clientId);
   const trustedLegacy = (policy.unrestrictedLegacyClientHashes as string[]).includes(digest);
+  // Skills exposure is an independent allowlist axis: only registered
+  // clients receive the gateway's skill catalog in initialize instructions.
+  const exposeSkills = Array.isArray(policy.skillsExposedClientHashes) &&
+    (policy.skillsExposedClientHashes as string[]).includes(digest);
   const explicit = allowlists[digest];
   // Explicit per-client allowlist is always more restrictive than legacy
   // exemption, so an operator can narrow a previously trusted client.
   if (Array.isArray(explicit)) {
-    return { unrestrictedLegacy: false, allowedTools: [...explicit] as string[] };
+    return { unrestrictedLegacy: false, allowedTools: [...explicit] as string[], exposeSkills };
   }
   return trustedLegacy
-    ? { unrestrictedLegacy: true, allowedTools: [] }
-    : { unrestrictedLegacy: false, allowedTools: [...DEFAULT_DISCOVERY_TOOLS] };
+    ? { unrestrictedLegacy: true, allowedTools: [], exposeSkills }
+    : { unrestrictedLegacy: false, allowedTools: [...DEFAULT_DISCOVERY_TOOLS], exposeSkills };
 }

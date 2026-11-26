@@ -50,3 +50,38 @@ test("malformed and admin tool rules fail closed", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("skills exposure is an allowlist: only registered clients expose skills", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "lomway-client-tool-policy-"));
+  try {
+    // No policy file at all: skills stay hidden.
+    assert.equal((await loadClientToolPolicy(directory, "any-client")).exposeSkills, false);
+    const exposedId = clientDigest("chat-client");
+    await writeFile(join(directory, "client-tool-policy.json"), JSON.stringify({
+      version: 1,
+      unrestrictedLegacyClientHashes: [exposedId],
+      skillsExposedClientHashes: [exposedId],
+      clientToolAllowlists: {},
+    }));
+    assert.equal((await loadClientToolPolicy(directory, "chat-client")).exposeSkills, true);
+    // Unrestricted for tools does not by itself expose skills, and an
+    // unregistered client never exposes them.
+    assert.equal((await loadClientToolPolicy(directory, "other-client")).exposeSkills, false);
+    await writeFile(join(directory, "client-tool-policy.json"), JSON.stringify({
+      version: 1,
+      unrestrictedLegacyClientHashes: [exposedId],
+      clientToolAllowlists: {},
+    }));
+    assert.equal((await loadClientToolPolicy(directory, "chat-client")).exposeSkills, false);
+    // A malformed exposed list fails closed like every other policy rule.
+    await writeFile(join(directory, "client-tool-policy.json"), JSON.stringify({
+      version: 1,
+      unrestrictedLegacyClientHashes: [],
+      skillsExposedClientHashes: ["not-a-digest"],
+      clientToolAllowlists: {},
+    }));
+    await assert.rejects(loadClientToolPolicy(directory, "chat-client"));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

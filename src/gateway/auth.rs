@@ -12,9 +12,12 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tower_mcp::proxy::McpProxy;
 
 use crate::config::model::NorthboundOAuthConfig;
-use crate::gateway::deferred::{ACCESS_SCOPED_META_TOOLS, CALLER_ALLOWLIST_ARGUMENT};
+use crate::gateway::deferred::{
+    ACCESS_SCOPED_META_TOOLS, CALLER_ALLOWLIST_ARGUMENT, current_tool_names,
+};
 
 /// MCP `initialize` instructions served to a restricted caller (a PAT or a
 /// limited OAuth client without the `*` grant). The deployment's own
@@ -29,6 +32,19 @@ struct OAuthState {
     client: reqwest::Client,
     metadata_url: String,
     authorization_server: String,
+    hooks: CallerPolicyHooks,
+}
+
+/// Deployment-provided hooks for per-caller policy that cannot be derived
+/// from the OAuth configuration alone.
+#[derive(Clone, Default)]
+pub(super) struct CallerPolicyHooks {
+    /// The full initialize instructions minus the skill catalog, served to
+    /// unrestricted callers whose policy does not expose skills.
+    pub no_skills_instructions: Option<String>,
+    /// The gateway's aggregated catalog, used to compute a deny-mode
+    /// caller's effective allowlist for capability search.
+    pub catalog_proxy: Option<McpProxy>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,11 +64,25 @@ struct IntrospectionResponse {
     oauth_unrestricted_legacy: bool,
     #[serde(default)]
     allowed_tools: Vec<String>,
+    /// Skills are exposed only to clients registered for them; an absent
+    /// field (older sidecar) therefore means "do not expose".
+    #[serde(default)]
+    expose_skills: bool,
+    #[serde(default)]
+    denied_tools: Vec<String>,
 }
 
 pub(super) fn protect_mcp_router(
     router: Router,
     config: NorthboundOAuthConfig,
+) -> (Router, Router) {
+    protect_mcp_router_with_hooks(router, config, CallerPolicyHooks::default())
+}
+
+pub(super) fn protect_mcp_router_with_hooks(
+    router: Router,
+    config: NorthboundOAuthConfig,
+    hooks: CallerPolicyHooks,
 ) -> (Router, Router) {
     let resource =
         reqwest::Url::parse(&config.resource_url).expect("validated OAuth resource URL must parse");
@@ -73,6 +103,7 @@ pub(super) fn protect_mcp_router(
             .expect("building local introspection client"),
         metadata_url,
         authorization_server,
+        hooks,
     };
 
     let protected = router.layer(middleware::from_fn_with_state(state.clone(), require_oauth));
@@ -123,13 +154,23 @@ async fn require_oauth(State(state): State<OAuthState>, request: Request, next: 
     };
     let actor = format!("{:x}", Sha256::digest(client_id.as_bytes()));
     let actor = &actor[..16];
+    if !introspection.denied_tools.is_empty() {
+        return deny_filtered_request(request, next, &state, &introspection.denied_tools, actor)
+            .await;
+    }
     if introspection.pat || !introspection.oauth_unrestricted_legacy {
         return restricted_pat_request(request, next, &introspection.allowed_tools, actor).await;
     }
-    unrestricted_audited_request(request, next, actor).await
+    unrestricted_audited_request(request, next, &state, introspection.expose_skills, actor).await
 }
 
-async fn unrestricted_audited_request(request: Request, next: Next, actor: &str) -> Response {
+async fn unrestricted_audited_request(
+    request: Request,
+    next: Next,
+    state: &OAuthState,
+    expose_skills: bool,
+    actor: &str,
+) -> Response {
     // Audit tool names, never token values or request arguments.
     let (parts, body) = request.into_parts();
     let Ok(bytes) = to_bytes(body, 1_048_576).await else {
@@ -151,6 +192,7 @@ async fn unrestricted_audited_request(request: Request, next: Next, actor: &str)
         .and_then(|v| v.get("method"))
         .and_then(Value::as_str)
         .unwrap_or("unknown");
+    let is_initialize = method == "initialize";
     let method = audit_field(method);
     let tool = message
         .as_ref()
@@ -161,6 +203,18 @@ async fn unrestricted_audited_request(request: Request, next: Next, actor: &str)
     let response = next
         .run(Request::from_parts(parts, Body::from(bytes)))
         .await;
+    // Skills exposure is an axis independent of tool access: an
+    // unrestricted caller that is not registered for skills receives the
+    // instructions variant without the skill catalog. The deployment text
+    // and the actions / file-transfer guidance are preserved.
+    let response = if is_initialize && !expose_skills {
+        match &state.hooks.no_skills_instructions {
+            Some(text) => replace_instructions(response, text).await,
+            None => redact_initialize_instructions(response).await,
+        }
+    } else {
+        response
+    };
     tracing::info!(actor, method, tool, decision="legacy_allow",
         http_status=%response.status(), "mcp authorization audit");
     response
@@ -269,6 +323,162 @@ async fn restricted_pat_request(
     response
 }
 
+/// Deny-mode PAT: every tool is available except the denied names and
+/// trailing-underscore prefixes. This expresses profiles like "all tools
+/// except one backend", which an allowlist cannot (allowlists are capped
+/// at 100 entries while the catalog is far larger). Instructions follow
+/// the restricted path: the fixed generic text.
+async fn deny_filtered_request(
+    request: Request,
+    next: Next,
+    state: &OAuthState,
+    denied: &[String],
+    actor: &str,
+) -> Response {
+    if request.method() != Method::POST {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    let (parts, body) = request.into_parts();
+    let bytes = match to_bytes(body, 1_048_576).await {
+        Ok(bytes) => bytes,
+        Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+    };
+    let Ok(mut message) = serde_json::from_slice::<Value>(&bytes) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(method) = message
+        .get("method")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        // Batch JSON-RPC and opaque calls are deliberately denied.
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let method = method.as_str();
+    let tool = audit_field(
+        message
+            .pointer("/params/name")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    )
+    .to_owned();
+    let tool = tool.as_str();
+    let deferred_target = audit_field(
+        message
+            .pointer("/params/arguments/name")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    )
+    .to_owned();
+    let deferred_target = deferred_target.as_str();
+    let should_filter = match method {
+        "initialize"
+        | "ping"
+        | "server/discover"
+        | "notifications/initialized"
+        | "notifications/cancelled" => false,
+        "tools/list" => true,
+        "tools/call" => {
+            let name = message.pointer("/params/name").and_then(Value::as_str);
+            if !name.is_some_and(|name| permitted_deny_call(name, &message, denied)) {
+                tracing::info!(
+                    actor,
+                    method = audit_field(method),
+                    tool,
+                    deferred_target,
+                    decision = "deny",
+                    "mcp authorization audit"
+                );
+                return StatusCode::FORBIDDEN.into_response();
+            }
+            false
+        }
+        _ => {
+            tracing::info!(
+                actor,
+                method = audit_field(method),
+                tool,
+                deferred_target,
+                decision = "deny",
+                "mcp authorization audit"
+            );
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    };
+    // Capability search/describe results are scoped to this caller: the
+    // effective allowlist (the whole catalog minus the denied tools)
+    // overwrites any caller-supplied value.
+    let bytes = if method == "tools/call" && scoped_meta_tool(&message) {
+        let effective: Vec<String> = match &state.hooks.catalog_proxy {
+            Some(proxy) => current_tool_names(proxy)
+                .await
+                .into_iter()
+                .filter(|name| !denied_tool_matches(denied, name))
+                .collect(),
+            None => Vec::new(),
+        };
+        if inject_caller_allowlist(&mut message, true, &effective) {
+            match serde_json::to_vec(&message) {
+                Ok(encoded) => axum::body::Bytes::from(encoded),
+                Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+            }
+        } else {
+            bytes
+        }
+    } else {
+        bytes
+    };
+    let response = next
+        .run(Request::from_parts(parts, Body::from(bytes)))
+        .await;
+    let response = if should_filter {
+        filter_denied_tools_list(response, denied).await
+    } else if method == "initialize" {
+        redact_initialize_instructions(response).await
+    } else {
+        response
+    };
+    tracing::info!(actor, method = audit_field(method), tool, deferred_target, decision="deny_filtered",
+        http_status=%response.status(), "mcp authorization audit");
+    response
+}
+
+/// Whether a tool is denied for a deny-mode caller. An entry ending in
+/// `_` is a prefix (e.g. `devspace_` denies the whole backend); any other
+/// entry is an exact tool name. Administrative proxy endpoints are denied
+/// unconditionally, mirroring `pat_tool_allowed`.
+fn denied_tool_matches(denied: &[String], name: &str) -> bool {
+    if name.is_empty()
+        || name.starts_with("proxy/")
+        || matches!(name, "proxy_config" | "proxy_add_backend")
+    {
+        return true;
+    }
+    denied.iter().any(|entry| {
+        if entry.ends_with('_') {
+            name.starts_with(entry.as_str())
+        } else {
+            entry == name
+        }
+    })
+}
+
+fn permitted_deny_call(name: &str, message: &Value, denied: &[String]) -> bool {
+    if denied_tool_matches(denied, name) {
+        return false;
+    }
+    if name == "lomway_call_tool" {
+        // The deferred target itself must not be denied either.
+        return message
+            .pointer("/params/arguments/name")
+            .and_then(Value::as_str)
+            .is_some_and(|target| {
+                target != "lomway_call_tool" && !denied_tool_matches(denied, target)
+            });
+    }
+    true
+}
+
 fn permitted_pat_call(name: &str, message: &Value, allowed: &[String]) -> bool {
     if !pat_tool_allowed(allowed, name) {
         return false;
@@ -362,13 +572,28 @@ fn restrict_tool_catalog(message: &mut Value, allowed: &[String]) -> bool {
     true
 }
 
-/// Replace `result.instructions` with [`RESTRICTED_INSTRUCTIONS`]. Returns
-/// whether the message changed; messages without instructions (errors,
-/// notifications) are left as they are.
-fn redact_instructions(message: &mut Value) -> bool {
+fn restrict_tool_catalog_denied(message: &mut Value, denied: &[String]) -> bool {
+    let Some(tools) = message
+        .pointer_mut("/result/tools")
+        .and_then(Value::as_array_mut)
+    else {
+        return false;
+    };
+    tools.retain(|tool| {
+        tool.get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| !denied_tool_matches(denied, name))
+    });
+    true
+}
+
+/// Replace `result.instructions` with `text`. Returns whether the message
+/// changed; messages without instructions (errors, notifications) are left
+/// as they are.
+fn replace_instructions_text(message: &mut Value, text: &str) -> bool {
     match message.pointer_mut("/result/instructions") {
-        Some(instructions) if instructions != RESTRICTED_INSTRUCTIONS => {
-            *instructions = Value::String(RESTRICTED_INSTRUCTIONS.to_string());
+        Some(instructions) if instructions != text => {
+            *instructions = Value::String(text.to_string());
             true
         }
         _ => false,
@@ -379,6 +604,13 @@ fn redact_instructions(message: &mut Value) -> bool {
 /// SSE. A body that cannot be parsed is refused rather than forwarded, so
 /// unredacted instructions never pass through on an unexpected encoding.
 async fn redact_initialize_instructions(response: Response) -> Response {
+    replace_instructions(response, RESTRICTED_INSTRUCTIONS).await
+}
+
+/// Substitute the instructions of an `initialize` response, JSON or SSE.
+/// A body that cannot be parsed is refused rather than forwarded, so the
+/// original instructions never pass through on an unexpected encoding.
+async fn replace_instructions(response: Response, text: &str) -> Response {
     if !response.status().is_success() {
         return response;
     }
@@ -401,7 +633,7 @@ async fn redact_initialize_instructions(response: Response) -> Response {
         let Ok(mut json) = serde_json::from_slice::<Value>(&bytes) else {
             return StatusCode::BAD_GATEWAY.into_response();
         };
-        if !redact_instructions(&mut json) {
+        if !replace_instructions_text(&mut json, text) {
             return Response::from_parts(parts, Body::from(bytes));
         }
         match serde_json::to_vec(&json) {
@@ -418,7 +650,7 @@ async fn redact_initialize_instructions(response: Response) -> Response {
                 let Ok(mut message) = serde_json::from_str::<Value>(data.trim_start()) else {
                     return StatusCode::BAD_GATEWAY.into_response();
                 };
-                redact_instructions(&mut message);
+                replace_instructions_text(&mut message, text);
                 output.push_str("data: ");
                 match serde_json::to_string(&message) {
                     Ok(text) => output.push_str(&text),
@@ -438,6 +670,23 @@ async fn redact_initialize_instructions(response: Response) -> Response {
 }
 
 async fn filter_pat_tools_list(response: Response, allowed: &[String]) -> Response {
+    rewrite_tools_list(response, |message| {
+        restrict_tool_catalog(message, allowed)
+    })
+    .await
+}
+
+async fn filter_denied_tools_list(response: Response, denied: &[String]) -> Response {
+    rewrite_tools_list(response, |message| {
+        restrict_tool_catalog_denied(message, denied)
+    })
+    .await
+}
+
+async fn rewrite_tools_list(
+    response: Response,
+    transform: impl Fn(&mut Value) -> bool,
+) -> Response {
     if !response.status().is_success() {
         return response;
     }
@@ -457,7 +706,7 @@ async fn filter_pat_tools_list(response: Response, allowed: &[String]) -> Respon
         let Ok(mut json) = serde_json::from_slice::<Value>(&bytes) else {
             return StatusCode::BAD_GATEWAY.into_response();
         };
-        if !restrict_tool_catalog(&mut json, allowed) {
+        if !transform(&mut json) {
             return StatusCode::BAD_GATEWAY.into_response();
         }
         serde_json::to_vec(&json).ok()
@@ -472,7 +721,7 @@ async fn filter_pat_tools_list(response: Response, allowed: &[String]) -> Respon
                 let Ok(mut message) = serde_json::from_str::<Value>(data.trim_start()) else {
                     return StatusCode::BAD_GATEWAY.into_response();
                 };
-                if restrict_tool_catalog(&mut message, allowed) {
+                if transform(&mut message) {
                     found = true;
                 }
                 output.push_str("data: ");
@@ -589,7 +838,26 @@ mod tests {
                             "scope": "devspace",
                             "exp": now + 3600,
                             "client_id": "legacy-client",
+                            "oauth_unrestricted_legacy": true,
+                            "expose_skills": true
+                        }),
+                        Some("valid-noskills") => json!({
+                            "active": true,
+                            "aud": resource,
+                            "scope": "devspace",
+                            "exp": now + 3600,
+                            "client_id": "legacy-noskills-client",
                             "oauth_unrestricted_legacy": true
+                        }),
+                        Some("pat-deny") => json!({
+                            "active": true,
+                            "aud": resource,
+                            "scope": "devspace",
+                            "exp": now + 3600,
+                            "pat": true,
+                            "client_id": "pat:deny-synthetic",
+                            "allowed_tools": [],
+                            "denied_tools": ["devspace_"]
                         }),
                         Some("oauth-limited") => json!({
                             "active": true,
@@ -1117,6 +1385,236 @@ mod tests {
                 assert!(!text.contains("cua-windows") && !text.contains("jev-ultrafast"));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn unrestricted_caller_without_skills_exposure_gets_the_variant() {
+        let resource = "https://lomway.example/mcp".to_string();
+        let introspection = spawn_introspection(resource.clone()).await;
+        let config = NorthboundOAuthConfig {
+            resource_url: resource,
+            introspection_url: format!("http://{introspection}/oauth/introspect"),
+            required_scope: "devspace".to_string(),
+        };
+        let initialize = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "lomway", "version": "test"},
+                "instructions": "deployment text\n\nSKILL CATALOG"
+            }
+        });
+        let upstream = Router::new().fallback(move || {
+            let initialize = initialize.clone();
+            async move { Json(initialize) }
+        });
+        let hooks = CallerPolicyHooks {
+            no_skills_instructions: Some("deployment text".to_string()),
+            catalog_proxy: None,
+        };
+        let (upstream, _) = protect_mcp_router_with_hooks(upstream, config, hooks);
+        let app = Router::new().nest("/mcp", upstream);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}/mcp");
+        let request = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2025-06-18","capabilities":{},
+            "clientInfo":{"name":"test","version":"0"}
+        }});
+        for (token, expected) in [
+            ("valid-noskills", "deployment text"),
+            ("valid", "deployment text\n\nSKILL CATALOG"),
+        ] {
+            let body: Value = client
+                .post(&base)
+                .bearer_auth(token)
+                .json(&request)
+                .send()
+                .await
+                .expect("initialize")
+                .json()
+                .await
+                .expect("json");
+            assert_eq!(body["result"]["instructions"], expected, "{token}");
+            assert_eq!(body["result"]["serverInfo"]["name"], "lomway", "{token}");
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_mode_pat_hides_only_the_denied_backend() {
+        use tower_mcp::{
+            CallToolResult, McpRouter, ToolBuilder, client::ChannelTransport,
+            schemars::JsonSchema,
+        };
+
+        #[derive(Debug, serde::Deserialize, JsonSchema)]
+        struct Empty {}
+
+        fn backend_router(
+            name: &'static str,
+            tools: &[(&'static str, &'static str)],
+        ) -> McpRouter {
+            let mut router = McpRouter::new().server_info(name, "1.0.0");
+            for (tool, description) in tools {
+                router = router.tool(
+                    ToolBuilder::new(*tool)
+                        .description(*description)
+                        .handler(|_: Empty| async move { Ok(CallToolResult::text("ok")) })
+                        .build(),
+                );
+            }
+            router
+        }
+
+        let resource = "https://lomway.example/mcp".to_string();
+        let introspection = spawn_introspection(resource.clone()).await;
+        let config = NorthboundOAuthConfig {
+            resource_url: resource,
+            introspection_url: format!("http://{introspection}/oauth/introspect"),
+            required_scope: "devspace".to_string(),
+        };
+        let catalog = McpProxy::builder("lomway-test", "1.0.0")
+            .separator("_")
+            .backend(
+                "devspace",
+                ChannelTransport::new(backend_router(
+                    "devspace",
+                    &[("read", "Read."), ("exec_command", "Exec.")],
+                )),
+            )
+            .await
+            .backend(
+                "hindsight",
+                ChannelTransport::new(backend_router("hindsight", &[("recall", "Recall.")])),
+            )
+            .await
+            .build_strict()
+            .await
+            .expect("catalog proxy");
+        // Method-aware upstream: fixed tools/list and initialize payloads,
+        // echo for everything else (so search injection is observable).
+        let upstream = Router::new().fallback(|body: axum::body::Bytes| async move {
+            let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let payload = match request.get("method").and_then(Value::as_str) {
+                Some("tools/list") => json!({"jsonrpc":"2.0","id":1,"result":{"tools":[
+                    {"name":"devspace_read"},{"name":"devspace_exec_command"},
+                    {"name":"safe_status"},{"name":"hindsight_recall"}]}}),
+                Some("initialize") => json!({"jsonrpc":"2.0","id":1,"result":{
+                    "protocolVersion":"2025-06-18","capabilities":{"tools":{}},
+                    "serverInfo":{"name":"lomway","version":"test"},
+                    "instructions":"deployment secret text"}}),
+                _ => request,
+            };
+            ([(header::CONTENT_TYPE, "application/json")], payload.to_string())
+        });
+        let hooks = CallerPolicyHooks {
+            no_skills_instructions: None,
+            catalog_proxy: Some(catalog),
+        };
+        let (upstream, _) = protect_mcp_router_with_hooks(upstream, config, hooks);
+        let app = Router::new().nest("/mcp", upstream);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}/mcp");
+
+        let tools: Value = client
+            .post(&base)
+            .bearer_auth("pat-deny")
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
+            .send()
+            .await
+            .expect("tools/list")
+            .json()
+            .await
+            .expect("json");
+        let names: Vec<&str> = tools["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["safe_status", "hindsight_recall"]);
+
+        for (name, expected) in [
+            ("devspace_read", reqwest::StatusCode::FORBIDDEN),
+            ("safe_status", reqwest::StatusCode::OK),
+            ("hindsight_recall", reqwest::StatusCode::OK),
+        ] {
+            let response = client
+                .post(&base)
+                .bearer_auth("pat-deny")
+                .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{}}}))
+                .send()
+                .await
+                .expect("tools/call");
+            assert_eq!(response.status(), expected, "{name}");
+        }
+        for (target, expected) in [
+            ("devspace_read", reqwest::StatusCode::FORBIDDEN),
+            ("hindsight_recall", reqwest::StatusCode::OK),
+        ] {
+            let response = client
+                .post(&base)
+                .bearer_auth("pat-deny")
+                .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                    "name":"lomway_call_tool","arguments":{"name":target,"arguments":{}}}}))
+                .send()
+                .await
+                .expect("deferred call");
+            assert_eq!(response.status(), expected, "deferred {target}");
+        }
+
+        let initialize: Value = client
+            .post(&base)
+            .bearer_auth("pat-deny")
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
+            .send()
+            .await
+            .expect("initialize")
+            .json()
+            .await
+            .expect("json");
+        assert_eq!(
+            initialize["result"]["instructions"],
+            RESTRICTED_INSTRUCTIONS
+        );
+
+        let search: Value = client
+            .post(&base)
+            .bearer_auth("pat-deny")
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                "name":"lomway_search_tools",
+                "arguments":{"query":"recall","_lomway_allowed_tools":["*"]}}}))
+            .send()
+            .await
+            .expect("search")
+            .json()
+            .await
+            .expect("echo");
+        let injected = search
+            .pointer("/params/arguments/_lomway_allowed_tools")
+            .and_then(Value::as_array)
+            .expect("injected allowlist");
+        let injected: Vec<&str> = injected.iter().filter_map(Value::as_str).collect();
+        assert!(injected.contains(&"hindsight_recall"), "{injected:?}");
+        assert!(
+            !injected.iter().any(|name| name.starts_with("devspace_")),
+            "{injected:?}"
+        );
     }
 
     #[tokio::test]

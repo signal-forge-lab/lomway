@@ -176,6 +176,17 @@ impl Workbench {
 
     /// Text appended to the deployment's `initialize` instructions.
     pub(crate) fn instructions_suffix(&self) -> Option<String> {
+        self.instructions_suffix_impl(true)
+    }
+
+    /// The same suffix without the skills block. Served to callers whose
+    /// policy does not expose the gateway's skill catalog; the actions and
+    /// file-transfer guidance stays.
+    pub(crate) fn instructions_suffix_without_skills(&self) -> Option<String> {
+        self.instructions_suffix_impl(false)
+    }
+
+    fn instructions_suffix_impl(&self, include_skills: bool) -> Option<String> {
         let mut parts = Vec::new();
         if self.actions.is_some() {
             parts.push("Gateway actions: lomway_list_actions lists operator-registered actions and pipelines; run one with lomway_run_action (dry_run=true shows the exact command first) and poll long runs with lomway_action_status. Multi-step pipelines run with lomway_run_pipeline (dry_run returns a plan digest; pass it as expected_digest).".to_string());
@@ -183,7 +194,8 @@ impl Workbench {
         if self.transfer.is_some() {
             parts.push("Files: when the user attaches or generates a file that must reach this machine, call lomway_receive_file with the native file value (and optionally a relative path); it is saved in the gateway inbox and the absolute path is returned. Return a small file to the user with lomway_send_file. Never paste base64 or signed URLs into shell commands.".to_string());
         }
-        if let Some(skills) = &self.skills
+        if include_skills
+            && let Some(skills) = &self.skills
             && let Some(block) =
                 skills::instructions_block(&skills.current(), self.skills_instructions_limit)
         {

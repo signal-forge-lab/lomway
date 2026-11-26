@@ -123,11 +123,10 @@ try {
         throw 'Swibo management identity does not match the listening process'
     }
     $gatewayPort = Get-LoopbackListener 17777
-    $desktopPort = Get-LoopbackListener 17778
-    if (-not $gatewayPort -or -not $desktopPort) {
-        throw 'Gateway or desktop local loopback listener missing'
+    if (-not $gatewayPort) {
+        throw 'Gateway loopback listener missing'
     }
-    if ($supervisor.OwningProcess -in @($gatewayPort.OwningProcess,$desktopPort.OwningProcess)) {
+    if ($supervisor.OwningProcess -eq $gatewayPort.OwningProcess) {
         throw 'Swibo management plane is not independent of the Lomway processes'
     }
     if ((Get-HttpStatus 'http://127.0.0.1:7677/healthz') -ne 200) {
@@ -179,9 +178,6 @@ try {
     if (!(Wait-Gateway $versioned)) { throw 'Versioned gateway failed health or process-path verification' }
     if ((Get-HttpStatus 'http://127.0.0.1:7677/healthz') -ne 200) {
         throw 'OAuth became unhealthy'
-    }
-    if ((Get-HttpStatus 'http://127.0.0.1:17778/healthz') -ne 200) {
-        throw 'Desktop local became unhealthy'
     }
     if ((Get-HttpStatus 'https://mcp.maiteneru.com/.well-known/openid-configuration') -ne 200) {
         throw 'Public OAuth became unhealthy'

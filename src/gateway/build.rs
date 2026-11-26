@@ -133,18 +133,35 @@ impl Gateway {
         let mut legacy = migrate::to_legacy(&public)?;
         // Skills, actions, and file transfer guidance reach clients through
         // the same MCP `instructions` field as the deployment text.
-        if let Some(suffix) = workbench.instructions_suffix() {
-            legacy.proxy.instructions = Some(match legacy.proxy.instructions.take() {
+        let deployment_text = legacy.proxy.instructions.take();
+        let compose = |suffix: String| -> String {
+            match &deployment_text {
                 Some(text) if !text.trim().is_empty() => format!("{text}\n\n{suffix}"),
                 _ => suffix,
-            });
-        }
+            }
+        };
+        legacy.proxy.instructions = workbench
+            .instructions_suffix()
+            .map(compose)
+            .or_else(|| deployment_text.clone());
+        // The same instructions without the skill catalog. Callers whose
+        // policy does not expose skills receive this variant at initialize
+        // (see gateway::auth); the deployment text and the actions /
+        // file-transfer guidance are unchanged.
+        let no_skills_instructions = workbench
+            .instructions_suffix_without_skills()
+            .map(compose)
+            .or_else(|| deployment_text.clone());
         let (proxy, monitor) = build_proxy_with_monitor(legacy, public.monitor).await?;
         crate::gateway::deferred::register(proxy.mcp_proxy(), deferred_catalog, monitor.clone())
             .await?;
         let namespaces = proxy.mcp_proxy().backend_namespaces();
-        let router =
-            crate::gateway::router::gateway_router_with_monitor_and_oauth(proxy, oauth, monitor);
+        let router = crate::gateway::router::gateway_router_with_monitor_and_oauth(
+            proxy,
+            oauth,
+            monitor,
+            no_skills_instructions,
+        );
         Ok(Self {
             router,
             listen_host,

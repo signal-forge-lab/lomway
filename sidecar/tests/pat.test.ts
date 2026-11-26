@@ -51,6 +51,33 @@ test("refuses missing tool restrictions and admin tools", async () => {
   }
 });
 
+test("deny-mode PAT issues with deniedTools and no allowlist", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "lomway-pat-"));
+  const path = patStorePath(dir);
+  try {
+    const { token, record } = await issuePat(path, {
+      label: "desktop", days: 30, audience, allowedTools: [], deniedTools: ["devspace_"],
+    });
+    assert.deepEqual(record.deniedTools, ["devspace_"]);
+    assert.deepEqual(record.allowedTools, []);
+    const verified = await verifyPat(path, token, audience);
+    assert.deepEqual(verified?.deniedTools, ["devspace_"]);
+    // Deny entries must be exact names or trailing-underscore prefixes,
+    // unique, and never combined with an allowlist.
+    for (const deniedTools of [[], ["devspace_", "devspace_"], ["*"], ["proxy/config"]]) {
+      await assert.rejects(issuePat(path, {
+        label: "bad", days: 30, audience, allowedTools: [], deniedTools,
+      }));
+    }
+    await assert.rejects(issuePat(path, {
+      label: "bad", days: 30, audience,
+      allowedTools: ["safe_tool"], deniedTools: ["devspace_"],
+    }));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("new issuance reclaims revoked probe credentials but keeps active PATs", async () => {
   const dir = await mkdtemp(join(tmpdir(), "lomway-pat-"));
   const path = patStorePath(dir);

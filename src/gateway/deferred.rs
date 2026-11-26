@@ -282,6 +282,17 @@ async fn current_tools(proxy: &McpProxy) -> Result<Vec<ToolDefinition>, tower_mc
     }
 }
 
+/// Every tool name in the aggregated catalog. The auth layer uses this to
+/// compute a deny-mode caller's effective allowlist (all tools minus the
+/// denied ones) for capability search. A failed read yields an empty list,
+/// which fails closed: the injected allowlist then hides everything.
+pub(super) async fn current_tool_names(proxy: &McpProxy) -> Vec<String> {
+    current_tools(proxy)
+        .await
+        .map(|tools| tools.into_iter().map(|tool| tool.name).collect())
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SearchInput {
     /// Natural-language description of the capability or action needed, in

@@ -20,12 +20,18 @@ async function main(): Promise<void> {
       const audience = option(args, "--audience") ?? "https://mcp.maiteneru.com/mcp";
       const tools = option(args, "--tools")?.split(",").filter(Boolean) ?? [];
       const allTools = args.includes("--all-tools");
+      const deniedTools = option(args, "--denied-tools")?.split(",").filter(Boolean);
       if (!label) throw new Error("--label is required");
       if (allTools && option(args, "--tools") !== undefined) {
         throw new Error("--all-tools cannot be combined with --tools");
       }
+      if (deniedTools !== undefined && (allTools || option(args, "--tools") !== undefined)) {
+        throw new Error("--denied-tools cannot be combined with --tools or --all-tools");
+      }
       const { token, record } = await issuePat(path, {
-        label, days, audience, allowedTools: allTools ? ["*"] : tools,
+        label, days, audience,
+        allowedTools: deniedTools !== undefined ? [] : allTools ? ["*"] : tools,
+        ...(deniedTools !== undefined ? { deniedTools } : {}),
       });
       // stdout is deliberately secret-bearing for use by a local clipboard wrapper.
       process.stdout.write(JSON.stringify({ token, ...record }) + "\n");
@@ -42,7 +48,7 @@ async function main(): Promise<void> {
       break;
     }
     default:
-      throw new Error("usage: pat-cli [issue --label NAME --days 30 (--tools tool1,tool2 | --all-tools) | list | revoke --id ID]");
+      throw new Error("usage: pat-cli [issue --label NAME --days 30 (--tools tool1,tool2 | --all-tools | --denied-tools name1,prefix_) | list | revoke --id ID]");
   }
 }
 

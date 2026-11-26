@@ -154,6 +154,8 @@ export function createLomwaySidecar(config: SidecarConfig): {
           token_type: "Bearer",
           pat: true,
           allowed_tools: pat.allowedTools,
+          denied_tools: pat.deniedTools ?? [],
+          expose_skills: false,
         } : { active: false }));
         return;
       }
@@ -201,6 +203,8 @@ export function createLomwaySidecar(config: SidecarConfig): {
           token_type: token.tokenType,
           oauth_unrestricted_legacy: clientPolicy.unrestrictedLegacy,
           allowed_tools: clientPolicy.allowedTools,
+          denied_tools: [],
+          expose_skills: clientPolicy.exposeSkills,
         }),
       );
       return;

@@ -32,18 +32,22 @@ pub fn gateway_router(proxy: Proxy) -> Router {
         .application_extension::<MonitorHandle>()
         .map(|monitor| (*monitor).clone())
         .unwrap_or_else(|| MonitorHandle::snapshot_for_proxy(proxy.mcp_proxy().clone()));
-    gateway_router_with_monitor_and_oauth(proxy, None, monitor)
+    gateway_router_with_monitor_and_oauth(proxy, None, monitor, None)
 }
 
 pub fn gateway_router_with_monitor(proxy: Proxy, monitor: MonitorHandle) -> Router {
-    gateway_router_with_monitor_and_oauth(proxy, None, monitor)
+    gateway_router_with_monitor_and_oauth(proxy, None, monitor, None)
 }
 
 pub(crate) fn gateway_router_with_monitor_and_oauth(
     proxy: Proxy,
     oauth: Option<NorthboundOAuthConfig>,
     monitor: MonitorHandle,
+    no_skills_instructions: Option<String>,
 ) -> Router {
+    // The auth layer reads the aggregated catalog from this handle to
+    // compute deny-mode callers' effective search allowlist.
+    let catalog_proxy = proxy.mcp_proxy().clone();
     let (upstream, _sessions) = proxy.into_router();
     // Discovery is behind OAuth: authentication and per-client policy run first.
     let upstream = upstream.layer(middleware::from_fn(
@@ -51,7 +55,14 @@ pub(crate) fn gateway_router_with_monitor_and_oauth(
     ));
     let upstream = upstream.layer(middleware::from_fn(block_upstream_admin));
     let (upstream, metadata) = match oauth {
-        Some(oauth) => crate::gateway::auth::protect_mcp_router(upstream, oauth),
+        Some(oauth) => crate::gateway::auth::protect_mcp_router_with_hooks(
+            upstream,
+            oauth,
+            crate::gateway::auth::CallerPolicyHooks {
+                no_skills_instructions,
+                catalog_proxy: Some(catalog_proxy),
+            },
+        ),
         None => (upstream, Router::new()),
     };
     Router::new()
