@@ -138,10 +138,20 @@ async fn require_oauth(State(state): State<OAuthState>, request: Request, next: 
         Ok(response) if response.status().is_success() => {
             match response.json::<IntrospectionResponse>().await {
                 Ok(response) => response,
-                Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                Err(error) => {
+                    tracing::warn!(error = %error.without_url(), "OAuth introspection returned an unreadable response; refusing request");
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
             }
         }
-        _ => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Ok(response) => {
+            tracing::warn!(status = %response.status(), "OAuth introspection rejected the request; refusing request");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        Err(error) => {
+            tracing::warn!(error = %error.without_url(), "OAuth introspection is unreachable; refusing request");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
     };
 
     if !token_is_authorized(&state, &introspection) {
@@ -1018,6 +1028,66 @@ mod tests {
                 .expect("challenge text"),
             "Bearer resource_metadata=\"https://lomway.example/.well-known/oauth-protected-resource/mcp\", scope=\"devspace\", error=\"insufficient_scope\""
         );
+    }
+
+    #[tokio::test]
+    async fn introspection_failures_fail_closed_with_503() {
+        let app = Router::new()
+            .route(
+                "/error",
+                post(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+            )
+            .route("/garbage", post(|| async { "not json" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind introspection");
+        let broken = listener.local_addr().expect("introspection addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve introspection");
+        });
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind closed port");
+        let unreachable = closed.local_addr().expect("closed addr");
+        drop(closed);
+
+        let client = reqwest::Client::new();
+        for introspection_url in [
+            format!("http://{broken}/error"),
+            format!("http://{broken}/garbage"),
+            format!("http://{unreachable}/oauth/introspect"),
+        ] {
+            let config = NorthboundOAuthConfig {
+                resource_url: "https://lomway.example/mcp".to_string(),
+                introspection_url: introspection_url.clone(),
+                required_scope: "devspace".to_string(),
+            };
+            let protected = Router::new().fallback(|| async { StatusCode::OK });
+            let (protected, _) = protect_mcp_router(protected, config);
+            let app = Router::new().nest("/mcp", protected);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind protected app");
+            let addr = listener.local_addr().expect("protected addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .await
+                    .expect("serve protected app");
+            });
+            let response = client
+                .post(format!("http://{addr}/mcp"))
+                .bearer_auth("valid")
+                .send()
+                .await
+                .expect("protected request");
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "{introspection_url}"
+            );
+        }
     }
 
     #[tokio::test]

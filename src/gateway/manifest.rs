@@ -96,12 +96,24 @@ impl ManifestStore {
         let mut backends = match std::fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<ManifestFile>(&bytes) {
                 Ok(file) if file.schema_version == MANIFEST_SCHEMA_VERSION => file.backends,
-                Ok(_) | Err(_) => {
-                    tracing::warn!("ignoring unreadable deferred tool manifest cache");
+                Ok(file) => {
+                    tracing::warn!(
+                        schema_version = file.schema_version,
+                        expected = MANIFEST_SCHEMA_VERSION,
+                        "ignoring deferred tool manifest cache with a different schema version"
+                    );
+                    BTreeMap::new()
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "ignoring unreadable deferred tool manifest cache");
                     BTreeMap::new()
                 }
             },
-            Err(_) => BTreeMap::new(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(error) => {
+                tracing::warn!(%error, "could not read deferred tool manifest cache; starting empty");
+                BTreeMap::new()
+            }
         };
         backends.retain(|backend, manifest| {
             let current = fingerprints.get(backend) == Some(&manifest.endpoint_sha256);
