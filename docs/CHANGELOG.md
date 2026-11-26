@@ -13,6 +13,11 @@ All notable changes to Lomway are documented here. The format is based on [Keep 
 - Capability search: `lomway_search_tools` now searches direct tools, deferred tools (from a cached manifest with `manifest_seen_at`, or an `unverified` placeholder), and declared internal capabilities, ranked by upstream OSS name, English/Japanese aliases, action, and description (`capabilities/catalog.toml`, [docs/CAPABILITY_SEARCH.md](CAPABILITY_SEARCH.md)). `lomway_describe_tool` also describes direct and internal capabilities. Result `status` is `listed` (in the current `tools/list`; not a health claim), `cached`, `unverified`, or `declared`.
 - Gateway workbench ([docs/WORKBENCH.md](WORKBENCH.md)), all disabled by default: `[skills]` discovers SKILL.md files with Workbridge's scan order and rules, lists them in `initialize` instructions, and indexes them as `skill:<name>` for `lomway_search_tools`/`lomway_describe_tool`; `[actions]` adds `lomway_list_actions`, `lomway_run_action`, `lomway_action_status`, and `lomway_run_pipeline` over an operator-maintained TOML definition file that is re-read on change (no client tool reload), with JSON-Schema-subset parameter validation, dry runs, background runs, plan digests, and a Workbridge-compatible effect guard (`EFFECT_DENIED`); `[file_transfer]` adds `lomway_receive_file` (ChatGPT `openai/fileParams`) and `lomway_send_file` (embedded resource).
 
+### Changed
+
+- Startup probes now run concurrently (results still reported in configuration order), so startup and `lomway check --probe` wait for the slowest backend probe instead of the sum of all probe timeouts.
+- A failed startup probe is logged as a warning with its reason (connect, initialize, `tools/list`, or timeout), and fail-closed startup errors and the `check --probe` degraded list now show `id (reason)` instead of only the backend id.
+
 ### Security
 
 - 2026-10-23: Update `rustls-webpki` to 0.103.16 and `webpki-root-certs` to 1.0.10 to reject distrusted emSign intermediates and remove the affected trust anchor (RUSTSEC-2026-0382/0383).

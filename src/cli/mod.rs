@@ -207,7 +207,7 @@ async fn check_report(
         if !probed.unavailable.is_empty() {
             report.push_str(&format!(
                 "Degraded (optional): {}\n",
-                probed.unavailable_ids().join(", ")
+                probed.unavailable_summaries().join(", ")
             ));
         }
     } else {

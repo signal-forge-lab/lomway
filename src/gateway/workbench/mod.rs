@@ -752,7 +752,13 @@ mod tests {
             vec!["codebase-design".to_string(), "スキル".to_string()],
         );
         for query in ["既存コードの設計", "モジュール設計", "codebase design"] {
-            let found = search(&[entry.clone()], query, None, &CallerAccess::default(), 5);
+            let found = search(
+                std::slice::from_ref(&entry),
+                query,
+                None,
+                &CallerAccess::default(),
+                5,
+            );
             assert_eq!(
                 found.first().map(|item| item.name.as_str()),
                 Some("skill:codebase-design"),
