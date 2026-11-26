@@ -140,12 +140,17 @@ Preserve the XMind Workboard fail-closed behavior. Review old/new capability fin
 
 v1 does **not** hot reload. Apply configuration changes with:
 
-1. edit the local-only configuration/environment source;
-2. run `scripts/check.ps1`;
-3. restart the `Lomway` Swibo target;
-4. verify `/healthz`;
-5. run `scripts/integration-smoke.ps1`;
-6. confirm Swibo server/tunnel are READY.
+1. optionally save a baseline: `lomway catalog --config <path> --output <new.json>`;
+2. edit the local-only configuration/environment source;
+3. run `scripts/check.ps1`;
+4. optionally review the client-visible impact before restarting: `lomway catalog --config <path> --diff <baseline.json>`;
+5. restart the `Lomway` Swibo target;
+6. verify `/healthz`;
+7. run `scripts/integration-smoke.ps1`;
+8. confirm Swibo server/tunnel are READY.
+
+The same diff also surfaces backend-side tool drift (for example a changed
+description or schema after a backend upgrade) without restarting Lomway.
 
 ## 7. Rollback
 

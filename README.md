@@ -34,7 +34,7 @@ Google Drive deliberately stays outside the gateway so its native connector beha
 - Disable hot reload in v1 because project-specific safety policy is validated only at startup.
 - Disable automatic retry, hedging, fan-out/failover and tool-call caching. A timed-out mutation must never be transparently replayed.
 - Keep backend process lifecycle outside the gateway. Swibo owns start/stop/restart; the gateway only connects to loopback HTTP MCP endpoints.
-- Implement every core mode in the binary itself: `serve`, `check` (`--probe`), `list-backends`, `migrate`, and `version`, with actionable exit codes and no PowerShell requirement.
+- Implement every core mode in the binary itself: `serve`, `check` (`--probe`), `list-backends`, `migrate`, `catalog`, and `version`, with actionable exit codes and no PowerShell requirement.
 - The gateway itself needs no secret. Secure Tunnel credentials are read process-locally from the external canonical SOPS store and are never written into this repository.
 
 ## Validated deployment regression

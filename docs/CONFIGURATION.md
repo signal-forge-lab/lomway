@@ -189,7 +189,38 @@ The binary implements every core mode itself (exit codes: `0` success, `1` failu
 | `lomway check --config <path> [--probe]` | non-blocking validation (parse, policy, config-level collision preflight, no network I/O); `--probe` contacts each backend exactly once and verifies final tool names |
 | `lomway list-backends --config <path>` | print the configured backends without contacting them |
 | `lomway migrate --config <path> --output <path>` | convert a legacy configuration to the public schema as a new file (never overwrites; see [MIGRATION.md](MIGRATION.md)) |
+| `lomway catalog --config <path> [--format text\|json\|names] [--backend <id>]... [--output <new.json>] [--diff <old.json> [--fail-on-change]]` | read-only final tool catalog: one `initialize` + `tools/list` per backend (never retried, never `tools/call`), split into direct and deferred counts; optional JSON snapshot and snapshot diff (see 4a) |
 | `lomway version` | print version, MCP protocol, and config schema information |
+
+### 4a. Tool catalog snapshots (`lomway catalog`)
+
+`catalog` answers "what will the client see after the next restart?" without
+starting the gateway:
+
+```powershell
+lomway catalog --config <path>                              # per-backend table
+lomway catalog --config <path> --output catalog.before.json # save a baseline
+lomway catalog --config <path> --diff catalog.before.json   # compare later
+lomway catalog --config <path> --diff catalog.before.json --fail-on-change  # exit 1 on change
+(lomway catalog --config <path> --backend chrome --format names) -join ','  # PAT -Tools list
+```
+
+- Unavailable backends, required or optional, are reported as `unavailable`
+  instead of aborting; a required one is flagged because `serve` would fail
+  closed. A final-name collision is still an error.
+- Each tool carries a SHA-256 fingerprint of its client-relevant definition
+  (description, title, input/output schema, annotations, execution; key order
+  ignored). A changed fingerprint means the tool's contract changed.
+- The diff reports added/removed backends, exposure changes, and added,
+  removed, and changed tools. Tools of a backend that is unavailable in
+  either snapshot are listed as "not compared" instead of "removed", so an
+  outage is never mistaken for a catalog change.
+- Snapshots contain only ids, prefixes, exposure, `required`, availability,
+  final and upstream tool names, and fingerprints: no URLs, credentials,
+  descriptions, or schemas. They are still machine-local inventory; keep them
+  out of the repository. `--output` never overwrites an existing file.
+- With `--format json` or `names`, the diff report goes to stderr so stdout
+  stays machine-readable.
 
 ## 5. Legacy deployment reference
 

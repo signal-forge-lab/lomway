@@ -157,7 +157,26 @@ deferred backendは10分間未使用になると背景監視を停止します
 | `lomway check --config <path> [--probe]` | 非ブロッキング検証（parse・policy・configレベルcollision preflight・ネットワークI/Oなし）。`--probe` は各backendに正確に1回接触し最終tool名を検証 |
 | `lomway list-backends --config <path>` | backendへ接触せず構成を一覧表示 |
 | `lomway migrate --config <path> --output <path>` | legacy構成を公開schemaへ新ファイルとして変換（上書きなし。[MIGRATION.ja.md](MIGRATION.ja.md) を参照） |
+| `lomway catalog --config <path> [--format text\|json\|names] [--backend <id>]... [--output <new.json>] [--diff <old.json> [--fail-on-change]]` | 読み取り専用の最終tool catalog。backendごとに `initialize` + `tools/list` を1回だけ実行（retryなし、`tools/call` なし）し、direct/deferred件数を表示。JSON snapshot保存とsnapshot差分に対応（4aを参照） |
 | `lomway version` | バージョン・MCP protocol・構成schema情報を表示 |
+
+### 4a. Tool catalog snapshot（`lomway catalog`）
+
+`catalog` はGatewayを起動せずに「次のrestart後にclientから何が見えるか」を確認します:
+
+```powershell
+lomway catalog --config <path>                              # backend別の表
+lomway catalog --config <path> --output catalog.before.json # baselineを保存
+lomway catalog --config <path> --diff catalog.before.json   # 後で比較
+lomway catalog --config <path> --diff catalog.before.json --fail-on-change  # 変更があればexit 1
+(lomway catalog --config <path> --backend chrome --format names) -join ','  # PATの -Tools 用
+```
+
+- 到達できないbackendはrequired/optionalを問わず `unavailable` として報告し、処理を中断しません。requiredの場合は `serve` がfail closedになる旨を表示します。最終tool名のcollisionは従来どおりエラーです。
+- 各toolにはclientが依存する定義（description・title・input/output schema・annotations・execution。key順は無視）のSHA-256 fingerprintが付きます。fingerprintの変化はtool契約の変化を意味します。
+- 差分はbackendの追加/削除、exposure変更、toolの追加/削除/変更を報告します。どちらかのsnapshotで `unavailable` だったbackendのtoolは「削除」ではなく「not compared」として扱うため、停止がcatalog変更と誤認されません。
+- snapshotに含まれるのはid・prefix・exposure・`required`・可用性・最終/upstream tool名・fingerprintのみで、URL・credential・description・schemaは含みません。それでもマシン固有のinventoryなのでリポジトリには置かないでください。`--output` は既存ファイルを上書きしません。
+- `--format json` / `names` のとき、差分レポートはstderrへ出力しstdoutを機械可読に保ちます。
 
 ## 5. legacyデプロイリファレンス
 

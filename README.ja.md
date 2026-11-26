@@ -34,7 +34,7 @@ Google Driveは専用connectorの特性を維持するためGatewayへ入れま�
 - project固有policyを起動時にのみ検証するため、v1ではhot reloadを無効化します。
 - automatic retry / hedging / fan-out / failover / tool-call cacheを無効化します。timeoutしたmutationを自動再送しません。
 - backend process lifecycleはGatewayへ持ち込みません。Start/Stop/RestartはSwiboが担当し、Gatewayはloopback HTTP MCPへ接続するだけです。
-- coreモードはすべてバイナリ単体で実装します: `serve` / `check`（`--probe`）/ `list-backends` / `migrate` / `version`。実行可能なexit codeを持ち、PowerShellは不要です。
+- coreモードはすべてバイナリ単体で実装します: `serve` / `check`（`--probe`）/ `list-backends` / `migrate` / `catalog` / `version`。実行可能なexit codeを持ち、PowerShellは不要です。
 - Gateway本体にはsecret不要です。Secure Tunnel credentialは外部の正本SOPS storeからprocess内だけへ読み込み、repositoryには保存しません。
 
 ## 実機regression検証済み状態
