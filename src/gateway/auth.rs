@@ -72,6 +72,7 @@ struct IntrospectionResponse {
     denied_tools: Vec<String>,
 }
 
+#[cfg(test)]
 pub(super) fn protect_mcp_router(
     router: Router,
     config: NorthboundOAuthConfig,
@@ -670,10 +671,7 @@ async fn replace_instructions(response: Response, text: &str) -> Response {
 }
 
 async fn filter_pat_tools_list(response: Response, allowed: &[String]) -> Response {
-    rewrite_tools_list(response, |message| {
-        restrict_tool_catalog(message, allowed)
-    })
-    .await
+    rewrite_tools_list(response, |message| restrict_tool_catalog(message, allowed)).await
 }
 
 async fn filter_denied_tools_list(response: Response, denied: &[String]) -> Response {
@@ -1451,17 +1449,13 @@ mod tests {
     #[tokio::test]
     async fn deny_mode_pat_hides_only_the_denied_backend() {
         use tower_mcp::{
-            CallToolResult, McpRouter, ToolBuilder, client::ChannelTransport,
-            schemars::JsonSchema,
+            CallToolResult, McpRouter, ToolBuilder, client::ChannelTransport, schemars::JsonSchema,
         };
 
         #[derive(Debug, serde::Deserialize, JsonSchema)]
         struct Empty {}
 
-        fn backend_router(
-            name: &'static str,
-            tools: &[(&'static str, &'static str)],
-        ) -> McpRouter {
+        fn backend_router(name: &'static str, tools: &[(&'static str, &'static str)]) -> McpRouter {
             let mut router = McpRouter::new().server_info(name, "1.0.0");
             for (tool, description) in tools {
                 router = router.tool(
@@ -1513,7 +1507,10 @@ mod tests {
                     "instructions":"deployment secret text"}}),
                 _ => request,
             };
-            ([(header::CONTENT_TYPE, "application/json")], payload.to_string())
+            (
+                [(header::CONTENT_TYPE, "application/json")],
+                payload.to_string(),
+            )
         });
         let hooks = CallerPolicyHooks {
             no_skills_instructions: None,
@@ -1570,8 +1567,10 @@ mod tests {
             let response = client
                 .post(&base)
                 .bearer_auth("pat-deny")
-                .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                    "name":"lomway_call_tool","arguments":{"name":target,"arguments":{}}}}))
+                .json(
+                    &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                    "name":"lomway_call_tool","arguments":{"name":target,"arguments":{}}}}),
+                )
                 .send()
                 .await
                 .expect("deferred call");
@@ -1596,9 +1595,11 @@ mod tests {
         let search: Value = client
             .post(&base)
             .bearer_auth("pat-deny")
-            .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            .json(
+                &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
                 "name":"lomway_search_tools",
-                "arguments":{"query":"recall","_lomway_allowed_tools":["*"]}}}))
+                "arguments":{"query":"recall","_lomway_allowed_tools":["*"]}}}),
+            )
             .send()
             .await
             .expect("search")
