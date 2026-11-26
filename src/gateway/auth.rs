@@ -749,13 +749,14 @@ async fn rewrite_tools_list(
 }
 
 fn bearer_token(request: &Request) -> Option<&str> {
-    request
+    let value = request
         .headers()
         .get(header::AUTHORIZATION)?
         .to_str()
-        .ok()?
-        .strip_prefix("Bearer ")
-        .filter(|token| !token.is_empty())
+        .ok()?;
+    // RFC 9110 §11.1: the authentication scheme is case-insensitive.
+    let (scheme, token) = value.split_once(' ')?;
+    (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then_some(token)
 }
 
 fn token_is_authorized(state: &OAuthState, token: &IntrospectionResponse) -> bool {
@@ -931,6 +932,23 @@ mod tests {
                 .expect("serve introspection");
         });
         addr
+    }
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive() {
+        let token = |value: &str| {
+            let request = Request::builder()
+                .header(header::AUTHORIZATION, value)
+                .body(Body::empty())
+                .expect("request");
+            bearer_token(&request).map(str::to_owned)
+        };
+        for value in ["Bearer abc", "bearer abc", "BEARER abc"] {
+            assert_eq!(token(value).as_deref(), Some("abc"), "{value}");
+        }
+        for value in ["Bearer ", "Bearer", "Basic abc", "Bearerabc", "Token abc"] {
+            assert_eq!(token(value), None, "{value}");
+        }
     }
 
     #[tokio::test]
