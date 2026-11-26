@@ -7,6 +7,9 @@
 //! lomway check         --config <path> [--probe]
 //! lomway list-backends --config <path>
 //! lomway migrate       --config <path> --output <path>
+//! lomway catalog       --config <path> [--format text|json|names]
+//!                      [--backend <id>]... [--output <path>]
+//!                      [--diff <snapshot>] [--fail-on-change]
 //! lomway version
 //! ```
 //!
@@ -16,7 +19,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// `lomway` command line.
 #[derive(Debug, Parser)]
@@ -73,8 +76,46 @@ pub enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Print the final tool catalog and optionally diff it against a
+    /// saved snapshot.
+    ///
+    /// Read-only: each backend is probed exactly once (`initialize` +
+    /// `tools/list`, never retried, never `tools/call`). Unavailable
+    /// backends are reported instead of aborting. Snapshots contain no
+    /// URLs, credentials, descriptions, or schemas.
+    Catalog {
+        /// Configuration file.
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+        /// Output format on stdout.
+        #[arg(long, value_enum, default_value_t = CatalogFormat::Text)]
+        format: CatalogFormat,
+        /// Restrict to these backend ids (repeatable).
+        #[arg(long = "backend", value_name = "ID")]
+        backends: Vec<String>,
+        /// Also save the catalog as a JSON snapshot; must not exist.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Compare the current catalog against this saved snapshot.
+        #[arg(long, value_name = "SNAPSHOT")]
+        diff: Option<PathBuf>,
+        /// Exit with status 1 when `--diff` finds any change.
+        #[arg(long, requires = "diff")]
+        fail_on_change: bool,
+    },
     /// Print version and schema information.
     Version,
+}
+
+/// `catalog` stdout formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CatalogFormat {
+    /// Per-backend summary table.
+    Text,
+    /// The snapshot JSON (same content as `--output`).
+    Json,
+    /// One final tool name per line (for tool allowlists).
+    Names,
 }
 
 #[cfg(test)]
@@ -127,6 +168,51 @@ mod tests {
         };
         assert_eq!(config, None);
         assert!(!probe, "--probe is the opt-in doctor diagnostic");
+    }
+
+    #[test]
+    fn parses_catalog_options() {
+        let cli = parse(&[
+            "catalog",
+            "--format",
+            "names",
+            "--backend",
+            "a",
+            "--backend",
+            "b",
+            "--diff",
+            "old.json",
+            "--fail-on-change",
+        ])
+        .expect("catalog");
+        let Command::Catalog {
+            format,
+            backends,
+            diff,
+            fail_on_change,
+            output,
+            ..
+        } = cli.command
+        else {
+            panic!("expected Catalog, got {:?}", cli.command);
+        };
+        assert_eq!(format, CatalogFormat::Names);
+        assert_eq!(backends, ["a", "b"]);
+        assert_eq!(diff, Some(PathBuf::from("old.json")));
+        assert!(fail_on_change);
+        assert_eq!(output, None);
+
+        let cli = parse(&["catalog"]).expect("catalog defaults");
+        let Command::Catalog { format, .. } = cli.command else {
+            panic!("expected Catalog");
+        };
+        assert_eq!(format, CatalogFormat::Text);
+    }
+
+    #[test]
+    fn fail_on_change_requires_diff() {
+        let error = parse(&["catalog", "--fail-on-change"]).expect_err("needs --diff");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]

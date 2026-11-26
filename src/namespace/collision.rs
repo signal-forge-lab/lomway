@@ -75,6 +75,7 @@ mod tests {
     fn tool(name: &str) -> crate::backend::probe::UpstreamTool {
         crate::backend::probe::UpstreamTool {
             name: name.to_string(),
+            fingerprint: String::new(),
         }
     }
 

@@ -135,12 +135,16 @@ XMind Workboardのfail-closed設計を維持します。旧/新fingerprintとsch
 
 v1はhot reloadしません。
 
-1. local-only config/environment sourceを変更。
-2. `scripts/check.ps1`。
-3. Swiboの `Lomway` targetをrestart。
-4. `/healthz` 確認。
-5. `scripts/integration-smoke.ps1`。
-6. Swibo server/tunnel READYを確認。
+1. 任意: baselineを保存 `lomway catalog --config <path> --output <new.json>`。
+2. local-only config/environment sourceを変更。
+3. `scripts/check.ps1`。
+4. 任意: restart前にclientから見える影響を確認 `lomway catalog --config <path> --diff <baseline.json>`。
+5. Swiboの `Lomway` targetをrestart。
+6. `/healthz` 確認。
+7. `scripts/integration-smoke.ps1`。
+8. Swibo server/tunnel READYを確認。
+
+同じ差分で、backend側のtool drift（backend更新後のdescription/schema変更など）もLomwayをrestartせずに確認できます。
 
 ## 7. Rollback
 

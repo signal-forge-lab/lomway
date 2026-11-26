@@ -6,6 +6,7 @@ All notable changes to Lomway are documented here. The format is based on [Keep 
 
 ### Added
 
+- `lomway catalog`: read-only final tool catalog (one `initialize` + `tools/list` per backend, never retried, never `tools/call`) with direct/deferred counts, `--format names` for tool allowlists, JSON snapshots that contain no URLs or credentials, and `--diff` / `--fail-on-change` to review added, removed, and changed (fingerprinted) tools before a restart. Unavailable backends are reported as "not compared" rather than removed.
 - Hybrid per-backend tool exposure: frequent backends stay native/direct while low-frequency backends can use `exposure = "deferred"`.
 - Three Lomway-owned safe meta-tools for deferred capabilities: `lomway_search_tools`, `lomway_describe_tool`, and `lomway_call_tool`.
 - Backend bearer tokens by reference: `bearer_token_env = "LOMWAY_BACKEND_..."` sends `Authorization: Bearer <token>` to a loopback backend (for example Coding Tools MCP with `--auth-token`) on the startup probe, proxied requests, reconnects, and deferred activations. `scripts/provision-backend-token.ps1` stores a generated token only in SOPS, and `scripts/start.ps1` / `scripts/deploy-gateway-isolated.ps1` supply referenced variables to the gateway process only.

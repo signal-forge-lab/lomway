@@ -11,17 +11,20 @@
 //!   them;
 //! * `migrate` — convert a legacy deployment configuration to the public
 //!   schema as a new file (never overwrites, never retries);
+//! * `catalog` — read-only final tool catalog (one probe per backend, never
+//!   retried) with JSON snapshots and snapshot diffs;
 //! * `version` — print version and schema information.
 //!
 //! Exit codes are actionable: `0` success, `1` failure, `2` usage error.
 
 pub mod args;
+pub mod catalog;
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
-pub use args::{Cli, Command};
+pub use args::{CatalogFormat, Cli, Command};
 
 use crate::backend::registry::BackendRegistry;
 use crate::config::load::{
@@ -77,6 +80,56 @@ pub async fn run(command: Command) -> Result<()> {
             println!(
                 "Migrated backends stay optional (required = false) to preserve degrade-on-outage behavior."
             );
+            Ok(())
+        }
+        Command::Catalog {
+            config,
+            format,
+            backends,
+            output,
+            diff,
+            fail_on_change,
+        } => {
+            let path = resolve_config_path(config.as_deref())?;
+            if let Some(output) = &output {
+                anyhow::ensure!(
+                    !output.exists(),
+                    "refusing to overwrite an existing catalog snapshot: {}",
+                    output.display()
+                );
+            }
+            let config = load_gateway_config(&path)?;
+            let mut snapshot = catalog::collect(&config).await?;
+            snapshot.retain_backends(&backends)?;
+            match format {
+                CatalogFormat::Text => {
+                    println!("Catalog for {}", path.display());
+                    print!("{}", catalog::render_text(&snapshot));
+                }
+                CatalogFormat::Json => println!("{}", serde_json::to_string_pretty(&snapshot)?),
+                CatalogFormat::Names => print!("{}", catalog::render_names(&snapshot)),
+            }
+            if let Some(output) = output {
+                catalog::write_snapshot(&snapshot, &output)?;
+                eprintln!("Catalog snapshot written: {}", output.display());
+            }
+            if let Some(baseline_path) = diff {
+                let mut baseline = catalog::CatalogSnapshot::load(&baseline_path)?;
+                if !backends.is_empty() {
+                    baseline
+                        .backends
+                        .retain(|backend| backends.contains(&backend.id));
+                }
+                let changes = catalog::diff(&baseline, &snapshot);
+                let report = catalog::render_diff(&changes, &baseline_path);
+                // Keep stdout machine-readable for json/names output.
+                if format == CatalogFormat::Text {
+                    print!("{report}");
+                } else {
+                    eprint!("{report}");
+                }
+                catalog::enforce_no_change(&changes, fail_on_change)?;
+            }
             Ok(())
         }
     }
