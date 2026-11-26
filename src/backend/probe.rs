@@ -4,7 +4,8 @@
 //! `initialize` + `tools/list` round trip. At least one backend must be
 //! configured and healthy (zero configured backends also fail closed), and
 //! probes never retry: a failed or timed-out probe is a startup outcome,
-//! not a transient error to be masked.
+//! not a transient error to be masked. The reason for every failed probe is
+//! kept, logged, and included in fail-closed startup errors.
 
 use std::time::Duration;
 
@@ -38,6 +39,15 @@ pub struct UnavailableBackend {
     pub id: String,
     /// Whether the entry was marked required.
     pub required: bool,
+    /// Why the probe failed (connect, initialize, tools/list, or timeout).
+    pub reason: String,
+}
+
+impl UnavailableBackend {
+    /// `id (reason)`, as used in startup errors and the doctor report.
+    pub fn summary(&self) -> String {
+        format!("{} ({})", self.id, self.reason)
+    }
 }
 
 /// The complete startup probe outcome.
@@ -50,11 +60,11 @@ pub struct ProbeReport {
 }
 
 impl ProbeReport {
-    /// Ids of unavailable backends.
-    pub fn unavailable_ids(&self) -> Vec<&str> {
+    /// `id (reason)` for every unavailable backend, in configuration order.
+    pub fn unavailable_summaries(&self) -> Vec<String> {
         self.unavailable
             .iter()
-            .map(|backend| backend.id.as_str())
+            .map(UnavailableBackend::summary)
             .collect()
     }
 }
@@ -67,9 +77,10 @@ impl ProbeReport {
 /// * optional backends may be down and are reported as degraded;
 /// * if every configured backend is unavailable, startup fails by default.
 ///
-/// Backends are probed one at a time in registry (configuration) order, so
-/// the report and every error message are deterministic for a given
-/// configuration and set of reachable backends.
+/// Backends are probed concurrently, so startup waits for the slowest probe
+/// rather than the sum of all probes. Results are collected in registry
+/// (configuration) order, so the report and every error message are
+/// deterministic for a given configuration and set of reachable backends.
 pub async fn probe_registry(registry: &BackendRegistry) -> Result<ProbeReport> {
     if registry.is_empty() {
         bail!(
@@ -77,26 +88,49 @@ pub async fn probe_registry(registry: &BackendRegistry) -> Result<ProbeReport> {
         );
     }
 
+    let probes: Vec<_> = registry
+        .iter()
+        .map(|descriptor| {
+            let descriptor = descriptor.clone();
+            tokio::spawn(async move {
+                let outcome = probe_backend(&descriptor).await;
+                (descriptor, outcome)
+            })
+        })
+        .collect();
+
     let mut healthy = Vec::new();
     let mut unavailable = Vec::new();
-
-    for descriptor in registry.iter() {
-        match probe_backend(descriptor).await {
-            Ok(tools) => healthy.push(ProbedBackend {
-                descriptor: descriptor.clone(),
-                tools,
-            }),
-            Err(_error) => unavailable.push(UnavailableBackend {
-                id: descriptor.id().to_string(),
-                required: descriptor.required(),
-            }),
+    for (descriptor, probe) in registry.iter().zip(probes) {
+        let outcome = probe.await.unwrap_or_else(|error| {
+            (
+                descriptor.clone(),
+                Err(anyhow::anyhow!("startup probe task failed: {error}")),
+            )
+        });
+        match outcome {
+            (descriptor, Ok(tools)) => healthy.push(ProbedBackend { descriptor, tools }),
+            (descriptor, Err(error)) => {
+                let reason = format!("{error:#}");
+                tracing::warn!(
+                    backend = %descriptor.id(),
+                    required = descriptor.required(),
+                    error = %reason,
+                    "startup probe failed"
+                );
+                unavailable.push(UnavailableBackend {
+                    id: descriptor.id().to_string(),
+                    required: descriptor.required(),
+                    reason,
+                });
+            }
         }
     }
 
-    let missing_required: Vec<&str> = unavailable
+    let missing_required: Vec<String> = unavailable
         .iter()
         .filter(|backend| backend.required)
-        .map(|backend| backend.id.as_str())
+        .map(UnavailableBackend::summary)
         .collect();
     if !missing_required.is_empty() {
         bail!(
@@ -109,7 +143,7 @@ pub async fn probe_registry(registry: &BackendRegistry) -> Result<ProbeReport> {
             "all backends are unavailable at startup: {}; gateway fails closed by default",
             unavailable
                 .iter()
-                .map(|backend| backend.id.as_str())
+                .map(UnavailableBackend::summary)
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -165,14 +199,27 @@ fn probe_timeout(descriptor: &BackendDescriptor) -> Duration {
 mod tests {
     use super::*;
     use crate::config::model::BackendEntry;
+    use tower_mcp::{CallToolResult, HttpTransport, McpRouter, ToolBuilder};
+
+    #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+    struct Empty {}
 
     fn descriptor(id: &str, url: &str, required: bool) -> BackendDescriptor {
+        descriptor_with_timeout(id, url, required, 2)
+    }
+
+    fn descriptor_with_timeout(
+        id: &str,
+        url: &str,
+        required: bool,
+        timeout_seconds: u64,
+    ) -> BackendDescriptor {
         BackendDescriptor::try_from_entry(&BackendEntry {
             id: id.to_string(),
             prefix: format!("{id}_"),
             url: url.to_string(),
             required,
-            timeout_seconds: 2,
+            timeout_seconds,
             exposure: Default::default(),
             bearer_token_env: None,
             bearer_token: None,
@@ -184,13 +231,56 @@ mod tests {
         BackendRegistry::from_descriptors(backends)
     }
 
-    // tokio::test with a multi-thread runtime is unnecessary; the probe only
-    // needs one reactor for timers and I/O.
+    /// A loopback port with nothing listening. Linux/macOS refuse at once;
+    /// Windows retries the SYN, so the probe may time out instead.
+    async fn refused_url() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        drop(listener);
+        format!("http://{addr}/mcp")
+    }
+
+    /// Accepts TCP connections but never answers, so the probe times out.
+    async fn hanging_url() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        format!("http://{addr}/mcp")
+    }
+
+    async fn healthy_url() -> String {
+        let router = McpRouter::new().server_info("probe-mock", "1.0.0").tool(
+            ToolBuilder::new("status")
+                .description("Return mock status")
+                .handler(|_: Empty| async move { Ok(CallToolResult::text("ok")) })
+                .build(),
+        );
+        let app = HttpTransport::new(router).into_router_at("/mcp");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        format!("http://{addr}/mcp")
+    }
+
     #[tokio::test]
-    async fn required_backend_down_fails_startup() {
+    async fn required_backend_down_fails_startup_with_reason() {
+        let url = refused_url().await;
         let registry = registry(vec![
-            descriptor("dead_required", "http://127.0.0.1:9/mcp", true),
-            descriptor("offline_optional", "http://127.0.0.1:9/mcp", false),
+            descriptor("dead_required", &url, true),
+            descriptor("offline_optional", &url, false),
         ]);
         let error = probe_registry(&registry)
             .await
@@ -200,29 +290,82 @@ mod tests {
             message.contains("required backend(s) unavailable"),
             "{message}"
         );
-        assert!(message.contains("dead_required"), "{message}");
+        assert!(message.contains("dead_required ("), "{message}");
+        assert!(!message.contains("dead_required ()"), "{message}");
+        assert!(!message.contains("offline_optional"), "{message}");
     }
 
     #[tokio::test]
-    async fn optional_backend_down_degrades_but_is_reported() {
-        // Use a live server on an ephemeral port as the healthy backend.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        drop(listener); // placeholder backend: never accepts; probe fails fast on refused connect
-
+    async fn all_backends_down_fails_startup_with_reasons() {
         let registry = registry(vec![descriptor(
             "optional_down",
-            &format!("http://{addr}/mcp"),
+            &refused_url().await,
             false,
         )]);
         let error = probe_registry(&registry)
             .await
             .expect_err("all-unavailable must fail by default");
+        let message = error.to_string();
         assert!(
-            error.to_string().contains("all backends are unavailable"),
-            "{error:#}"
+            message.contains("all backends are unavailable"),
+            "{message}"
+        );
+        assert!(message.contains("optional_down ("), "{message}");
+        assert!(!message.contains("optional_down ()"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn optional_backend_down_degrades_and_keeps_configuration_order() {
+        let registry = registry(vec![
+            descriptor("first_down", &refused_url().await, false),
+            descriptor("healthy", &healthy_url().await, true),
+            descriptor("second_down", &refused_url().await, false),
+        ]);
+        let report = probe_registry(&registry)
+            .await
+            .expect("optional outages degrade startup");
+        let healthy: Vec<_> = report
+            .healthy
+            .iter()
+            .map(|backend| backend.descriptor.id())
+            .collect();
+        assert_eq!(healthy, ["healthy"]);
+        assert_eq!(report.healthy[0].tools[0].name, "status");
+        let unavailable: Vec<_> = report.unavailable.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(unavailable, ["first_down", "second_down"]);
+        assert!(
+            report
+                .unavailable
+                .iter()
+                .all(|backend| !backend.reason.is_empty()),
+            "{:?}",
+            report.unavailable_summaries()
+        );
+    }
+
+    #[tokio::test]
+    async fn hanging_backends_are_probed_concurrently() {
+        let registry = registry(vec![
+            descriptor_with_timeout("hang_a", &hanging_url().await, false, 1),
+            descriptor_with_timeout("hang_b", &hanging_url().await, false, 1),
+            descriptor_with_timeout("hang_c", &hanging_url().await, false, 1),
+            descriptor("healthy", &healthy_url().await, true),
+        ]);
+        let started = std::time::Instant::now();
+        let report = probe_registry(&registry)
+            .await
+            .expect("optional outages degrade startup");
+        let elapsed = started.elapsed();
+        // Sequential probing would take at least three 1 s timeouts.
+        assert!(elapsed < Duration::from_millis(2500), "{elapsed:?}");
+        assert_eq!(report.unavailable.len(), 3);
+        assert!(
+            report
+                .unavailable
+                .iter()
+                .all(|backend| backend.reason.contains("timed out after 1s")),
+            "{:?}",
+            report.unavailable
         );
     }
 }
