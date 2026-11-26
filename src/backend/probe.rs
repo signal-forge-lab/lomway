@@ -231,7 +231,8 @@ mod tests {
         BackendRegistry::from_descriptors(backends)
     }
 
-    /// A loopback port with nothing listening: connects are refused fast.
+    /// A loopback port with nothing listening. Linux/macOS refuse at once;
+    /// Windows retries the SYN, so the probe may time out instead.
     async fn refused_url() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -290,7 +291,7 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("dead_required ("), "{message}");
-        assert!(message.contains("initialize failed"), "{message}");
+        assert!(!message.contains("dead_required ()"), "{message}");
         assert!(!message.contains("offline_optional"), "{message}");
     }
 
@@ -310,7 +311,7 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("optional_down ("), "{message}");
-        assert!(message.contains("initialize failed"), "{message}");
+        assert!(!message.contains("optional_down ()"), "{message}");
     }
 
     #[tokio::test]
@@ -332,12 +333,13 @@ mod tests {
         assert_eq!(report.healthy[0].tools[0].name, "status");
         let unavailable: Vec<_> = report.unavailable.iter().map(|b| b.id.as_str()).collect();
         assert_eq!(unavailable, ["first_down", "second_down"]);
-        let summaries = report.unavailable_summaries();
         assert!(
-            summaries
+            report
+                .unavailable
                 .iter()
-                .all(|summary| summary.contains("initialize failed")),
-            "{summaries:?}"
+                .all(|backend| !backend.reason.is_empty()),
+            "{:?}",
+            report.unavailable_summaries()
         );
     }
 
